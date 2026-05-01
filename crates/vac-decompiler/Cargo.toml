@@ -1,0 +1,11 @@
+[package]
+name = "vac-decompiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VAC decompiler: turns video frames back into a .vac AST using purely algorithmic measurement."
+
+[dependencies]
+vac-format.workspace = true
+image.workspace = true
+thiserror.workspace = true

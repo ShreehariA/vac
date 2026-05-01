@@ -1,0 +1,22 @@
+// VAC v0.1 sample: a ball traversing the canvas left → right → left.
+// This is the file we round-trip through `vac compile` and `vac decompile`.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a1a2e
+
+  let ball = ellipse(60, 160, 24, 24)
+  ball.fill = #e94560
+  ball.stroke = none
+
+  animate ball {
+    0ms    -> position(60, 160)
+    1500ms -> position(420, 160)
+    3s     -> position(60, 160)
+    easing: linear
+  }
+}

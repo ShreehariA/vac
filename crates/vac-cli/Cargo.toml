@@ -1,0 +1,15 @@
+[package]
+name = "vac-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VAC command-line tool: compile and decompile .vac files."
+
+[[bin]]
+name = "vac"
+path = "src/main.rs"
+
+[dependencies]
+vac.workspace = true
+clap.workspace = true
+anyhow.workspace = true

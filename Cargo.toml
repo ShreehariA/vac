@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vac",
+    "crates/vac-format",
+    "crates/vac-compiler",
+    "crates/vac-decompiler",
+    "crates/vac-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourname/vac"
+description = "VAC — Video As Code. A purely algorithmic compiler/decompiler between video and structured source code."
+
+[workspace.dependencies]
+# Internal crates
+vac = { path = "crates/vac", version = "0.1.0" }
+vac-format = { path = "crates/vac-format", version = "0.1.0" }
+vac-compiler = { path = "crates/vac-compiler", version = "0.1.0" }
+vac-decompiler = { path = "crates/vac-decompiler", version = "0.1.0" }
+
+# External crates (wide version reqs so cargo picks the latest compatible)
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["gif", "png"] }
+tiny-skia = "0.11"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

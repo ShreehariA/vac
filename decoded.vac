@@ -1,0 +1,18 @@
+canvas 480x320 @33fps
+
+scene main {
+  duration 2700ms
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a1a2e
+
+  let ball = ellipse(60, 160, 24, 24)
+  ball.fill = #e4445e
+  ball.stroke = none
+
+  animate ball {
+    0ms -> position(60, 160)
+    2670ms -> position(68, 160)
+    easing: linear
+  }
+}

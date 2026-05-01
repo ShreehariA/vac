@@ -1,0 +1,9 @@
+[package]
+name = "vac-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VAC source format: AST, text writer, and parser."
+
+[dependencies]
+thiserror.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "vac"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VAC — top-level facade. Pandas-style API for reading, writing, compiling, and decompiling VAC documents and videos."
+
+[dependencies]
+vac-format.workspace = true
+vac-compiler.workspace = true
+vac-decompiler.workspace = true
+thiserror.workspace = true
