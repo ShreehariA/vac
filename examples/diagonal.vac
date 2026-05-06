@@ -1,0 +1,23 @@
+// Diagonal motion fixture: ball moves top-left → bottom-right → top-left.
+// Round-tripping this exercises 1D RDP on *both* x(t) and y(t) — neither
+// axis is constant, so collinear-axis-only fixes won't pass this test.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #102030
+
+  let ball = ellipse(80, 60, 22, 22)
+  ball.fill = #ffd166
+  ball.stroke = none
+
+  animate ball {
+    0ms    -> position(80, 60)
+    1500ms -> position(400, 260)
+    3s     -> position(80, 60)
+    easing: linear
+  }
+}

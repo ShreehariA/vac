@@ -464,7 +464,32 @@ The format itself is documented in `docs/format-spec.md`. Every later version is
 
 ### v0.1 known limits (each is a focused next slice)
 
-- One ball, one scene, linear easing only — easing classification (RMS-fit against `ease-in/out/in-out` templates) is the next thing.
+- ~~One ball, one scene, linear easing only — easing classification (RMS-fit against `ease-in/out/in-out` templates) is the next thing.~~ **Shipped in v0.2.**
 - Single-shape decompilation — multi-blob tracking via Hu-moment shape matching across frames is the slice after.
 - GIF intermediate at ~33fps effective (centisecond granularity) — Phase 2 swaps to MP4 via `ffmpeg-next`.
 - No `path()` primitive yet — the Suzuki contour tracing → RDP → Bezier fitting pipeline (the real Phase-1-of-the-original-plan work) plugs in via the same `vac-decompiler` skeleton; only `detect.rs` and `track.rs` widen.
+
+---
+
+## v0.2: Faithful Round-Trip
+
+The v0.1 round-trip had one embarrassing bug: the apex of a ball going *left → right → left* vanished, because 2D Ramer-Douglas-Peucker on the trajectory measures perpendicular distance from the line through the endpoints — and for collinear back-and-forth motion, every interior point lies *on* that line. The decompiler said *"the ball moved from (60, 160) to (68, 160) over 2.67s,"* i.e. *"the ball didn't move."*
+
+v0.2 fixes that and tightens the round-trip in three places:
+
+| Change | Where | Why |
+|---|---|---|
+| **Temporal-aware RDP** — split the trajectory into two 1D RDPs on `x(t)` and `y(t)`, union the kept indices | `vac-decompiler::track::simplify_trajectory` | Recovers the apex of any back-and-forth motion. Univariate RDP has clean px-only semantics, no mixed-units perpendicular-distance kludge. |
+| **Interior-only colour sampling** — pixels along the contour are anti-aliased blends with the background; v0.2 samples only pixels whose 4-neighbours are also in the blob | `vac-decompiler::detect::detect_blob` | Cuts the colour drift from `#e94560 → #e4445e` (L1 = 21) down to within ~6 per channel. |
+| **Easing classification** — between each pair of kept keyframes, RMS-fit the measured curve against `linear`, `ease-in`, `ease-out`, `ease-in-out` templates; pick the lowest, default to `linear` on near-ties | `vac-decompiler::track::classify_easing` | Decompiler stops emitting `linear` for everything. Still pure measurement: RMS distance to a template is deterministic. |
+
+Plus a new fixture `examples/diagonal.vac` and a CI smoke test (`.github/workflows/ci.yml`) that runs the full round-trip on every push.
+
+After v0.2, the diff between `examples/ball.vac` and the round-tripped `.vac` is purely cosmetic (whitespace / leading comments) and the GIF-fps quirk (30 → 33fps from centisecond delay quantisation, which goes away when we move to MP4 in v0.4).
+
+### What's still on the list
+
+- **v0.3** — multi-shape tracking (Hu-moment matching across frames, one `let` + `animate` per object).
+- **v0.4** — MP4 I/O via `ffmpeg-next`. Removes the centisecond fps drift.
+- **v0.5** — `path()` primitive: Suzuki contour tracing → RDP → least-squares Bezier fitting. The original Phase 1 work.
+- **v0.6+** — real-world video (codec-artifact-tolerant background estimation, scale/opacity inference).

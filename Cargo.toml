@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourname/vac"
@@ -17,10 +17,10 @@ description = "VAC — Video As Code. A purely algorithmic compiler/decompiler b
 
 [workspace.dependencies]
 # Internal crates
-vac = { path = "crates/vac", version = "0.1.0" }
-vac-format = { path = "crates/vac-format", version = "0.1.0" }
-vac-compiler = { path = "crates/vac-compiler", version = "0.1.0" }
-vac-decompiler = { path = "crates/vac-decompiler", version = "0.1.0" }
+vac = { path = "crates/vac", version = "0.2.0" }
+vac-format = { path = "crates/vac-format", version = "0.2.0" }
+vac-compiler = { path = "crates/vac-compiler", version = "0.2.0" }
+vac-decompiler = { path = "crates/vac-decompiler", version = "0.2.0" }
 
 # External crates (wide version reqs so cargo picks the latest compatible)
 anyhow = "1"

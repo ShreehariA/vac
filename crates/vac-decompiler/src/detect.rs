@@ -140,9 +140,16 @@ fn detect_blob(f: &VideoFrame, bg: Color) -> Option<Blob> {
         return None;
     }
 
-    // Compute centroid, bbox, and mean colour for the chosen blob.
+    // Single pass over the blob: centroid + bbox use *all* pixels, but
+    // colour is sampled only from "interior" pixels (those whose four
+    // 4-neighbours are also in the blob). Edge pixels along the contour
+    // are anti-aliased blends of fill+background and would otherwise pull
+    // the mean colour towards the background, producing the visible drift
+    // (`#e94560` → `#e4445e`) we saw in the v0.1 round-trip.
     let (mut sx, mut sy) = (0u64, 0u64);
-    let (mut sr, mut sg, mut sb) = (0u64, 0u64, 0u64);
+    let (mut all_r, mut all_g, mut all_b) = (0u64, 0u64, 0u64);
+    let (mut int_r, mut int_g, mut int_b) = (0u64, 0u64, 0u64);
+    let mut int_count: u64 = 0;
     let mut min_x = u32::MAX;
     let mut max_x = 0u32;
     let mut min_y = u32::MAX;
@@ -150,28 +157,54 @@ fn detect_blob(f: &VideoFrame, bg: Color) -> Option<Blob> {
 
     for y in 0..h {
         for x in 0..w {
-            if labels[y * w + x] == best_label {
-                sx += x as u64;
-                sy += y as u64;
-                let i = (y * w + x) * 4;
-                sr += f.pixels[i] as u64;
-                sg += f.pixels[i + 1] as u64;
-                sb += f.pixels[i + 2] as u64;
-                if (x as u32) < min_x {
-                    min_x = x as u32;
-                }
-                if (x as u32) > max_x {
-                    max_x = x as u32;
-                }
-                if (y as u32) < min_y {
-                    min_y = y as u32;
-                }
-                if (y as u32) > max_y {
-                    max_y = y as u32;
-                }
+            let idx = y * w + x;
+            if labels[idx] != best_label {
+                continue;
+            }
+
+            sx += x as u64;
+            sy += y as u64;
+
+            let pi = idx * 4;
+            let r = f.pixels[pi] as u64;
+            let g = f.pixels[pi + 1] as u64;
+            let b = f.pixels[pi + 2] as u64;
+            all_r += r;
+            all_g += g;
+            all_b += b;
+
+            // Interior = strict 4-neighbours all share our label.
+            // Frame-border pixels are never interior.
+            let interior = x > 0
+                && y > 0
+                && x + 1 < w
+                && y + 1 < h
+                && labels[idx - 1] == best_label
+                && labels[idx + 1] == best_label
+                && labels[idx - w] == best_label
+                && labels[idx + w] == best_label;
+            if interior {
+                int_r += r;
+                int_g += g;
+                int_b += b;
+                int_count += 1;
+            }
+
+            if (x as u32) < min_x {
+                min_x = x as u32;
+            }
+            if (x as u32) > max_x {
+                max_x = x as u32;
+            }
+            if (y as u32) < min_y {
+                min_y = y as u32;
+            }
+            if (y as u32) > max_y {
+                max_y = y as u32;
             }
         }
     }
+
     let n = best_count as u64;
     let cx = (sx as f32) / (n as f32);
     let cy = (sy as f32) / (n as f32);
@@ -179,11 +212,22 @@ fn detect_blob(f: &VideoFrame, bg: Color) -> Option<Blob> {
     let bbox_h = (max_y - min_y + 1) as f32;
     let radius = (bbox_w + bbox_h) * 0.25; // (w/2 + h/2)/2
 
+    let color = if int_count > 0 {
+        Color::rgb(
+            (int_r / int_count) as u8,
+            (int_g / int_count) as u8,
+            (int_b / int_count) as u8,
+        )
+    } else {
+        // Tiny / 1-pixel-wide blobs fall back to the unfiltered mean.
+        Color::rgb((all_r / n) as u8, (all_g / n) as u8, (all_b / n) as u8)
+    };
+
     Some(Blob {
         cx,
         cy,
         radius,
-        color: Color::rgb((sr / n) as u8, (sg / n) as u8, (sb / n) as u8),
+        color,
     })
 }
 
