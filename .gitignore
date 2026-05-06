@@ -10,6 +10,7 @@ Cargo.lock.bak
 # generated artefacts
 /decoded.vac
 /round_trip.vac
+/round_trip_two.vac
 /out.gif
 /*.gif
 *.roundtrip.vac

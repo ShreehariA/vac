@@ -1,0 +1,35 @@
+// VAC v0.3 sample: two distinct-coloured balls bouncing in opposite
+// directions on different y. This is the round-trip fixture for
+// multi-shape tracking — the decompiler must recover both tracks
+// independently and emit one `animate` block per ball.
+
+canvas 640x360 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 640, 360)
+  bg.fill = #1a1a2e
+
+  let red = ellipse(60, 100, 22, 22)
+  red.fill = #e94560
+  red.stroke = none
+
+  let yellow = ellipse(560, 260, 22, 22)
+  yellow.fill = #ffd166
+  yellow.stroke = none
+
+  animate red {
+    0ms    -> position(60, 100)
+    1500ms -> position(560, 100)
+    3s     -> position(60, 100)
+    easing: linear
+  }
+
+  animate yellow {
+    0ms    -> position(560, 260)
+    1500ms -> position(60, 260)
+    3s     -> position(560, 260)
+    easing: linear
+  }
+}

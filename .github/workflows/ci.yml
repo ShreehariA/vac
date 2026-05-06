@@ -35,14 +35,22 @@ jobs:
 
       - name: Smoke-test the CLI on the bundled fixtures
         run: |
-          cargo run --release -p vac-cli -- compile   examples/ball.vac     target/ci/ball.gif
-          cargo run --release -p vac-cli -- decompile target/ci/ball.gif    target/ci/ball.roundtrip.vac
-          cargo run --release -p vac-cli -- compile   examples/diagonal.vac target/ci/diagonal.gif
+          cargo run --release -p vac-cli -- compile   examples/ball.vac      target/ci/ball.gif
+          cargo run --release -p vac-cli -- decompile target/ci/ball.gif     target/ci/ball.roundtrip.vac
+          cargo run --release -p vac-cli -- compile   examples/diagonal.vac  target/ci/diagonal.gif
           cargo run --release -p vac-cli -- decompile target/ci/diagonal.gif target/ci/diagonal.roundtrip.vac
+          cargo run --release -p vac-cli -- compile   examples/two_balls.vac target/ci/two_balls.gif
+          cargo run --release -p vac-cli -- decompile target/ci/two_balls.gif target/ci/two_balls.roundtrip.vac
           test -s target/ci/ball.gif
           test -s target/ci/ball.roundtrip.vac
           test -s target/ci/diagonal.gif
           test -s target/ci/diagonal.roundtrip.vac
+          test -s target/ci/two_balls.gif
+          test -s target/ci/two_balls.roundtrip.vac
+          # Two-balls fixture must produce two `shape_*` declarations.
+          shapes=$(grep -c '^  let shape_' target/ci/two_balls.roundtrip.vac || true)
+          echo "two_balls round-trip shape count: $shapes"
+          test "$shapes" = "2"
 
       - name: Upload round-trip artefacts
         if: always()

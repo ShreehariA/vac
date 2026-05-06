@@ -1,0 +1,30 @@
+canvas 640x360 @33fps
+
+scene main {
+  duration 2700ms
+
+  let bg = rect(0, 0, 640, 360)
+  bg.fill = #1a1a2e
+
+  let shape_0 = ellipse(60, 100, 22, 22)
+  shape_0.fill = #e94560
+  shape_0.stroke = none
+
+  animate shape_0 {
+    0ms -> position(60, 100)
+    1350ms -> position(560, 100)
+    2670ms -> position(71, 100)
+    easing: linear
+  }
+
+  let shape_1 = ellipse(560, 260, 22, 22)
+  shape_1.fill = #fed065
+  shape_1.stroke = none
+
+  animate shape_1 {
+    0ms -> position(560, 260)
+    1350ms -> position(60, 260)
+    2670ms -> position(548, 259)
+    easing: linear
+  }
+}

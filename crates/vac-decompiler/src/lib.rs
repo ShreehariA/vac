@@ -1,23 +1,28 @@
 //! VAC decompiler — video frames → `.vac` AST.
 //!
-//! v0.1 covers the "moving ball" problem: a single solid-coloured
-//! circle on a solid background.  The pipeline is intentionally
-//! algorithmic, not classifier-based:
+//! The pipeline is intentionally algorithmic, not classifier-based:
 //!
 //! 1. **Background estimate**: sample frame corners → median colour.
 //! 2. **Foreground mask**: pixels whose colour distance from the
 //!    background exceeds a threshold.
 //! 3. **Connected-component labeling** (4-connectivity, two-pass
-//!    union-find) → blobs.
-//! 4. **Largest blob**: centroid, bounding box, mean RGB.
-//! 5. **Trajectory simplification**: Ramer-Douglas-Peucker on the
-//!    `(cx, cy)` polyline → keyframes.
-//! 6. **AST emission**: shape declared at its first detected position;
-//!    median radius and colour across all frames; linear easing in v0.1.
+//!    union-find) → all blobs above the minimum-area threshold.
+//! 4. **Per-blob measurements**: centroid, bounding box, interior-only
+//!    mean RGB, area, and the seven Hu image-moment invariants.
+//! 5. **Cross-frame tracking** (v0.3): lowest-cost-first greedy
+//!    bipartite matching between active tracks and the current
+//!    frame's detections, scored on position + colour + size + Hu.
+//!    Unmatched detections start new tracks; a 3-frame gap tolerance
+//!    survives brief occlusion or detection drop-outs.
+//! 6. **Per-track simplification**: temporal-aware Ramer-Douglas-Peucker
+//!    on `x(t)` and `y(t)` independently → keyframes (v0.2).
+//! 7. **Easing classification** (v0.2): SSE comparison against
+//!    canonical easing templates between consecutive keyframes.
+//! 8. **AST emission**: one `let shape_<n>` + fill + stroke + animate
+//!    block per recovered track.
 //!
-//! Easing classification, multi-shape tracking, scale/opacity
-//! estimation, and proper contour tracing all build on this same
-//! skeleton in later versions.
+//! Scale/opacity estimation and proper contour tracing build on this
+//! same skeleton in later versions.
 
 pub mod detect;
 pub mod frames;

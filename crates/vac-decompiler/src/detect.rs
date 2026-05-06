@@ -1,30 +1,45 @@
-//! Per-frame ball detection.
+//! Per-frame multi-blob detection.
 //!
 //! All deterministic, all measurement: sample → mask → connected
-//! components → centroid + bbox + mean colour. No models, no training.
+//! components → for each component, centroid + bbox + interior-only
+//! mean colour + Hu image-moment invariants. No models, no training.
+//!
+//! v0.3 generalises v0.2's "find the single largest blob" to "find
+//! every blob above the minimum-area threshold," so the cross-frame
+//! tracker in `track.rs` can stitch tracks for an arbitrary number
+//! of objects.
 
 use vac_format::Color;
 
 use crate::frames::VideoFrame;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Detection {
     pub frame_index: usize,
     /// Time offset of this frame in milliseconds (cumulative).
     pub t_ms: u32,
     /// Estimated background colour for this frame.
     pub bg: Color,
-    /// `None` means no foreground blob was found in this frame.
-    pub blob: Option<Blob>,
+    /// All foreground blobs above the minimum area, sorted descending
+    /// by area (largest first — useful when the tracker wants a stable
+    /// processing order).
+    pub blobs: Vec<Blob>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Blob {
     pub cx: f32,
     pub cy: f32,
-    /// Avg of bbox half-width and half-height — good for circles.
+    /// Mean of bbox half-width and half-height. For circles ≈ true radius.
     pub radius: f32,
+    /// Mean colour over interior pixels (4-neighbours all share label).
+    /// Falls back to whole-blob mean for very thin shapes.
     pub color: Color,
+    /// Pixel count of the blob.
+    pub area: u32,
+    /// Hu image-moment invariants (h₁..h₇). Translation, scale, rotation
+    /// invariant — useful for shape-based matching across frames.
+    pub hu: [f32; 7],
 }
 
 /// Squared Euclidean colour distance threshold for the
@@ -32,18 +47,23 @@ pub struct Blob {
 /// without flagging dithering noise.
 const FG_THRESHOLD_SQ: u32 = 24 * 24 * 3;
 
+/// A blob with fewer than this many pixels is treated as detection noise
+/// and discarded (smaller than a 3x3 cluster).
+const MIN_BLOB_AREA: u32 = 9;
+
 /// Run detection across all frames.
 pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
     let mut out = Vec::with_capacity(frames.len());
     let mut t_ms: u32 = 0;
     for (i, f) in frames.iter().enumerate() {
         let bg = estimate_background(f);
-        let blob = detect_blob(f, bg);
+        let mut blobs = detect_blobs(f, bg);
+        blobs.sort_by(|a, b| b.area.cmp(&a.area));
         out.push(Detection {
             frame_index: i,
             t_ms,
             bg,
-            blob,
+            blobs,
         });
         t_ms = t_ms.saturating_add(f.delay_ms);
     }
@@ -70,7 +90,6 @@ fn estimate_background(f: &VideoFrame) -> Color {
     if samples.is_empty() {
         return Color::rgb(0, 0, 0);
     }
-    // Median per channel — robust to one outlier corner.
     let mut rs: Vec<u8> = samples.iter().map(|c| c.0).collect();
     let mut gs: Vec<u8> = samples.iter().map(|c| c.1).collect();
     let mut bs: Vec<u8> = samples.iter().map(|c| c.2).collect();
@@ -107,128 +126,281 @@ fn sample_block_avg(f: &VideoFrame, x0: i32, y0: i32, w: i32, h: i32) -> Option<
     Some(((sr / n) as u8, (sg / n) as u8, (sb / n) as u8))
 }
 
-fn detect_blob(f: &VideoFrame, bg: Color) -> Option<Blob> {
+// --------------------------------------------------------------------
+// Multi-blob detection
+// --------------------------------------------------------------------
+
+fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
     let w = f.width as usize;
     let h = f.height as usize;
 
-    // Build foreground mask.
+    // Foreground mask.
     let mut mask = vec![false; w * h];
     for i in 0..(w * h) {
         let r = f.pixels[i * 4];
         let g = f.pixels[i * 4 + 1];
         let b = f.pixels[i * 4 + 2];
-        let dr = (r as i32 - bg.r as i32) as i32;
-        let dg = (g as i32 - bg.g as i32) as i32;
-        let db = (b as i32 - bg.b as i32) as i32;
+        let dr = r as i32 - bg.r as i32;
+        let dg = g as i32 - bg.g as i32;
+        let db = b as i32 - bg.b as i32;
         let dist_sq = (dr * dr + dg * dg + db * db) as u32;
         mask[i] = dist_sq > FG_THRESHOLD_SQ;
     }
 
-    // Connected-component labeling (4-connectivity, two-pass union-find).
     let labels = label_components_4(&mask, w, h);
 
-    // Find largest non-zero label.
+    // Per-label area count.
     let mut counts = std::collections::HashMap::<u32, u32>::new();
     for &l in &labels {
         if l != 0 {
             *counts.entry(l).or_insert(0) += 1;
         }
     }
-    let (best_label, best_count) = counts.into_iter().max_by_key(|(_, c)| *c)?;
-    // Tiny noise blobs (< ~9 px) are not balls.
-    if best_count < 9 {
-        return None;
+
+    // Keep labels above min area; build a stable ordering for the per-blob
+    // accumulators below.
+    let kept_labels: Vec<u32> = counts
+        .iter()
+        .filter_map(|(&l, &c)| if c >= MIN_BLOB_AREA { Some(l) } else { None })
+        .collect();
+    if kept_labels.is_empty() {
+        return Vec::new();
     }
+    let label_to_idx: std::collections::HashMap<u32, usize> = kept_labels
+        .iter()
+        .enumerate()
+        .map(|(i, &l)| (l, i))
+        .collect();
 
-    // Single pass over the blob: centroid + bbox use *all* pixels, but
-    // colour is sampled only from "interior" pixels (those whose four
-    // 4-neighbours are also in the blob). Edge pixels along the contour
-    // are anti-aliased blends of fill+background and would otherwise pull
-    // the mean colour towards the background, producing the visible drift
-    // (`#e94560` → `#e4445e`) we saw in the v0.1 round-trip.
-    let (mut sx, mut sy) = (0u64, 0u64);
-    let (mut all_r, mut all_g, mut all_b) = (0u64, 0u64, 0u64);
-    let (mut int_r, mut int_g, mut int_b) = (0u64, 0u64, 0u64);
-    let mut int_count: u64 = 0;
-    let mut min_x = u32::MAX;
-    let mut max_x = 0u32;
-    let mut min_y = u32::MAX;
-    let mut max_y = 0u32;
+    let n = kept_labels.len();
+    let mut acc: Vec<BlobAcc> = (0..n).map(|_| BlobAcc::new()).collect();
 
+    // Single pass over the frame: accumulate per-blob stats simultaneously.
     for y in 0..h {
         for x in 0..w {
             let idx = y * w + x;
-            if labels[idx] != best_label {
+            let l = labels[idx];
+            if l == 0 {
                 continue;
             }
+            let Some(&bi) = label_to_idx.get(&l) else {
+                continue; // sub-min-area noise blob
+            };
+            let a = &mut acc[bi];
 
-            sx += x as u64;
-            sy += y as u64;
-
+            a.area += 1;
             let pi = idx * 4;
             let r = f.pixels[pi] as u64;
             let g = f.pixels[pi + 1] as u64;
             let b = f.pixels[pi + 2] as u64;
-            all_r += r;
-            all_g += g;
-            all_b += b;
+            a.all_r += r;
+            a.all_g += g;
+            a.all_b += b;
 
-            // Interior = strict 4-neighbours all share our label.
-            // Frame-border pixels are never interior.
+            // Raw moments for centroid + Hu invariants.
+            let xf = x as f64;
+            let yf = y as f64;
+            a.m00 += 1.0;
+            a.m10 += xf;
+            a.m01 += yf;
+
+            // Bounding box.
+            if (x as u32) < a.min_x {
+                a.min_x = x as u32;
+            }
+            if (x as u32) > a.max_x {
+                a.max_x = x as u32;
+            }
+            if (y as u32) < a.min_y {
+                a.min_y = y as u32;
+            }
+            if (y as u32) > a.max_y {
+                a.max_y = y as u32;
+            }
+
+            // Interior-pixel colour (4-neighbours share the label).
             let interior = x > 0
                 && y > 0
                 && x + 1 < w
                 && y + 1 < h
-                && labels[idx - 1] == best_label
-                && labels[idx + 1] == best_label
-                && labels[idx - w] == best_label
-                && labels[idx + w] == best_label;
+                && labels[idx - 1] == l
+                && labels[idx + 1] == l
+                && labels[idx - w] == l
+                && labels[idx + w] == l;
             if interior {
-                int_r += r;
-                int_g += g;
-                int_b += b;
-                int_count += 1;
-            }
-
-            if (x as u32) < min_x {
-                min_x = x as u32;
-            }
-            if (x as u32) > max_x {
-                max_x = x as u32;
-            }
-            if (y as u32) < min_y {
-                min_y = y as u32;
-            }
-            if (y as u32) > max_y {
-                max_y = y as u32;
+                a.int_r += r;
+                a.int_g += g;
+                a.int_b += b;
+                a.int_count += 1;
             }
         }
     }
 
-    let n = best_count as u64;
-    let cx = (sx as f32) / (n as f32);
-    let cy = (sy as f32) / (n as f32);
-    let bbox_w = (max_x - min_x + 1) as f32;
-    let bbox_h = (max_y - min_y + 1) as f32;
-    let radius = (bbox_w + bbox_h) * 0.25; // (w/2 + h/2)/2
+    // Second pass: central moments (require centroids from pass 1).
+    // Bound the moments by the bbox so we only revisit the relevant region.
+    for (bi, a) in acc.iter_mut().enumerate() {
+        if a.area == 0 {
+            continue;
+        }
+        let cx = a.m10 / a.m00;
+        let cy = a.m01 / a.m00;
+        let l = kept_labels[bi];
 
-    let color = if int_count > 0 {
-        Color::rgb(
-            (int_r / int_count) as u8,
-            (int_g / int_count) as u8,
-            (int_b / int_count) as u8,
-        )
-    } else {
-        // Tiny / 1-pixel-wide blobs fall back to the unfiltered mean.
-        Color::rgb((all_r / n) as u8, (all_g / n) as u8, (all_b / n) as u8)
-    };
+        let (mut mu20, mut mu02, mut mu11) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut mu30, mut mu03, mut mu21, mut mu12) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
 
-    Some(Blob {
-        cx,
-        cy,
-        radius,
-        color,
-    })
+        let x0 = a.min_x as usize;
+        let x1 = a.max_x as usize;
+        let y0 = a.min_y as usize;
+        let y1 = a.max_y as usize;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if labels[y * w + x] != l {
+                    continue;
+                }
+                let dx = x as f64 - cx;
+                let dy = y as f64 - cy;
+                let dx2 = dx * dx;
+                let dy2 = dy * dy;
+                mu20 += dx2;
+                mu02 += dy2;
+                mu11 += dx * dy;
+                mu30 += dx2 * dx;
+                mu03 += dy2 * dy;
+                mu21 += dx2 * dy;
+                mu12 += dx * dy2;
+            }
+        }
+        a.cx = cx as f32;
+        a.cy = cy as f32;
+        a.hu = hu_moments(a.m00, mu20, mu02, mu11, mu30, mu03, mu21, mu12);
+    }
+
+    acc.into_iter()
+        .filter(|a| a.area > 0)
+        .map(|a| {
+            let bbox_w = (a.max_x - a.min_x + 1) as f32;
+            let bbox_h = (a.max_y - a.min_y + 1) as f32;
+            let radius = (bbox_w + bbox_h) * 0.25;
+            let color = if a.int_count > 0 {
+                Color::rgb(
+                    (a.int_r / a.int_count) as u8,
+                    (a.int_g / a.int_count) as u8,
+                    (a.int_b / a.int_count) as u8,
+                )
+            } else {
+                let n = a.area as u64;
+                Color::rgb(
+                    (a.all_r / n) as u8,
+                    (a.all_g / n) as u8,
+                    (a.all_b / n) as u8,
+                )
+            };
+            Blob {
+                cx: a.cx,
+                cy: a.cy,
+                radius,
+                color,
+                area: a.area,
+                hu: a.hu,
+            }
+        })
+        .collect()
+}
+
+/// Compute the 7 Hu moment invariants from a blob's central moments.
+/// Given `m00` (= area) and central moments μ₂₀ μ₀₂ μ₁₁ μ₃₀ μ₀₃ μ₂₁ μ₁₂.
+fn hu_moments(
+    m00: f64,
+    mu20: f64,
+    mu02: f64,
+    mu11: f64,
+    mu30: f64,
+    mu03: f64,
+    mu21: f64,
+    mu12: f64,
+) -> [f32; 7] {
+    if m00 <= 0.0 {
+        return [0.0; 7];
+    }
+    // Normalised central moments η_pq = μ_pq / m00^((p+q)/2 + 1).
+    let n2 = m00 * m00; // m00^2 (used for p+q=2)
+    let n_pq2 = n2;
+    // For p+q = 3 → m00^((3/2)+1) = m00^2.5
+    let n_pq3 = m00.powf(2.5);
+
+    let n20 = mu20 / n_pq2;
+    let n02 = mu02 / n_pq2;
+    let n11 = mu11 / n_pq2;
+    let n30 = mu30 / n_pq3;
+    let n03 = mu03 / n_pq3;
+    let n21 = mu21 / n_pq3;
+    let n12 = mu12 / n_pq3;
+
+    let h1 = n20 + n02;
+    let h2 = (n20 - n02).powi(2) + 4.0 * n11.powi(2);
+    let h3 = (n30 - 3.0 * n12).powi(2) + (3.0 * n21 - n03).powi(2);
+    let h4 = (n30 + n12).powi(2) + (n21 + n03).powi(2);
+    let h5 = (n30 - 3.0 * n12) * (n30 + n12) * ((n30 + n12).powi(2) - 3.0 * (n21 + n03).powi(2))
+        + (3.0 * n21 - n03)
+            * (n21 + n03)
+            * (3.0 * (n30 + n12).powi(2) - (n21 + n03).powi(2));
+    let h6 = (n20 - n02) * ((n30 + n12).powi(2) - (n21 + n03).powi(2))
+        + 4.0 * n11 * (n30 + n12) * (n21 + n03);
+    let h7 = (3.0 * n21 - n03) * (n30 + n12) * ((n30 + n12).powi(2) - 3.0 * (n21 + n03).powi(2))
+        - (n30 - 3.0 * n12)
+            * (n21 + n03)
+            * (3.0 * (n30 + n12).powi(2) - (n21 + n03).powi(2));
+
+    [
+        h1 as f32, h2 as f32, h3 as f32, h4 as f32, h5 as f32, h6 as f32, h7 as f32,
+    ]
+}
+
+struct BlobAcc {
+    area: u32,
+    cx: f32,
+    cy: f32,
+    hu: [f32; 7],
+    m00: f64,
+    m10: f64,
+    m01: f64,
+    min_x: u32,
+    max_x: u32,
+    min_y: u32,
+    max_y: u32,
+    all_r: u64,
+    all_g: u64,
+    all_b: u64,
+    int_r: u64,
+    int_g: u64,
+    int_b: u64,
+    int_count: u64,
+}
+
+impl BlobAcc {
+    fn new() -> Self {
+        Self {
+            area: 0,
+            cx: 0.0,
+            cy: 0.0,
+            hu: [0.0; 7],
+            m00: 0.0,
+            m10: 0.0,
+            m01: 0.0,
+            min_x: u32::MAX,
+            max_x: 0,
+            min_y: u32::MAX,
+            max_y: 0,
+            all_r: 0,
+            all_g: 0,
+            all_b: 0,
+            int_r: 0,
+            int_g: 0,
+            int_b: 0,
+            int_count: 0,
+        }
+    }
 }
 
 // --------------------------------------------------------------------
@@ -280,7 +452,7 @@ struct UnionFind {
 
 impl UnionFind {
     fn new() -> Self {
-        UnionFind { parent: vec![0] } // index 0 reserved for "no label"
+        UnionFind { parent: vec![0] }
     }
     fn make_set(&mut self, x: u32) {
         while self.parent.len() <= x as usize {
@@ -292,7 +464,7 @@ impl UnionFind {
         while self.parent[x as usize] != x {
             let p = self.parent[x as usize];
             let gp = self.parent[p as usize];
-            self.parent[x as usize] = gp; // path compression
+            self.parent[x as usize] = gp;
             x = gp;
         }
         x
@@ -301,7 +473,6 @@ impl UnionFind {
         let ra = self.find(a);
         let rb = self.find(b);
         if ra != rb {
-            // Attach the larger label under the smaller; keeps roots low.
             if ra < rb {
                 self.parent[rb as usize] = ra;
             } else {

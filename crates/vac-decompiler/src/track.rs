@@ -1,18 +1,24 @@
-//! Across-frame tracking, keyframe extraction, easing classification,
-//! and AST emission.
+//! Cross-frame tracking, keyframe extraction, easing classification,
+//! AST emission.
 //!
-//! The simplification step is **temporal-aware**: we run a 1D
-//! Ramer-Douglas-Peucker on `x(t)` and another on `y(t)` and union
-//! the kept indices.  This catches collinear back-and-forth motion
-//! that a 2D RDP on `(x, y)` would miss (every interior point of a
-//! left → right → left ball lies exactly on the line through start
-//! and end → 2D perpendicular distance is zero → apex is dropped).
+//! v0.3 promotes the pipeline from single-blob to multi-blob:
 //!
-//! Easing classification is template-based: between each consecutive
-//! pair of kept keyframes we compare the measured trajectory against
-//! `linear`, `ease-in`, `ease-out`, `ease-in-out`, sum the squared
-//! pixel error per template, and pick the lowest.  Linear is preferred
-//! on near-ties (within 10 %) to avoid noise-driven false positives.
+//!   per-frame Vec<Blob>  →  build_tracks  →  Vec<Track>
+//!                                              │
+//!                                              ▼
+//!                       per-track simplify + easing → animate
+//!
+//! The matching is a lowest-cost-first greedy bipartite assignment
+//! between active tracks and the current frame's detections, with a
+//! gate threshold that opens new tracks for unmatched blobs and a
+//! short look-back tolerance that survives 1-3 frames of detection
+//! noise.  Cost combines position, RGB colour, radius, and Hu
+//! image-moment shape similarity — Hu is most useful when v0.5
+//! introduces non-elliptical primitives, but it costs nothing to
+//! compute now and adds a small bonus for ball-radius differences.
+//!
+//! Trajectory simplification and easing classification are
+//! per-track and reuse the v0.2 implementation verbatim.
 
 use vac_format::{
     Animation, Canvas, Color, Document, Easing, Keyframe, Property, Scene, Shape, Statement,
@@ -23,14 +29,41 @@ use crate::detect::{Blob, Detection};
 use crate::frames::{estimate_fps, VideoFrame};
 
 /// 1D RDP tolerance, in pixels.  Below this, deviations from the
-/// straight-line interpolation between segment endpoints are considered
-/// noise.
+/// straight-line interpolation between segment endpoints are noise.
 const RDP_TOLERANCE_PX: f32 = 2.0;
 
 /// Easing classifier only switches off `Linear` when an alternative
-/// fits at least this much better (lower SSE).  Stops noisy trajectories
-/// from accidentally being labelled `ease-in` etc.
+/// fits at least this much better (lower SSE).
 const EASING_IMPROVEMENT_RATIO: f64 = 0.90;
+
+// --- Tracking weights & gates ----------------------------------------
+// Cost = W_POS·|Δpos| + W_COL·|Δrgb| + W_RAD·|Δr| + W_HU·|Δhu|.
+// The weights are picked so that for two distinct-coloured balls a
+// frame apart the same-track cost is ~10 and the cross-track cost is
+// > GATE.  Values within ±2× still match correctly in practice.
+const W_POS: f32 = 1.0;
+const W_COL: f32 = 0.4;
+const W_RAD: f32 = 2.0;
+const W_HU: f32 = 30.0;
+const COST_GATE: f32 = 80.0;
+
+/// Maximum number of consecutive frames a track may go unseen
+/// before it is closed out.  Bumps a bit of robustness against
+/// brief occlusion / detection drop-outs.
+const MAX_GAP_FRAMES: usize = 3;
+
+/// A blob fewer than this many samples long is treated as a
+/// noise track and dropped entirely from the output.
+const MIN_TRACK_SAMPLES: usize = 3;
+
+#[derive(Debug, Clone)]
+pub struct Track {
+    pub id: usize,
+    /// (t_ms, blob) ordered by time.
+    pub samples: Vec<(u32, Blob)>,
+    last_seen_frame: usize,
+    active: bool,
+}
 
 pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Document {
     let canvas = Canvas {
@@ -40,10 +73,6 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
     };
 
     let bg_color = median_color(detections.iter().map(|d| d.bg));
-    let blobs: Vec<(u32, Blob)> = detections
-        .iter()
-        .filter_map(|d| d.blob.map(|b| (d.t_ms, b)))
-        .collect();
 
     let total_ms = detections
         .last()
@@ -67,69 +96,20 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
         value: Value::Color(bg_color),
     });
 
-    if !blobs.is_empty() {
-        let radii: Vec<f32> = blobs.iter().map(|(_, b)| b.radius).collect();
-        let radius = round_to_int(median_f32(&radii));
-        let ball_color = median_color(blobs.iter().map(|(_, b)| b.color));
-        let (first_t, first_b) = blobs[0];
+    let mut tracks = build_tracks(detections);
+    // Filter out tracks that are too short to be meaningful.
+    tracks.retain(|t| t.samples.len() >= MIN_TRACK_SAMPLES);
+    // Stable order: longest tracks first → lowest indices to the most
+    // prominent objects.  Tie-break by first-seen time.
+    tracks.sort_by(|a, b| {
+        b.samples
+            .len()
+            .cmp(&a.samples.len())
+            .then_with(|| a.samples[0].0.cmp(&b.samples[0].0))
+    });
 
-        statements.push(Statement::Let {
-            name: "ball".into(),
-            shape: Shape::Ellipse {
-                cx: round_to_int(first_b.cx),
-                cy: round_to_int(first_b.cy),
-                rx: radius,
-                ry: radius,
-            },
-        });
-        statements.push(Statement::Assign {
-            target: "ball".into(),
-            property: Property::Fill,
-            value: Value::Color(ball_color),
-        });
-        statements.push(Statement::Assign {
-            target: "ball".into(),
-            property: Property::Stroke,
-            value: Value::None,
-        });
-
-        // Trajectory simplification (temporal-aware) → keyframes.
-        let mut keep = simplify_trajectory(&blobs, RDP_TOLERANCE_PX);
-
-        if !keep.contains(&0) {
-            keep.insert(0, 0);
-        }
-        let last_idx = blobs.len() - 1;
-        if !keep.contains(&last_idx) {
-            keep.push(last_idx);
-        }
-        keep.sort();
-        keep.dedup();
-
-        if keep.len() >= 2 && trajectory_has_motion(&blobs) {
-            let easing = classify_easing(&blobs, &keep);
-
-            let keyframes: Vec<Keyframe> = keep
-                .iter()
-                .map(|&i| {
-                    let (t, b) = blobs[i];
-                    let t_norm = if i == 0 { 0 } else { t.saturating_sub(first_t) };
-                    Keyframe {
-                        time_ms: t_norm,
-                        transforms: vec![Transform::Position(
-                            round_to_int(b.cx),
-                            round_to_int(b.cy),
-                        )],
-                    }
-                })
-                .collect();
-
-            statements.push(Statement::Animate(Animation {
-                target: "ball".into(),
-                keyframes,
-                easing,
-            }));
-        }
+    for (idx, track) in tracks.iter().enumerate() {
+        emit_track(&mut statements, idx, track);
     }
 
     Document {
@@ -140,6 +120,154 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
             statements,
         }],
     }
+}
+
+fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
+    let name = format!("shape_{idx}");
+    let radii: Vec<f32> = track.samples.iter().map(|(_, b)| b.radius).collect();
+    let radius = round_to_int(median_f32(&radii));
+    let color = median_color(track.samples.iter().map(|(_, b)| b.color));
+    let (first_t, first_b) = track.samples[0];
+
+    statements.push(Statement::Let {
+        name: name.clone(),
+        shape: Shape::Ellipse {
+            cx: round_to_int(first_b.cx),
+            cy: round_to_int(first_b.cy),
+            rx: radius,
+            ry: radius,
+        },
+    });
+    statements.push(Statement::Assign {
+        target: name.clone(),
+        property: Property::Fill,
+        value: Value::Color(color),
+    });
+    statements.push(Statement::Assign {
+        target: name.clone(),
+        property: Property::Stroke,
+        value: Value::None,
+    });
+
+    let blobs = &track.samples;
+
+    let mut keep = simplify_trajectory(blobs, RDP_TOLERANCE_PX);
+    if !keep.contains(&0) {
+        keep.insert(0, 0);
+    }
+    let last_idx = blobs.len() - 1;
+    if !keep.contains(&last_idx) {
+        keep.push(last_idx);
+    }
+    keep.sort();
+    keep.dedup();
+
+    if keep.len() >= 2 && trajectory_has_motion(blobs) {
+        let easing = classify_easing(blobs, &keep);
+
+        let keyframes: Vec<Keyframe> = keep
+            .iter()
+            .map(|&i| {
+                let (t, b) = blobs[i];
+                let t_norm = if i == 0 { 0 } else { t.saturating_sub(first_t) };
+                Keyframe {
+                    time_ms: t_norm,
+                    transforms: vec![Transform::Position(
+                        round_to_int(b.cx),
+                        round_to_int(b.cy),
+                    )],
+                }
+            })
+            .collect();
+
+        statements.push(Statement::Animate(Animation {
+            target: name,
+            keyframes,
+            easing,
+        }));
+    }
+}
+
+// --------------------------------------------------------------------
+// Cross-frame tracking
+// --------------------------------------------------------------------
+
+/// Build tracks from per-frame detections via lowest-cost-first
+/// greedy bipartite matching with gating + a short gap-tolerance.
+pub fn build_tracks(detections: &[Detection]) -> Vec<Track> {
+    let mut tracks: Vec<Track> = Vec::new();
+    let mut next_id = 0usize;
+
+    for (frame_idx, det) in detections.iter().enumerate() {
+        // Snapshot of currently active track indices.
+        let active: Vec<usize> = tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| if t.active { Some(i) } else { None })
+            .collect();
+
+        // Build all viable (cost, blob, track) candidates.
+        let mut candidates: Vec<(f32, usize, usize)> =
+            Vec::with_capacity(det.blobs.len() * active.len());
+        for (b_idx, blob) in det.blobs.iter().enumerate() {
+            for &t_idx in &active {
+                let last_blob = tracks[t_idx].samples.last().unwrap().1;
+                let cost = matching_cost(&last_blob, blob);
+                if cost <= COST_GATE {
+                    candidates.push((cost, b_idx, t_idx));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut blob_assigned = vec![false; det.blobs.len()];
+        let mut track_assigned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for (_cost, b_idx, t_idx) in candidates {
+            if blob_assigned[b_idx] || track_assigned.contains(&t_idx) {
+                continue;
+            }
+            tracks[t_idx].samples.push((det.t_ms, det.blobs[b_idx]));
+            tracks[t_idx].last_seen_frame = frame_idx;
+            blob_assigned[b_idx] = true;
+            track_assigned.insert(t_idx);
+        }
+
+        // Unassigned blobs → start new tracks.
+        for (b_idx, blob) in det.blobs.iter().enumerate() {
+            if !blob_assigned[b_idx] {
+                tracks.push(Track {
+                    id: next_id,
+                    samples: vec![(det.t_ms, *blob)],
+                    last_seen_frame: frame_idx,
+                    active: true,
+                });
+                next_id += 1;
+            }
+        }
+
+        // Expire stale tracks.
+        for t in tracks.iter_mut() {
+            if t.active && frame_idx.saturating_sub(t.last_seen_frame) > MAX_GAP_FRAMES {
+                t.active = false;
+            }
+        }
+    }
+
+    tracks
+}
+
+fn matching_cost(prev: &Blob, curr: &Blob) -> f32 {
+    let pos = ((curr.cx - prev.cx).powi(2) + (curr.cy - prev.cy).powi(2)).sqrt();
+    let dr = curr.color.r as f32 - prev.color.r as f32;
+    let dg = curr.color.g as f32 - prev.color.g as f32;
+    let db = curr.color.b as f32 - prev.color.b as f32;
+    let col = (dr * dr + dg * dg + db * db).sqrt();
+    let rad = (curr.radius - prev.radius).abs();
+    let hu = (0..7)
+        .map(|i| (curr.hu[i] - prev.hu[i]).abs())
+        .sum::<f32>();
+    W_POS * pos + W_COL * col + W_RAD * rad + W_HU * hu
 }
 
 fn trajectory_has_motion(blobs: &[(u32, Blob)]) -> bool {
@@ -153,17 +281,9 @@ fn trajectory_has_motion(blobs: &[(u32, Blob)]) -> bool {
 }
 
 // --------------------------------------------------------------------
-// Temporal-aware trajectory simplification
+// Temporal-aware trajectory simplification (v0.2 — unchanged).
 // --------------------------------------------------------------------
 
-/// Run two independent 1D RDPs — one on `x(t)`, one on `y(t)` —
-/// and return the sorted union of the indices each chose to keep.
-///
-/// This is the core of the v0.2 fix: 2D RDP on `(x, y)` collapses
-/// the apex of any back-and-forth-along-a-line trajectory because
-/// every interior point lies *on* the line through the endpoints.
-/// Splitting the work along the time axis recovers it cleanly and
-/// also generalises to arbitrary 2D motion.
 pub fn simplify_trajectory(blobs: &[(u32, Blob)], tol: f32) -> Vec<usize> {
     let n = blobs.len();
     if n < 3 {
@@ -182,8 +302,6 @@ pub fn simplify_trajectory(blobs: &[(u32, Blob)], tol: f32) -> Vec<usize> {
     combined
 }
 
-/// 1D RDP on a univariate signal `v(t)`: deviation is `|v_actual - v_linear(t)|`.
-/// Independent of the time-axis scale, unlike 2D perpendicular distance.
 fn rdp_1d(times: &[f32], values: &[f32], tol: f32) -> Vec<usize> {
     debug_assert_eq!(times.len(), values.len());
     let n = values.len();
@@ -237,16 +355,9 @@ fn rdp_1d_recurse(
 }
 
 // --------------------------------------------------------------------
-// Easing classification
+// Easing classification (v0.2 — unchanged).
 // --------------------------------------------------------------------
 
-/// For each consecutive pair of kept keyframes, project all measured
-/// in-between samples onto the segment, sum squared pixel error against
-/// each canonical easing template, and return the global winner.
-///
-/// Linear is the default and is only displaced by an alternative whose
-/// SSE is ≤ `EASING_IMPROVEMENT_RATIO × SSE(Linear)`.  This keeps
-/// noise-dominated or dense-keyframe trajectories honest.
 fn classify_easing(blobs: &[(u32, Blob)], keep: &[usize]) -> Easing {
     const CANDIDATES: [Easing; 4] = [
         Easing::Linear,
@@ -293,7 +404,6 @@ fn classify_easing(blobs: &[(u32, Blob)], keep: &[usize]) -> Easing {
         return Easing::Linear;
     }
 
-    // Find the candidate with the lowest SSE.
     let (mut best, mut best_err) = (0usize, errors[0]);
     for k in 1..CANDIDATES.len() {
         if errors[k] < best_err {
@@ -302,7 +412,6 @@ fn classify_easing(blobs: &[(u32, Blob)], keep: &[usize]) -> Easing {
         }
     }
 
-    // Stay on Linear unless the alternative is meaningfully better.
     if best == 0 {
         return Easing::Linear;
     }
@@ -346,13 +455,9 @@ fn round_to_int(x: f32) -> f32 {
 }
 
 // --------------------------------------------------------------------
-// 2D RDP (kept around for future work — contour simplification in the
-// path-primitive slice will reuse it).
+// 2D RDP (kept for future contour simplification work).
 // --------------------------------------------------------------------
 
-/// Returns the indices of `points` to retain such that no removed
-/// point lies more than `tolerance` units (perpendicular distance)
-/// from the polyline through the retained points.
 pub fn rdp(points: &[(f32, f32)], tolerance: f32) -> Vec<usize> {
     let n = points.len();
     if n < 3 {
@@ -412,6 +517,19 @@ mod tests {
             cy,
             radius: 24.0,
             color: Color::rgb(0, 0, 0),
+            area: 1800,
+            hu: [0.0; 7],
+        }
+    }
+
+    fn blob_full(cx: f32, cy: f32, color: Color) -> Blob {
+        Blob {
+            cx,
+            cy,
+            radius: 24.0,
+            color,
+            area: 1800,
+            hu: [0.0; 7],
         }
     }
 
@@ -431,9 +549,6 @@ mod tests {
         assert!(kept.len() <= 4, "expected ~3 keyframes, got {kept:?}");
     }
 
-    /// The bug v0.2 fixes: a ball going right and retracing the same
-    /// horizontal line back. 2D RDP on `(x, y)` would keep only the
-    /// endpoints; temporal RDP must keep the apex.
     #[test]
     fn temporal_rdp_recovers_collinear_apex() {
         let mut blobs = Vec::new();
@@ -471,7 +586,6 @@ mod tests {
 
     #[test]
     fn easing_classifier_picks_ease_in_out_when_data_demands_it() {
-        // Synthesize an ease-in-out ball going 60 -> 420 over 3000ms.
         let mut blobs = Vec::new();
         for i in 0..=90u32 {
             let t = i * 33;
@@ -485,6 +599,56 @@ mod tests {
         assert!(
             matches!(easing, Easing::EaseInOut | Easing::EaseIn | Easing::EaseOut),
             "expected an eased classification, got {easing:?}"
+        );
+    }
+
+    /// Two distinct-coloured balls moving in opposite directions
+    /// across the same y must produce two stable tracks.
+    #[test]
+    fn tracker_separates_two_balls_by_colour() {
+        let red = Color::rgb(0xe9, 0x45, 0x60);
+        let yellow = Color::rgb(0xff, 0xd1, 0x66);
+
+        let mut detections: Vec<Detection> = Vec::new();
+        for i in 0..=60u32 {
+            let t = i * 33;
+            let frac = i as f32 / 60.0;
+            let xr = 60.0 + frac * 480.0;
+            let xy = 540.0 - frac * 480.0;
+            detections.push(Detection {
+                frame_index: i as usize,
+                t_ms: t,
+                bg: Color::rgb(0x1a, 0x1a, 0x2e),
+                blobs: vec![blob_full(xr, 100.0, red), blob_full(xy, 260.0, yellow)],
+            });
+        }
+
+        let tracks = build_tracks(&detections);
+        let long: Vec<&Track> = tracks.iter().filter(|t| t.samples.len() >= 30).collect();
+        assert_eq!(
+            long.len(),
+            2,
+            "expected exactly 2 long tracks, got {} ({tracks:#?})",
+            long.len()
+        );
+
+        let red_track = long
+            .iter()
+            .find(|t| t.samples[0].1.color == red)
+            .expect("no red track");
+        let yellow_track = long
+            .iter()
+            .find(|t| t.samples[0].1.color == yellow)
+            .expect("no yellow track");
+
+        // Red moves 60 → 540, yellow moves 540 → 60. End positions confirm.
+        let (_, red_last) = red_track.samples.last().unwrap();
+        let (_, yellow_last) = yellow_track.samples.last().unwrap();
+        assert!(red_last.cx > 400.0, "red did not advance: cx={}", red_last.cx);
+        assert!(
+            yellow_last.cx < 200.0,
+            "yellow did not advance: cx={}",
+            yellow_last.cx
         );
     }
 }

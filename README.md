@@ -465,7 +465,7 @@ The format itself is documented in `docs/format-spec.md`. Every later version is
 ### v0.1 known limits (each is a focused next slice)
 
 - ~~One ball, one scene, linear easing only — easing classification (RMS-fit against `ease-in/out/in-out` templates) is the next thing.~~ **Shipped in v0.2.**
-- Single-shape decompilation — multi-blob tracking via Hu-moment shape matching across frames is the slice after.
+- ~~Single-shape decompilation — multi-blob tracking via Hu-moment shape matching across frames is the slice after.~~ **Shipped in v0.3.**
 - GIF intermediate at ~33fps effective (centisecond granularity) — Phase 2 swaps to MP4 via `ffmpeg-next`.
 - No `path()` primitive yet — the Suzuki contour tracing → RDP → Bezier fitting pipeline (the real Phase-1-of-the-original-plan work) plugs in via the same `vac-decompiler` skeleton; only `detect.rs` and `track.rs` widen.
 
@@ -487,9 +487,56 @@ Plus a new fixture `examples/diagonal.vac` and a CI smoke test (`.github/workflo
 
 After v0.2, the diff between `examples/ball.vac` and the round-tripped `.vac` is purely cosmetic (whitespace / leading comments) and the GIF-fps quirk (30 → 33fps from centisecond delay quantisation, which goes away when we move to MP4 in v0.4).
 
+---
+
+## v0.3: Multi-shape Tracking
+
+v0.1 and v0.2 hard-coded *the largest blob.* The pipeline could only ever describe one moving object. v0.3 generalises it: detect every blob above the noise floor, stitch tracks across frames, and emit one `let shape_<n>` + `animate shape_<n>` block per recovered object.
+
+The new fixture is `examples/two_balls.vac` — a red ball and a yellow ball moving in opposite directions on different rows. After round-trip, both are recovered with their own keyframes:
+
+```
+$ vac compile   examples/two_balls.vac
+$ vac decompile examples/two_balls.gif round_trip.vac
+$ cat round_trip.vac
+canvas 640x360 @33fps
+scene main {
+  duration 2700ms
+  let bg = rect(0, 0, 640, 360)
+  bg.fill = #1a1a2e
+  let shape_0 = ellipse(60, 100, 22, 22)
+  shape_0.fill = #e94560
+  shape_0.stroke = none
+  animate shape_0 {
+    0ms    -> position(60, 100)
+    1350ms -> position(560, 100)
+    2670ms -> position(71, 100)
+    easing: linear
+  }
+  let shape_1 = ellipse(560, 260, 22, 22)
+  shape_1.fill = #fed065
+  shape_1.stroke = none
+  animate shape_1 {
+    0ms    -> position(560, 260)
+    1350ms -> position(60, 260)
+    2670ms -> position(548, 259)
+    easing: linear
+  }
+}
+```
+
+| Change | Where | Why |
+|---|---|---|
+| **Multi-blob detection** — connected-component labelling now keeps every component above a minimum-area threshold; per-blob area + Hu image-moment invariants are computed in the same pass | `vac-decompiler::detect::detect_blobs` | The renderer was already keyed by shape *name*, not by "the one ball" — generalising detection unlocks the rest of the pipeline for free. |
+| **Cross-frame tracker** — lowest-cost-first greedy bipartite matching scored on position + RGB colour + radius + Hu, with a gate threshold and a 3-frame gap tolerance | `vac-decompiler::track::build_tracks` | Stable identities across frames without solving the full Hungarian assignment problem. The gap tolerance survives single-frame detection drop-outs that show up as soon as you have multiple blobs. |
+| **Per-track AST emission** — each track gets its own `let shape_<n>` + fill + stroke + `animate` block; v0.2's temporal RDP and easing classification run independently per track | `vac-decompiler::track::emit_track` | Re-uses every algorithm that already worked, just keyed per object. |
+
+The cost weights and gate are tuned for distinct-coloured balls a frame apart. **Two balls of the same colour crossing paths is still an open ID-swap problem** — the right fix is velocity prediction, which arrives with v0.4 once we drop the GIF-fps drift and have stable inter-frame timing.
+
+Hu moments contribute little for purely circular blobs (every circle has roughly the same Hu signature) — they're computed now so v0.5's `path()` primitive can lean on them when shapes actually vary.
+
 ### What's still on the list
 
-- **v0.3** — multi-shape tracking (Hu-moment matching across frames, one `let` + `animate` per object).
-- **v0.4** — MP4 I/O via `ffmpeg-next`. Removes the centisecond fps drift.
-- **v0.5** — `path()` primitive: Suzuki contour tracing → RDP → least-squares Bezier fitting. The original Phase 1 work.
-- **v0.6+** — real-world video (codec-artifact-tolerant background estimation, scale/opacity inference).
+- **v0.4** — MP4 I/O via `ffmpeg-next` (removes the centisecond fps drift) + velocity-aware tracking (handles same-colour ID-swap).
+- **v0.5** — `path()` primitive: Suzuki contour tracing → RDP → least-squares Bezier fitting. The original Phase 1 work. Hu moments earn their keep when shapes stop being circles.
+- **v0.6+** — real-world video (codec-artifact-tolerant background estimation, scale/opacity inference, scene cuts).
