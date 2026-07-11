@@ -9,12 +9,12 @@
 //! ```no_run
 //! use vac::DocumentExt;
 //!
-//! // .vac → video
+//! // .vac → video (extension picks the format: .mp4 default, .gif still works)
 //! let doc = vac::read("ball.vac")?;
-//! doc.to_video("any_name.gif")?;
+//! doc.to_video("any_name.mp4")?;
 //!
 //! // video → .vac
-//! let doc = vac::read_video("any_name.gif")?;
+//! let doc = vac::read_video("any_name.mp4")?;
 //! doc.to_vac("decompiled.vac")?;
 //! # Ok::<_, vac::Error>(())
 //! ```
@@ -26,9 +26,15 @@
 //! - [`Document::to_video`](DocumentExt::to_video)
 //! - [`Document::to_vac`](DocumentExt::to_vac)
 //!
-//! The output format is selected by the destination's file extension —
-//! `.gif` today, `.mp4` once Phase 2 lands. Choose any filename you like;
-//! VAC just looks at the extension.
+//! The output format is selected by the destination's file extension.
+//! Two backends are available:
+//!
+//! - `.mp4` — H.264/MP4 via the system `ffmpeg` binary (subprocess).
+//!   Exact FPS, smaller files. **Default from v0.4 on.**
+//! - `.gif` — pure-Rust via `image::codecs::gif`. No system deps but
+//!   centisecond delay quantisation drifts the round-trip FPS.
+//!
+//! Choose any filename you like; VAC just looks at the extension.
 
 use std::path::Path;
 
@@ -57,7 +63,7 @@ pub enum Error {
     Compile(#[from] CompileError),
     #[error("decompile: {0}")]
     Decompile(#[from] DecompileError),
-    #[error("unsupported video format `.{ext}` (supported: gif)")]
+    #[error("unsupported video format `.{ext}` (supported: mp4, gif)")]
     UnsupportedVideoFormat { ext: String },
     #[error("path has no extension; can't decide format: {path}")]
     MissingExtension { path: String },
@@ -85,21 +91,23 @@ pub fn parse(src: &str) -> Result<Document> {
 
 /// Decompile a video file back into a [`Document`].
 ///
-/// Format is dispatched by extension. Currently supported: `.gif`.
+/// Format is dispatched by extension. Supported: `.mp4`, `.gif`.
 pub fn read_video<P: AsRef<Path>>(path: P) -> Result<Document> {
     let path = path.as_ref();
     match video_format(path)? {
+        VideoFormat::Mp4 => Ok(vac_decompiler::decompile_mp4(path)?),
         VideoFormat::Gif => Ok(vac_decompiler::decompile_gif(path)?),
     }
 }
 
 /// Render a [`Document`] to a video file on disk.
 ///
-/// Format is dispatched by extension. Currently supported: `.gif`.
-/// Future: `.mp4` (Phase 2 swaps in `ffmpeg-next`).
+/// Format is dispatched by extension. Supported: `.mp4`, `.gif`.
+/// MP4 needs the system `ffmpeg` binary on PATH at runtime.
 pub fn write_video<P: AsRef<Path>>(doc: &Document, path: P) -> Result<()> {
     let path = path.as_ref();
     match video_format(path)? {
+        VideoFormat::Mp4 => Ok(vac_compiler::compile_to_mp4(doc, path)?),
         VideoFormat::Gif => Ok(vac_compiler::compile_to_gif(doc, path)?),
     }
 }
@@ -152,6 +160,7 @@ impl DocumentExt for Document {
 // --------------------------------------------------------------------
 
 enum VideoFormat {
+    Mp4,
     Gif,
 }
 
@@ -163,6 +172,7 @@ fn video_format(path: &Path) -> Result<VideoFormat> {
             path: path.display().to_string(),
         })?;
     match ext.to_ascii_lowercase().as_str() {
+        "mp4" | "m4v" => Ok(VideoFormat::Mp4),
         "gif" => Ok(VideoFormat::Gif),
         other => Err(Error::UnsupportedVideoFormat {
             ext: other.to_string(),

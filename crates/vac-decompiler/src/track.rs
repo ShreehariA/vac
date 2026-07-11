@@ -25,7 +25,7 @@ use vac_format::{
     Transform, Value,
 };
 
-use crate::detect::{Blob, Detection};
+use crate::detect::{Blob, Detection, ShapeKind};
 use crate::frames::{estimate_fps, VideoFrame};
 
 /// 1D RDP tolerance, in pixels.  Below this, deviations from the
@@ -124,19 +124,49 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
 
 fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
     let name = format!("shape_{idx}");
-    let radii: Vec<f32> = track.samples.iter().map(|(_, b)| b.radius).collect();
-    let radius = round_to_int(median_f32(&radii));
+    // Majority-vote the shape kind across all samples of the track.
+    // A track that classifies inconsistently usually means antialiased
+    // edges flipping the bbox fill-ratio across the threshold; majority
+    // is more robust than per-frame.
+    let kind = majority_kind(&track.samples);
+    // Aggregate rx and ry independently so a wide rect stays wide.
+    let rxs: Vec<f32> = track.samples.iter().map(|(_, b)| b.rx).collect();
+    let rys: Vec<f32> = track.samples.iter().map(|(_, b)| b.ry).collect();
+    let rx = round_to_int(median_f32(&rxs));
+    let ry = round_to_int(median_f32(&rys));
     let color = median_color(track.samples.iter().map(|(_, b)| b.color));
     let (first_t, first_b) = track.samples[0];
 
-    statements.push(Statement::Let {
-        name: name.clone(),
-        shape: Shape::Ellipse {
+    // Both primitives keep keyframe positions in the same coordinate the
+    // compiler expects as `position(...)` anchor:
+    //   Ellipse anchor = (cx, cy)
+    //   Rect    anchor = top-left (x, y) = (cx - rx, cy - ry)
+    let anchor_xy = |b: &Blob| -> (f32, f32) {
+        match kind {
+            ShapeKind::Ellipse => (b.cx, b.cy),
+            ShapeKind::Rect => (b.cx - rx, b.cy - ry),
+        }
+    };
+    let (first_x, first_y) = anchor_xy(&first_b);
+
+    let shape = match kind {
+        ShapeKind::Ellipse => Shape::Ellipse {
             cx: round_to_int(first_b.cx),
             cy: round_to_int(first_b.cy),
-            rx: radius,
-            ry: radius,
+            rx,
+            ry,
         },
+        ShapeKind::Rect => Shape::Rect {
+            x: round_to_int(first_x),
+            y: round_to_int(first_y),
+            w: 2.0 * rx,
+            h: 2.0 * ry,
+        },
+    };
+
+    statements.push(Statement::Let {
+        name: name.clone(),
+        shape,
     });
     statements.push(Statement::Assign {
         target: name.clone(),
@@ -170,12 +200,10 @@ fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
             .map(|&i| {
                 let (t, b) = blobs[i];
                 let t_norm = if i == 0 { 0 } else { t.saturating_sub(first_t) };
+                let (ax, ay) = anchor_xy(&b);
                 Keyframe {
                     time_ms: t_norm,
-                    transforms: vec![Transform::Position(
-                        round_to_int(b.cx),
-                        round_to_int(b.cy),
-                    )],
+                    transforms: vec![Transform::Position(round_to_int(ax), round_to_int(ay))],
                 }
             })
             .collect();
@@ -185,6 +213,18 @@ fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
             keyframes,
             easing,
         }));
+    }
+}
+
+fn majority_kind(samples: &[(u32, Blob)]) -> ShapeKind {
+    let rects = samples
+        .iter()
+        .filter(|(_, b)| b.kind == ShapeKind::Rect)
+        .count();
+    if rects * 2 > samples.len() {
+        ShapeKind::Rect
+    } else {
+        ShapeKind::Ellipse
     }
 }
 
@@ -512,21 +552,18 @@ mod tests {
     use super::*;
 
     fn blob_at(cx: f32, cy: f32) -> Blob {
-        Blob {
-            cx,
-            cy,
-            radius: 24.0,
-            color: Color::rgb(0, 0, 0),
-            area: 1800,
-            hu: [0.0; 7],
-        }
+        blob_full(cx, cy, Color::rgb(0, 0, 0))
     }
 
     fn blob_full(cx: f32, cy: f32, color: Color) -> Blob {
         Blob {
             cx,
             cy,
+            rx: 24.0,
+            ry: 24.0,
             radius: 24.0,
+            fill_ratio: 0.785,
+            kind: ShapeKind::Ellipse,
             color,
             area: 1800,
             hu: [0.0; 7],

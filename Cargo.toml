@@ -9,18 +9,18 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourname/vac"
-description = "VAC — Video As Code. A purely algorithmic compiler/decompiler between video and structured source code."
+description = "VAC — Video As Code. A purely algorithmic compiler/decompiler between video and structured source code. v0.4 replaces the GIF intermediate with exact-fps H.264/MP4 via the system ffmpeg binary; v0.4.1 adds the rect/ellipse blob classifier."
 
 [workspace.dependencies]
 # Internal crates
-vac = { path = "crates/vac", version = "0.3.0" }
-vac-format = { path = "crates/vac-format", version = "0.3.0" }
-vac-compiler = { path = "crates/vac-compiler", version = "0.3.0" }
-vac-decompiler = { path = "crates/vac-decompiler", version = "0.3.0" }
+vac = { path = "crates/vac", version = "0.4.1" }
+vac-format = { path = "crates/vac-format", version = "0.4.1" }
+vac-compiler = { path = "crates/vac-compiler", version = "0.4.1" }
+vac-decompiler = { path = "crates/vac-decompiler", version = "0.4.1" }
 
 # External crates (wide version reqs so cargo picks the latest compatible)
 anyhow = "1"

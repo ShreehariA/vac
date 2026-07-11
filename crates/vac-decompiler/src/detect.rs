@@ -26,12 +26,31 @@ pub struct Detection {
     pub blobs: Vec<Blob>,
 }
 
+/// Primitive class the decompiler thinks best fits this blob's silhouette.
+/// Decided by the bbox fill ratio (`area / (bbox_w * bbox_h)`):
+/// a perfectly filled rect is 1.0, a perfectly filled ellipse is π/4 ≈ 0.785.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeKind {
+    Rect,
+    Ellipse,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Blob {
     pub cx: f32,
     pub cy: f32,
-    /// Mean of bbox half-width and half-height. For circles ≈ true radius.
+    /// bbox half-width  (= (max_x - min_x + 1) / 2).
+    pub rx: f32,
+    /// bbox half-height (= (max_y - min_y + 1) / 2).
+    pub ry: f32,
+    /// Mean of `rx` and `ry`. Kept for v0.3-era tracker code paths that
+    /// only care about a scalar size; new code should prefer `rx`/`ry`.
     pub radius: f32,
+    /// `area / (bbox_w * bbox_h)`. Drives `kind`; also useful as a
+    /// per-frame confidence score for the classification.
+    pub fill_ratio: f32,
+    /// Classification result of `fill_ratio` against `RECT_FILL_THRESHOLD`.
+    pub kind: ShapeKind,
     /// Mean colour over interior pixels (4-neighbours all share label).
     /// Falls back to whole-blob mean for very thin shapes.
     pub color: Color,
@@ -41,6 +60,13 @@ pub struct Blob {
     /// invariant — useful for shape-based matching across frames.
     pub hu: [f32; 7],
 }
+
+/// Bbox fill-ratio threshold above which a blob is classified as
+/// `ShapeKind::Rect`. Picked so that a filled rect with H.264 chroma
+/// subsampling artefacts (~0.94 typical) still classifies as rect, while
+/// a filled circle (~0.78) classifies as ellipse and a rounded rect
+/// (~0.85) lands in the ellipse bucket too (safer false-negative).
+pub const RECT_FILL_THRESHOLD: f32 = 0.90;
 
 /// Squared Euclidean colour distance threshold for the
 /// foreground/background mask. ~24 per channel ≈ visually distinct
@@ -281,7 +307,20 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
         .map(|a| {
             let bbox_w = (a.max_x - a.min_x + 1) as f32;
             let bbox_h = (a.max_y - a.min_y + 1) as f32;
-            let radius = (bbox_w + bbox_h) * 0.25;
+            let rx = bbox_w * 0.5;
+            let ry = bbox_h * 0.5;
+            let radius = (rx + ry) * 0.5;
+            let bbox_area = bbox_w * bbox_h;
+            let fill_ratio = if bbox_area > 0.0 {
+                (a.area as f32) / bbox_area
+            } else {
+                0.0
+            };
+            let kind = if fill_ratio >= RECT_FILL_THRESHOLD {
+                ShapeKind::Rect
+            } else {
+                ShapeKind::Ellipse
+            };
             let color = if a.int_count > 0 {
                 Color::rgb(
                     (a.int_r / a.int_count) as u8,
@@ -299,7 +338,11 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
             Blob {
                 cx: a.cx,
                 cy: a.cy,
+                rx,
+                ry,
                 radius,
+                fill_ratio,
+                kind,
                 color,
                 area: a.area,
                 hu: a.hu,
@@ -448,6 +491,101 @@ fn label_components_4(mask: &[bool], w: usize, h: usize) -> Vec<u32> {
 
 struct UnionFind {
     parent: Vec<u32>,
+}
+
+// --------------------------------------------------------------------
+// Tests
+// --------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frames::VideoFrame;
+
+    /// Build a synthetic RGBA frame painted entirely in `bg`, then fill a
+    /// region selected by `mask(x, y)` with `fg`.
+    fn synth_frame(w: u32, h: u32, bg: (u8, u8, u8), fg: (u8, u8, u8), mask: impl Fn(u32, u32) -> bool) -> VideoFrame {
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let (r, g, b) = if mask(x, y) { fg } else { bg };
+                pixels[i] = r;
+                pixels[i + 1] = g;
+                pixels[i + 2] = b;
+                pixels[i + 3] = 255;
+            }
+        }
+        VideoFrame {
+            width: w,
+            height: h,
+            pixels,
+            delay_ms: 33,
+        }
+    }
+
+    #[test]
+    fn classifier_recognises_filled_rectangle_as_rect() {
+        // 50×30 rect at (60, 40) on a uniform dark background.
+        let f = synth_frame(160, 120, (20, 20, 20), (255, 0, 0), |x, y| {
+            (60..110).contains(&x) && (40..70).contains(&y)
+        });
+        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20));
+        assert_eq!(blobs.len(), 1, "expected exactly one blob, got {blobs:?}");
+        let b = blobs[0];
+        assert_eq!(b.kind, ShapeKind::Rect, "fill_ratio={}", b.fill_ratio);
+        assert!(b.fill_ratio > 0.99, "fill_ratio={}", b.fill_ratio);
+        // bbox is 50×30 so rx=25, ry=15. Aspect ratio recovered.
+        assert!((b.rx - 25.0).abs() < 1.0, "rx={}", b.rx);
+        assert!((b.ry - 15.0).abs() < 1.0, "ry={}", b.ry);
+    }
+
+    #[test]
+    fn classifier_recognises_filled_disk_as_ellipse() {
+        // Disk of radius 30 centered at (80, 60).
+        let f = synth_frame(160, 120, (20, 20, 20), (255, 0, 0), |x, y| {
+            let dx = x as i32 - 80;
+            let dy = y as i32 - 60;
+            dx * dx + dy * dy <= 30 * 30
+        });
+        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20));
+        assert_eq!(blobs.len(), 1, "expected exactly one blob");
+        let b = blobs[0];
+        assert_eq!(b.kind, ShapeKind::Ellipse, "fill_ratio={}", b.fill_ratio);
+        // π/4 ≈ 0.785; pixel rasterisation drifts but stays well below 0.90.
+        assert!(b.fill_ratio < 0.85, "fill_ratio={}", b.fill_ratio);
+        assert!(b.fill_ratio > 0.70, "fill_ratio={}", b.fill_ratio);
+    }
+
+    #[test]
+    fn classifier_recognises_wide_ellipse_with_independent_rx_ry() {
+        // Ellipse rx=40, ry=15 centered at (80, 60).
+        let f = synth_frame(160, 120, (20, 20, 20), (0, 255, 0), |x, y| {
+            let dx = (x as f32 - 80.0) / 40.0;
+            let dy = (y as f32 - 60.0) / 15.0;
+            dx * dx + dy * dy <= 1.0
+        });
+        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20));
+        assert_eq!(blobs.len(), 1);
+        let b = blobs[0];
+        assert_eq!(b.kind, ShapeKind::Ellipse);
+        assert!((b.rx - 40.0).abs() <= 1.0, "rx={}", b.rx);
+        assert!((b.ry - 15.0).abs() <= 1.0, "ry={}", b.ry);
+    }
+
+    #[test]
+    fn classifier_keeps_two_rects_separate() {
+        // Two disjoint rectangles → two Rect blobs.
+        let f = synth_frame(200, 100, (10, 10, 10), (255, 200, 0), |x, y| {
+            ((20..60).contains(&x) && (20..70).contains(&y))
+                || ((130..170).contains(&x) && (20..70).contains(&y))
+        });
+        let blobs = detect_blobs(&f, Color::rgb(10, 10, 10));
+        assert_eq!(blobs.len(), 2);
+        for b in &blobs {
+            assert_eq!(b.kind, ShapeKind::Rect, "fill_ratio={}", b.fill_ratio);
+        }
+    }
 }
 
 impl UnionFind {

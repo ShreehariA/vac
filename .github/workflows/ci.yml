@@ -27,30 +27,86 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install ffmpeg (for v0.4 MP4 round-trip)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Build (release)
         run: cargo build --release --workspace --all-targets
 
-      - name: Run tests (round-trip + unit)
+      - name: Run tests (round-trip + unit, both GIF and MP4)
         run: cargo test --release --workspace
 
-      - name: Smoke-test the CLI on the bundled fixtures
+      - name: Smoke-test the GIF path
         run: |
           cargo run --release -p vac-cli -- compile   examples/ball.vac      target/ci/ball.gif
-          cargo run --release -p vac-cli -- decompile target/ci/ball.gif     target/ci/ball.roundtrip.vac
+          cargo run --release -p vac-cli -- decompile target/ci/ball.gif     target/ci/ball.gif.vac
           cargo run --release -p vac-cli -- compile   examples/diagonal.vac  target/ci/diagonal.gif
-          cargo run --release -p vac-cli -- decompile target/ci/diagonal.gif target/ci/diagonal.roundtrip.vac
+          cargo run --release -p vac-cli -- decompile target/ci/diagonal.gif target/ci/diagonal.gif.vac
           cargo run --release -p vac-cli -- compile   examples/two_balls.vac target/ci/two_balls.gif
-          cargo run --release -p vac-cli -- decompile target/ci/two_balls.gif target/ci/two_balls.roundtrip.vac
+          cargo run --release -p vac-cli -- decompile target/ci/two_balls.gif target/ci/two_balls.gif.vac
           test -s target/ci/ball.gif
-          test -s target/ci/ball.roundtrip.vac
           test -s target/ci/diagonal.gif
-          test -s target/ci/diagonal.roundtrip.vac
           test -s target/ci/two_balls.gif
-          test -s target/ci/two_balls.roundtrip.vac
-          # Two-balls fixture must produce two `shape_*` declarations.
-          shapes=$(grep -c '^  let shape_' target/ci/two_balls.roundtrip.vac || true)
-          echo "two_balls round-trip shape count: $shapes"
+          # Two-balls must produce two `shape_*` declarations.
+          shapes=$(grep -c '^  let shape_' target/ci/two_balls.gif.vac || true)
           test "$shapes" = "2"
+
+      - name: Smoke-test the MP4 path (v0.4)
+        run: |
+          cargo run --release -p vac-cli -- compile   examples/ball.vac      target/ci/ball.mp4
+          cargo run --release -p vac-cli -- decompile target/ci/ball.mp4     target/ci/ball.mp4.vac
+          cargo run --release -p vac-cli -- compile   examples/two_balls.vac target/ci/two_balls.mp4
+          cargo run --release -p vac-cli -- decompile target/ci/two_balls.mp4 target/ci/two_balls.mp4.vac
+          test -s target/ci/ball.mp4
+          test -s target/ci/two_balls.mp4
+          # The v0.4 promise: MP4 round-trip preserves source FPS exactly.
+          grep -q '^canvas 480x320 @30fps' target/ci/ball.mp4.vac
+          grep -q '^canvas 640x360 @30fps' target/ci/two_balls.mp4.vac
+          # Same multi-shape invariant via MP4.
+          shapes=$(grep -c '^  let shape_' target/ci/two_balls.mp4.vac || true)
+          test "$shapes" = "2"
+
+      - name: Smoke-test the rect classifier (v0.4.1)
+        run: |
+          cargo run --release -p vac-cli -- compile   examples/sliding_rect.vac target/ci/sliding_rect.mp4
+          cargo run --release -p vac-cli -- decompile target/ci/sliding_rect.mp4 target/ci/sliding_rect.mp4.vac
+          test -s target/ci/sliding_rect.mp4
+          # v0.4.1 promise: a rect input round-trips as rect, NOT ellipse.
+          grep -q '^  let shape_0 = rect' target/ci/sliding_rect.mp4.vac
+          # Width and height survive within ±3 px of source 120×60.
+          shape_line=$(grep '^  let shape_0 = rect' target/ci/sliding_rect.mp4.vac)
+          echo "recovered: $shape_line"
+          # Bail loudly if the classifier silently regresses to ellipse.
+          ! grep -q '^  let shape_0 = ellipse' target/ci/sliding_rect.mp4.vac
+
+      - name: Smoke-test the PAC v0.2 pipeline (curves + gradients + auto-K)
+        run: |
+          mkdir -p target/ci/pac
+          # 1. The committed example uses gradient() and path() primitives —
+          #    must compile cleanly through the v0.2 renderer.
+          cargo run --release -p pac-cli -- compile examples/hello.pac target/ci/pac/hello.png
+          test -s target/ci/pac/hello.png
+          # 2. Decompile that PNG with auto-K + curves + gradients on the
+          #    defaults.  Output must contain a `canvas` header, ≥1 shape,
+          #    and at least one `path(...)` (v0.2 emits Bezier curves by default).
+          cargo run --release -p pac-cli -- decompile target/ci/pac/hello.png target/ci/pac/hello.pac --k 4 --k-max 8 --min-area 200
+          grep -q '^canvas ' target/ci/pac/hello.pac
+          shapes=$(grep -c '^let ' target/ci/pac/hello.pac || true)
+          test "$shapes" -ge "1"
+          grep -q '^let .* = path(' target/ci/pac/hello.pac
+          # 3. The auto-K decompile round-trips to a renderable PNG.
+          cargo run --release -p pac-cli -- compile target/ci/pac/hello.pac target/ci/pac/hello_re.png
+          test -s target/ci/pac/hello_re.png
+          # 4. Locking K (min == max) disables auto-K; verify it still works.
+          cargo run --release -p pac-cli -- decompile target/ci/pac/hello.png target/ci/pac/hello_lockedk.pac --k 4 --k-max 4 --min-area 200
+          grep -q '^canvas ' target/ci/pac/hello_lockedk.pac
+          # 5. --no-smooth produces polygon(...) instead of path(...).
+          cargo run --release -p pac-cli -- decompile target/ci/pac/hello.png target/ci/pac/hello_nosmooth.pac --no-smooth --k 4 --k-max 8 --min-area 200
+          grep -q '^let .* = polygon(' target/ci/pac/hello_nosmooth.pac
+          ! grep -q '^let .* = path(' target/ci/pac/hello_nosmooth.pac
+          # 6. --no-gradients suppresses gradient() emission.
+          cargo run --release -p pac-cli -- decompile target/ci/pac/hello.png target/ci/pac/hello_nograd.pac --no-gradients --k 4 --k-max 8 --min-area 200
+          ! grep -q 'gradient(linear' target/ci/pac/hello_nograd.pac
 
       - name: Upload round-trip artefacts
         if: always()
@@ -59,7 +115,9 @@ jobs:
           name: roundtrip-output
           path: |
             target/ci/*.gif
-            target/ci/*.roundtrip.vac
+            target/ci/*.mp4
+            target/ci/*.vac
+            target/ci/pac/*
             target/test-roundtrip/*
           if-no-files-found: warn
           retention-days: 14

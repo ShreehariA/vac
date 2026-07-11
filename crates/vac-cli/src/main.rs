@@ -1,12 +1,15 @@
 //! `vac` CLI — `unzip`-style entry point for the VAC toolchain.
 //!
 //! ```text
-//! vac compile   ball.vac              # → ball.gif (next to source)
-//! vac compile   ball.vac out.gif      # → out.gif  (positional, name what you like)
+//! vac compile   ball.vac              # → ball.mp4 (next to source, default from v0.4)
+//! vac compile   ball.vac out.gif      # → out.gif  (extension picks format)
 //!
-//! vac decompile ball.gif              # → ball.vac (next to source)
+//! vac decompile ball.mp4              # → ball.vac (next to source)
 //! vac decompile ball.gif out.vac      # → out.vac
 //! ```
+//!
+//! Format dispatch is by extension: `.mp4` (preferred) and `.gif` (legacy
+//! pure-Rust path). MP4 requires the system `ffmpeg` binary on PATH.
 
 use std::path::{Path, PathBuf};
 
@@ -30,20 +33,19 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Compile a `.vac` source file into a video (currently `.gif`).
+    /// Compile a `.vac` source file into a video. Default container is MP4.
     Compile {
         /// Path to a `.vac` source file.
         input: PathBuf,
-        /// Output video path. Defaults to `<input>.gif` next to the source.
-        /// You can use any name you want; the extension picks the format.
+        /// Output video path. Defaults to `<input>.mp4` next to the source.
+        /// Extension picks the container: `.mp4` (default) or `.gif`.
         output: Option<PathBuf>,
     },
     /// Decompile a video file back into `.vac` source.
     Decompile {
-        /// Path to a video file (currently `.gif`).
+        /// Path to a video file (`.mp4` or `.gif`).
         input: PathBuf,
         /// Output `.vac` path. Defaults to `<input>.vac` next to the video.
-        /// You can use any name you want.
         output: Option<PathBuf>,
     },
 }
@@ -59,7 +61,7 @@ fn main() -> Result<()> {
 fn run_compile(input: &Path, output: Option<&Path>) -> Result<()> {
     let out_path: PathBuf = output
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| input.with_extension("gif"));
+        .unwrap_or_else(|| input.with_extension("mp4"));
 
     let doc = vac::read(input).with_context(|| format!("reading {}", input.display()))?;
 

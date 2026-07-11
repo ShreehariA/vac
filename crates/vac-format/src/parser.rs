@@ -186,7 +186,7 @@ impl<'a> Lexer<'a> {
             return Ok(Spanned { tok, span });
         }
 
-        // Arrow `->`
+        // Arrow `->` or a negative-number prefix.
         if c == b'-' {
             if self.peek_at(1) == Some(b'>') {
                 self.bump();
@@ -196,9 +196,28 @@ impl<'a> Lexer<'a> {
                     span,
                 });
             }
+            // `-<digit>` opens a negative number (used by rect / position()
+            // when a shape starts partially off-canvas — e.g. a slide-in
+            // card whose left edge begins at x = -86).
+            if self.peek_at(1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                self.bump(); // consume '-'
+                let mut sp = self.read_number_like(span)?;
+                match &mut sp.tok {
+                    Token::Number(n) => *n = -*n,
+                    // Negative dimensions / times / fps make no sense.
+                    Token::Dimension(..) | Token::TimeMs(..) | Token::Fps(..) => {
+                        return Err(ParseError::syntax(
+                            span,
+                            "negative values are only valid for plain numbers, not dimensions / times / fps",
+                        ));
+                    }
+                    _ => {}
+                }
+                return Ok(sp);
+            }
             return Err(ParseError::syntax(
                 span,
-                "unexpected '-' (only '->' is allowed)",
+                "unexpected '-' (expected '->' or a negative number)",
             ));
         }
 
@@ -831,6 +850,52 @@ scene s {
 }
 "#;
         assert!(parse(bad).is_err());
+    }
+
+    #[test]
+    fn accepts_negative_numbers_in_rect_and_position() {
+        // Slide-in card: shape starts partially off-canvas at x = -86.
+        let s = r#"
+canvas 480x320 @30fps
+scene main {
+  duration 3s
+  let card = rect(-86, 120, 180, 60)
+  card.fill = #ff5050
+  animate card {
+    0ms    -> position(-86, 120)
+    1000ms -> position(80, 120)
+    easing: linear
+  }
+}
+"#;
+        let doc = parse(s).expect("parse with negative coords");
+        let scene = &doc.scenes[0];
+        // First statement is the rect with x=-86.
+        assert!(matches!(
+            scene.statements[0],
+            crate::ast::Statement::Let {
+                shape: crate::ast::Shape::Rect { x: -86.0, .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_dimensions_and_times() {
+        // Negative dimensions are still nonsense; the lexer should refuse.
+        assert!(parse("canvas -10x10 @30fps scene s { duration 1s }").is_err());
+        // Negative time literals are also still nonsense.
+        assert!(parse(
+            r#"canvas 100x100 @30fps scene s { duration 1s
+                let b = ellipse(50, 50, 10, 10)
+                animate b {
+                    -1ms -> position(0, 0)
+                    1s   -> position(10, 10)
+                    easing: linear
+                }
+            }"#
+        )
+        .is_err());
     }
 
     #[test]

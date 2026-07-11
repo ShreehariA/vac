@@ -1,9 +1,21 @@
-//! VAC compiler — `.vac` AST → video frames → GIF.
+//! VAC compiler — `.vac` AST → video frames → encoded video file.
 //!
-//! v0.1 produces an animated GIF (no system FFmpeg dependency).
-//! When we widen the slice in Phase 2/3, the encoder swaps to MP4
-//! via `ffmpeg-next` while the rendering pipeline stays untouched.
+//! Frame production is format-agnostic ([`render::render_document`]).
+//! Encoding has two backends:
+//!
+//! - [`compile_to_gif`] — pure-Rust via `image::codecs::gif`. No system
+//!   dependencies. Frame delays are quantised to centiseconds, which
+//!   shows up as the well-known "30fps becomes 33fps" round-trip
+//!   artefact.
+//! - [`compile_to_mp4`] — H.264/MP4 via the system `ffmpeg` binary
+//!   (subprocess). Exact FPS, smaller files, no centisecond drift.
+//!   Requires `ffmpeg` on PATH at runtime; no build-time dependency.
+//!
+//! Choose by file extension via the `vac` facade
+//! (`vac::write_video("foo.mp4", &doc)`); call these directly only
+//! when you know the format you want.
 
+pub mod mp4;
 pub mod render;
 
 use std::path::Path;
@@ -26,6 +38,15 @@ pub enum CompileError {
 pub fn compile_to_gif(doc: &Document, out: &Path) -> Result<(), CompileError> {
     let frames = render::render_document(doc)?;
     encode_gif(&frames, doc.canvas.fps, out)
+}
+
+/// Compile a [`Document`] to an H.264 MP4 on disk via `ffmpeg`.
+///
+/// Requires the `ffmpeg` binary on PATH. Use [`mp4::ffmpeg_available`]
+/// for a runtime probe.
+pub fn compile_to_mp4(doc: &Document, out: &Path) -> Result<(), CompileError> {
+    let frames = render::render_document(doc)?;
+    mp4::encode_mp4(&frames, doc.canvas.fps, out)
 }
 
 fn encode_gif(

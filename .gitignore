@@ -11,6 +11,46 @@ Cargo.lock.bak
 /decoded.vac
 /round_trip.vac
 /round_trip_two.vac
+/round_trip_mp4.vac
+/round_trip_two_mp4.vac
 /out.gif
+/out.mp4
 /*.gif
+/*.mp4
+examples/*.gif
+examples/*.mp4
 *.roundtrip.vac
+
+# v0.4 capability-matrix artifacts (all regeneratable from scripts/ + filters/)
+examples/wild/inputs/*.mp4
+examples/wild/inputs/*.gif
+examples/wild/outputs/*.mp4
+examples/wild/outputs/*.gif
+examples/wild/outputs/*.vac
+examples/wild/outputs/*_input_*.png
+examples/wild/outputs/*_roundtrip_*.png
+examples/wild/outputs/*_t0.75.png
+examples/wild/outputs/*_t1.5.png
+examples/wild/outputs/motion_graphics_frame.png
+examples/wild/outputs/slide_in_card_frame.png
+examples/wild/outputs/*_preview.png
+
+# Real-world calling-card GIFs (re-downloadable from Wikimedia Commons)
+examples/wild/inputs/real_*.gif
+examples/wild/inputs/real_*.mp4
+
+# PAC AI-image stress test (re-downloadable from Wikimedia Commons via
+# scripts/fetch_ai_images.sh; not redistributed by this repo)
+examples/wild/inputs/ai_*.png
+examples/wild/inputs/ai_*.jpg
+examples/wild/inputs/ai_*.mp4
+examples/wild/outputs/ai_*.png
+examples/wild/outputs/ai_*.pac
+examples/wild/outputs/ai_*.mp4
+
+# PAC v0.2 artifacts (all regeneratable via docs/pac-v0.2-ai-matrix.md)
+examples/wild/outputs/*_v02.pac
+examples/wild/outputs/*_v02_render.png
+examples/wild/outputs/*_v02_compare.png
+examples/wild/outputs/pac_v02_results.png
+/target/ci/

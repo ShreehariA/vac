@@ -2,16 +2,22 @@
 //!
 //! `.vac` source → video → reconstructed `.vac` source.
 //!
-//! The decompiler measures pixels and the GIF intermediate quantises
-//! delays to centiseconds, so we don't expect byte equality.  What we
-//! do assert is *structural fidelity*: same canvas, the right number
-//! of recovered shapes, the apex keyframe survives per shape, and the
-//! colour drift stays under tight bounds now that v0.2 samples
-//! interior pixels only.
+//! Two backends are exercised:
+//!
+//! - **GIF** (pure-Rust, no system deps). Centisecond-quantised
+//!   delays mean a 30fps source round-trips as 33fps and durations
+//!   drift by ~10%.
+//! - **MP4** (`ffmpeg` subprocess, v0.4+). FPS and duration are
+//!   exact.  Skipped at runtime if `ffmpeg` isn't on PATH.
+//!
+//! What we assert in both cases is *structural fidelity*: same
+//! canvas, the right number of recovered shapes, apex keyframes
+//! survive, and colour drift stays under tight bounds.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use vac::{Color, DocumentExt, Statement, Transform};
+use vac::{Color, DocumentExt, Shape, Statement, Transform};
 
 fn workspace_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -22,7 +28,9 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn round_trip(sample: &str) -> (vac::Document, vac::Document) {
+/// Round-trip a `.vac` fixture through the named container.  `ext`
+/// is `"gif"` or `"mp4"`.
+fn round_trip_via(sample: &str, ext: &str) -> (vac::Document, vac::Document) {
     let ws = workspace_root();
     let sample_path = ws.join("examples").join(sample);
 
@@ -31,20 +39,39 @@ fn round_trip(sample: &str) -> (vac::Document, vac::Document) {
     let out_dir = ws.join("target/test-roundtrip");
     std::fs::create_dir_all(&out_dir).unwrap();
     let stem = Path::new(sample).file_stem().unwrap().to_string_lossy();
-    let gif_path = out_dir.join(format!("{stem}.gif"));
-    let recon_path = out_dir.join(format!("{stem}.roundtrip.vac"));
+    let video_path = out_dir.join(format!("{stem}.{ext}"));
+    let recon_path = out_dir.join(format!("{stem}.{ext}.roundtrip.vac"));
 
-    original.to_video(&gif_path).expect("compile to gif");
-    let reconstructed = vac::read_video(&gif_path).expect("decompile");
+    original
+        .to_video(&video_path)
+        .expect("compile to video");
+    let reconstructed = vac::read_video(&video_path).expect("decompile");
     reconstructed.to_vac(&recon_path).expect("write recon vac");
     let _reparsed = vac::read(&recon_path).expect("re-parse round-tripped vac");
 
     eprintln!(
-        "--- {} reconstructed ---\n{}",
-        sample,
+        "--- {sample} reconstructed via .{ext} ---\n{}",
         reconstructed.to_vac_string()
     );
     (original, reconstructed)
+}
+
+/// Convenience wrapper for the legacy GIF backend.
+fn round_trip(sample: &str) -> (vac::Document, vac::Document) {
+    round_trip_via(sample, "gif")
+}
+
+fn ffmpeg_on_path() -> bool {
+    fn ok(bin: &str) -> bool {
+        Command::new(bin)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    ok("ffmpeg") && ok("ffprobe")
 }
 
 /// Names of all non-`bg` shapes in declaration order.
@@ -120,6 +147,19 @@ fn assert_canvas_matches(o: &vac::Document, r: &vac::Document) {
         "fps mismatch: original {} vs reconstructed {}",
         o.canvas.fps,
         r.canvas.fps,
+    );
+}
+
+/// MP4 round-trips have no centisecond rounding — FPS must match
+/// exactly. Duration may be one frame short of the source because the
+/// renderer doesn't render the trailing instant (a 3s @30fps animation
+/// produces 90 frames at t = 0..2966ms).
+fn assert_canvas_exact(o: &vac::Document, r: &vac::Document) {
+    assert_eq!(r.canvas.width, o.canvas.width);
+    assert_eq!(r.canvas.height, o.canvas.height);
+    assert_eq!(
+        r.canvas.fps, o.canvas.fps,
+        "v0.4 promise: MP4 round-trip must preserve fps exactly",
     );
 }
 
@@ -232,4 +272,154 @@ fn two_balls_round_trip_recovers_both_apexes() {
         "yellow track lost its apex: kfs={yellow_kfs:?}",
     );
     assert_apex_recovered(&yellow_kfs, 60.0, 260.0, 4.0);
+}
+
+/// Look up the `Shape` of a named `let` statement.
+fn shape_of(doc: &vac::Document, name: &str) -> Shape {
+    for stmt in &doc.scenes[0].statements {
+        if let Statement::Let {
+            name: n,
+            shape,
+        } = stmt
+        {
+            if n == name {
+                return *shape;
+            }
+        }
+    }
+    panic!("no `let {name} = ...` in document");
+}
+
+/// v0.4.1 — the rect/ellipse classifier.  A `rect(...)` source must
+/// round-trip back to `rect(...)` (not collapse into an `ellipse`).
+/// Width and height must survive — a 120×60 card stays 120×60, not
+/// averaged into a 90×90 circle.
+#[test]
+fn sliding_rect_round_trip_preserves_rect_kind_and_aspect() {
+    if !ffmpeg_on_path() {
+        eprintln!("skipping rect round-trip: ffmpeg/ffprobe not on PATH");
+        return;
+    }
+    let (_, reconstructed) = round_trip_via("sliding_rect.vac", "mp4");
+
+    let names = shape_names(&reconstructed);
+    assert_eq!(names.len(), 1, "expected exactly one non-bg shape");
+
+    let shape = shape_of(&reconstructed, &names[0]);
+    match shape {
+        Shape::Rect { w, h, .. } => {
+            // Source rect is 120×60.  Allow ±3 px for chroma-subsampling
+            // / antialiasing on the edges.
+            assert!(
+                (w - 120.0).abs() <= 3.0,
+                "rect width drifted: got {w}, expected 120",
+            );
+            assert!(
+                (h - 60.0).abs() <= 3.0,
+                "rect height drifted: got {h}, expected 60",
+            );
+        }
+        Shape::Ellipse { .. } => panic!(
+            "regression: sliding_rect.vac round-tripped as Ellipse instead of Rect ({shape:?})",
+        ),
+    }
+
+    // Apex still recovered.
+    let kfs = keyframes_for(&reconstructed, 0);
+    assert!(kfs.len() >= 3, "rect lost its apex keyframe: {kfs:?}");
+    assert_apex_recovered(&kfs, 300.0, 130.0, 4.0);
+}
+
+// --------------------------------------------------------------------
+// v0.4: MP4 round-trips
+//
+// These exercise the `ffmpeg` subprocess path. If `ffmpeg` / `ffprobe`
+// aren't on PATH we skip cleanly so the test suite still runs in
+// minimal environments — the GIF tests above keep the algorithmic
+// pipeline covered there.
+// --------------------------------------------------------------------
+
+#[test]
+fn ball_round_trip_mp4_preserves_fps_and_apex() {
+    if !ffmpeg_on_path() {
+        eprintln!("skipping MP4 round-trip: ffmpeg/ffprobe not on PATH");
+        return;
+    }
+
+    let (original, reconstructed) = round_trip_via("ball.vac", "mp4");
+    assert_canvas_exact(&original, &reconstructed);
+
+    let kfs = keyframes_for(&reconstructed, 0);
+    assert!(
+        kfs.len() >= 3,
+        "expected ≥ 3 keyframes for ping-pong ball, got {kfs:?}",
+    );
+    // With MP4's exact FPS the apex now lands on 1500ms ± 1 frame
+    // (33ms) instead of 1350ms-on-GIF.
+    let apex = kfs
+        .iter()
+        .find(|&&(_, x, y)| (x - 420.0).abs() <= 4.0 && (y - 160.0).abs() <= 4.0)
+        .unwrap_or_else(|| panic!("no apex keyframe in {kfs:?}"));
+    let drift_ms = (apex.0 as i32 - 1500).abs();
+    assert!(
+        drift_ms <= 33,
+        "apex time drifted by {drift_ms}ms (expected ~0ms with MP4); kfs={kfs:?}",
+    );
+
+    let original_color = Color::rgb(0xe9, 0x45, 0x60);
+    let recovered = shape_color(&reconstructed, 0);
+    let drift = color_l1(original_color, recovered);
+    // libx264 CRF 18 plus yuv420p chroma subsampling can drift colour
+    // a touch more than the GIF path's interior-pixel sampling, but
+    // it should still stay tightly bounded.
+    assert!(
+        drift <= 18,
+        "ball colour drifted too far via MP4: {original_color:?} → {recovered:?} (L1 = {drift})",
+    );
+}
+
+#[test]
+fn two_balls_round_trip_mp4_preserves_both_tracks() {
+    if !ffmpeg_on_path() {
+        eprintln!("skipping MP4 round-trip: ffmpeg/ffprobe not on PATH");
+        return;
+    }
+
+    let (original, reconstructed) = round_trip_via("two_balls.vac", "mp4");
+    assert_canvas_exact(&original, &reconstructed);
+
+    let names = shape_names(&reconstructed);
+    assert_eq!(
+        names.len(),
+        2,
+        "expected 2 recovered shapes via MP4, got {names:?}",
+    );
+
+    let red = Color::rgb(0xe9, 0x45, 0x60);
+    let yellow = Color::rgb(0xff, 0xd1, 0x66);
+    let red_idx = shape_index_by_color(&reconstructed, red);
+    let yellow_idx = shape_index_by_color(&reconstructed, yellow);
+    assert_ne!(red_idx, yellow_idx);
+
+    let red_drift = color_l1(red, shape_color(&reconstructed, red_idx));
+    let yellow_drift = color_l1(yellow, shape_color(&reconstructed, yellow_idx));
+    assert!(red_drift <= 18, "red MP4 drift too high: {red_drift}");
+    assert!(yellow_drift <= 18, "yellow MP4 drift too high: {yellow_drift}");
+
+    let red_kfs = keyframes_for(&reconstructed, red_idx);
+    let yellow_kfs = keyframes_for(&reconstructed, yellow_idx);
+    assert!(red_kfs.len() >= 3 && yellow_kfs.len() >= 3);
+    assert_apex_recovered(&red_kfs, 560.0, 100.0, 4.0);
+    assert_apex_recovered(&yellow_kfs, 60.0, 260.0, 4.0);
+
+    // v0.4 promise: with MP4, both apex *times* land on 1500ms exactly
+    // (within one frame) — not 1350ms like the GIF path's centisecond
+    // rounding produced.
+    for kfs in [&red_kfs, &yellow_kfs] {
+        let mid = kfs
+            .iter()
+            .find(|&&(t, _, _)| (t as i32 - 1500).abs() <= 33)
+            .unwrap_or_else(|| panic!("no keyframe near 1500ms in {kfs:?}"));
+        let _ = mid;
+    }
 }

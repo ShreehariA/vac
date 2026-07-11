@@ -1,0 +1,19 @@
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a1a2e
+
+  let card = rect(60, 130, 120, 60)
+  card.fill = #50c878
+  card.stroke = none
+
+  animate card {
+    0ms    -> position(60, 130)
+    1500ms -> position(300, 130)
+    3s     -> position(60, 130)
+    easing: linear
+  }
+}

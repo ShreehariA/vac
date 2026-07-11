@@ -535,8 +535,129 @@ The cost weights and gate are tuned for distinct-coloured balls a frame apart. *
 
 Hu moments contribute little for purely circular blobs (every circle has roughly the same Hu signature) — they're computed now so v0.5's `path()` primitive can lean on them when shapes actually vary.
 
+---
+
+## v0.4: MP4 Round-Trip — Exact FPS
+
+GIF charged for its zero-system-deps simplicity in centiseconds: a 30fps source round-tripped as 33fps, a 3-second animation became 2.7 seconds, and the apex of a ping-pong ball drifted 15ms. v0.4 fixes all of that by replacing the GIF intermediate with H.264/MP4.
+
+The implementation does **not** use the `ffmpeg-next` Rust bindings. Their latest releases target FFmpeg 6/7, and modern toolchains (FFmpeg 8+) ship without a compatible binding crate yet. Instead, VAC shells out to the system `ffmpeg` binary — same FFmpeg under the hood, no FFI, no `pkg-config`, no `clang`, no version-pinning headaches, and works against any FFmpeg 4+ release.
+
+```
+$ vac compile   examples/ball.vac          # → examples/ball.mp4 (default from v0.4)
+$ vac decompile examples/ball.mp4 round_trip.vac
+$ cat round_trip.vac
+canvas 480x320 @30fps                       ← exact, not 33fps
+scene main {
+  duration 3s                               ← exact, not 2700ms
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a182e
+  let shape_0 = ellipse(60, 160, 24, 24)
+  shape_0.fill = #e64561
+  shape_0.stroke = none
+  animate shape_0 {
+    0ms    -> position(60, 160)
+    1500ms -> position(420, 160)            ← apex on the millisecond
+    2966ms -> position(68, 160)
+    easing: linear
+  }
+}
+```
+
+| Change | Where | Why |
+|---|---|---|
+| **MP4 encoder** — RGBA frames piped to `ffmpeg -f rawvideo -pix_fmt rgba ... -c:v libx264 -crf 18 -pix_fmt yuv420p -movflags +faststart` | `vac-compiler::mp4::encode_mp4` | One subprocess per encode. Stderr is captured and surfaced in the `CompileError`. CRF 18 keeps colour drift ≤ ~6 per channel. |
+| **MP4 decoder** — `ffprobe` for `(width, height, r_frame_rate)` + `ffmpeg -i ... -f rawvideo -pix_fmt rgba` for the bytes | `vac-decompiler::frames_mp4::load_mp4` | Reads the rational frame rate, packs the raw bytes into `VideoFrame`s with per-frame `delay_ms` derived from the rational fps so accumulated `t_ms` lands on exact wall-clock instants. |
+| **Extension dispatch** — `.mp4` is the new default for `vac compile foo.vac`; `.gif` still works when explicitly requested | `vac::video_format`, `vac-cli::main` | MP4 wins on quality, GIF wins on portability. Pick by extension; both backends share the same renderer + decompiler. |
+| **Per-frame timing** — `delay_ms` accumulates the rational fps without rounding error | `frames_mp4::load_mp4` | For 30fps the per-frame delay alternates 33 / 34 / 33 / 33 / 34 … averaging exactly 33.33. The apex of `ball.vac` now lands on `1500ms` instead of v0.3's `1485ms`. |
+| **CI MP4 smoke test** | `.github/workflows/ci.yml` | Installs `ffmpeg` on the runner and asserts the round-tripped header reads `@30fps` exactly for both single- and multi-shape fixtures. |
+
+### Sizes
+
+| Fixture | GIF (v0.3) | MP4 (v0.4) |
+|---|---|---|
+| `ball.vac` (480×320 @30fps, 3s) | ~50 KB | ~7.5 KB |
+| `two_balls.vac` (640×360 @30fps, 3s) | 139 KB | 18 KB |
+
+7-8× smaller and exact-FPS in one swap.
+
+### How to test it
+
+You need `ffmpeg` on PATH. On macOS: `brew install ffmpeg`. On Debian/Ubuntu: `apt install ffmpeg`. The MP4 integration tests skip cleanly with a log message if `ffmpeg` isn't available, so the rest of the suite still runs in minimal environments.
+
+```bash
+# Sanity-check ffmpeg is reachable
+ffmpeg -version | head -1
+ffprobe -version | head -1
+
+# Full suite (3 GIF + 2 MP4 round-trip integration tests + 5 unit + 7 format)
+cargo test --release --workspace
+
+# CLI round-trip — the v0.4 happy path
+cargo run --release -p vac-cli -- compile   examples/ball.vac
+cargo run --release -p vac-cli -- decompile examples/ball.mp4 round_trip.vac
+cat round_trip.vac
+# Expect:
+#   canvas 480x320 @30fps          (NOT @33fps)
+#   duration 3s                    (NOT 2700ms)
+#   1500ms -> position(420, 160)   (apex exact, was 1350ms on GIF)
+
+# Same for the multi-shape fixture
+cargo run --release -p vac-cli -- compile   examples/two_balls.vac
+cargo run --release -p vac-cli -- decompile examples/two_balls.mp4 round_trip_two.vac
+grep -c '^  let shape_' round_trip_two.vac    # expect: 2
+
+# Compare file sizes
+ls -lh examples/ball.gif examples/ball.mp4 examples/two_balls.gif examples/two_balls.mp4
+
+# GIF still works when you ask for it
+cargo run --release -p vac-cli -- compile examples/ball.vac out.gif
+```
+
+### Known limits (queued for v0.5+)
+
+- **libx264 + yuv420p** subsamples chroma at 2×2, which can shift detected centroids by ±1px when a blob's edge happens to cross a chroma block. Tests still pass within the existing ±4px tolerance; switching to `yuv444p` or a lossless codec is a one-line tweak when we need it.
+- **No GIF fallback in `vac::DocumentExt`** — extension dispatch handles this, but if you rename a `.gif` to `.mp4` the decoder will fail with a confusing FFmpeg error. Realistically a non-issue.
+
 ### What's still on the list
 
-- **v0.4** — MP4 I/O via `ffmpeg-next` (removes the centisecond fps drift) + velocity-aware tracking (handles same-colour ID-swap).
 - **v0.5** — `path()` primitive: Suzuki contour tracing → RDP → least-squares Bezier fitting. The original Phase 1 work. Hu moments earn their keep when shapes stop being circles.
-- **v0.6+** — real-world video (codec-artifact-tolerant background estimation, scale/opacity inference, scene cuts).
+- **v0.6** — velocity-aware tracking (handles same-colour ID-swap), scene-cut detection (histogram comparison).
+- **v0.7+** — real-world video (codec-artifact-tolerant background estimation, scale/opacity inference).
+
+### v0.4 — Capability matrix on external inputs
+
+[`docs/v0.4-capability-matrix.md`](docs/v0.4-capability-matrix.md) runs VAC
+end-to-end on five inputs spanning the structural→photographic spectrum, four
+of which were produced by `ffmpeg` (a tool with zero knowledge of VAC). The
+matrix shows VAC is honest for content with discrete shapes (16–33× compression
+vs MP4, shape count exact, colour drift ≤ 5/765, apex within one frame) and
+fails predictably on photographic / continuous-gradient content — the same
+shape of limitation that SVG has against photographs, with the same eventual
+fix (a `raster(...)` escape hatch). The doc also enumerates the v0.5+ backlog
+each failure row implies. All fixtures regenerate in under a minute with no
+new dependencies — see the embedded manual test plan.
+
+### v0.4.1 — Rect / ellipse classifier
+
+The largest single gap the capability matrix surfaced is now closed.
+`vac-decompiler::detect` measures each blob's bbox fill ratio
+(`area / (bbox_w × bbox_h)`) and classifies it as `ShapeKind::Rect` if
+≥ `RECT_FILL_THRESHOLD` (0.90) — a filled rect rasterises at ~1.0, a filled
+ellipse at π/4 ≈ 0.785, so a single threshold separates them cleanly even
+after H.264 chroma subsampling. `track.rs::emit_track` majority-votes the
+kind across each track's samples (robust to per-frame antialiasing flips),
+aggregates `rx` and `ry` independently, and emits `Shape::Rect { x, y, w, h }`
+or `Shape::Ellipse { cx, cy, rx, ry }` accordingly. The parser also learned
+to lex negative numbers in coordinate slots so shapes that start partially
+off-canvas (`rect(-86, 120, 180, 60)`) round-trip cleanly. New tests:
+
+- `vac-decompiler::detect::tests::classifier_recognises_filled_rectangle_as_rect` (and friends, 4 total)
+- `vac-format::parser::tests::accepts_negative_numbers_in_rect_and_position`
+- `vac-format::parser::tests::rejects_negative_dimensions_and_times`
+- `vac-cli::tests::sliding_rect_round_trip_preserves_rect_kind_and_aspect` (new fixture: `examples/sliding_rect.vac`)
+
+Visible effect on the capability matrix: `motion_graphics` round-trips as
+three coloured *squares* instead of three circles, and `slide_in_card` round-
+trips as a 180×60 rectangle instead of a 60×60 disk. Diff before/after in
+`examples/wild/outputs/*_compare.png`.
