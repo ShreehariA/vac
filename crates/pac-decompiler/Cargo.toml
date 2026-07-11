@@ -1,0 +1,13 @@
+[package]
+name = "pac-decompiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PAC decompiler: deterministically extract editable shapes from a still image"
+
+[dependencies]
+pac-format = { workspace = true }
+vac-format = { workspace = true }
+image = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

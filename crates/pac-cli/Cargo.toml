@@ -1,0 +1,23 @@
+[package]
+name = "pac-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "pac command-line: decompile images into .pac source and back"
+
+[[bin]]
+name = "pac"
+path = "src/main.rs"
+
+[dependencies]
+pac-format = { workspace = true }
+pac-decompiler = { workspace = true }
+pac-compiler = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }
+pac-format = { workspace = true }
+pac-decompiler = { workspace = true }
+pac-compiler = { workspace = true }

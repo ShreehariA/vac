@@ -661,3 +661,143 @@ Visible effect on the capability matrix: `motion_graphics` round-trips as
 three coloured *squares* instead of three circles, and `slide_in_card` round-
 trips as a 180×60 rectangle instead of a 60×60 disk. Diff before/after in
 `examples/wild/outputs/*_compare.png`.
+
+---
+
+## PAC — Picture As Code (v0.2, first-class primitive)
+
+VAC's "measure, don't classify" philosophy lifts cleanly into a still-image
+sibling. PAC takes any PNG / JPG / WebP (including AI-generated content) and
+emits an editable `.pac` source file where every visible colour region is a
+polygon, path, or gradient you can grep, diff, and re-render.
+
+PAC was prompted by an observation: SVG handles geometric shapes beautifully
+but **silently degrades to "embed a giant PNG"** for any photographic input.
+PAC is built around the principle that the output must always tell you,
+honestly, what was vector-decomposable and what wasn't.
+
+**v0.2 graduates PAC from "sibling experiment" to a first-class primitive
+the rest of the project depends on.** The thesis: a video is a sequence of
+stills with cross-frame constraints. If PAC decomposes a single frame well,
+VAC's job collapses to "PAC each frame + match tracks across frames" — so
+*every PAC quality improvement flows straight into realistic VAC*. The five
+v0.2 improvements (per-region tracing fix, Schneider Bézier curves, auto-K
+palette sizing, linear gradient fills, semantic naming + residual report) are
+each designed with this map-into-VAC follow-on in mind.
+
+### When PAC is useful
+
+| Input class | PAC output | Use case |
+|---|---|---|
+| Logos / icons / flat illustrations | ~10–50 polygons; round-trips faithfully | Vectorise without losing source-level editability |
+| AI-generated illustrations (Midjourney "flat", DALL-E "vector style") | ~30–100 polygons; recognisable | Edit AI-generated art per region |
+| Watercolour / painterly AI portraits | ~70–100 polygons; clearly the subject, stylised | Stylise to editable vector art |
+| Photorealistic AI portraits (Mona Lisa class) | ~50–80 polygons; posterised reconstruction | Region isolation; not photo-grade |
+| Real photos (faces, foliage) | Same as photoreal AI — informative posterisation | Use the same gap-fill tools you'd use for SVG photos |
+
+PAC does **not** magically un-melt an AI face or fix a 6-fingered hand. What
+it gives you is a **structural handle** on top of pixels: every region of the
+image becomes a named, recolourable, repositionable polygon. The editing
+surface area is closer to Figma than to Photoshop.
+
+### Architecture
+
+| Crate | Job |
+|---|---|
+| `pac-format` | `.pac` AST + writer + hand-rolled parser (mirrors `vac-format`) |
+| `pac-decompiler` | image → AST via K-means colour clustering → per-cluster CCL → Moore-neighbour contour tracing → Ramer-Douglas-Peucker simplification |
+| `pac-compiler` | AST → PNG via tiny-skia (same renderer family as `vac-compiler`) |
+| `pac-cli` | `pac compile` / `pac decompile`, same unzip-style positional CLI as `vac` |
+
+Decompile pipeline (all deterministic, no ML):
+
+1. Load + decode to RGBA8 (PNG / JPG / WebP / GIF first-frame).
+2. Optional downscale so the longest edge ≤ `--max-edge` (default 768).
+3. **K-means** over a 6-bit-per-channel weighted histogram → K palette
+   colours. Deterministic k-means++ seeding so the same input always
+   produces the same `.pac` source.
+4. Per-pixel nearest-palette assignment → labelled image.
+5. Per-cluster 4-connected component labelling → regions, with
+   sub-`--min-area` regions dropped as noise.
+6. Pick the largest cluster as the `background` and emit it as the
+   canvas fill (skips emitting a shape for it).
+7. For every surviving region, Moore-neighbour contour tracing →
+   raw boundary → RDP simplification at `--epsilon` pixels → polygon.
+8. Sort emitted shapes descending by area so the bottom of the paint
+   stack is the largest regions.
+
+### `.pac` grammar (v0.2)
+
+```text
+canvas WIDTHxHEIGHT
+background #rrggbb         # optional
+
+# Closed polygon (v0.1).
+let NAME = polygon(x1 y1, x2 y2, x3 y3, ...)
+NAME.fill = #rrggbb
+
+# Closed cubic-Bezier path (v0.2; default decompile output).  SVG-mini.
+let NAME = path(M x,y C cx1,cy1 cx2,cy2 x,y L x,y C ... )
+NAME.fill = #rrggbb
+
+# Two-stop linear gradient fill (v0.2).  Replaces #rrggbb anywhere.
+NAME.fill = gradient(linear, #c0 at x0,y0, #c1 at x1,y1)
+```
+
+Declaration order = z-order (back-to-front painter's algorithm), matching SVG.
+
+| Version | Primitive | Status |
+|---|---|---|
+| v0.1 | `polygon(...)` + `#rrggbb` | ✓ shipped |
+| v0.2 | `path(M..L..C..)` Bezier curves (Schneider fitter) | ✓ shipped |
+| v0.2 | `gradient(linear, c0 at p0, c1 at p1)` | ✓ shipped |
+| v0.2 | auto-K palette + per-region residual report | ✓ shipped |
+| v0.2 | semantic region names (`top_left_blue`) | ✓ shipped |
+| v0.3 | `gradient(radial, ...)` + multi-stop gradients | planned |
+| v0.3 | region merging by residual-change | planned |
+| v0.4 | `raster(x, y, w, h, "tile.webp")` bounded escape hatch | planned |
+
+### Try it
+
+```bash
+# Render the committed example (uses gradient + path).
+cargo run --release -p pac-cli -- compile examples/hello.pac hello.png
+
+# Decompile a still image into editable .pac source (auto-K + Bezier + gradients on by default).
+cargo run --release -p pac-cli -- decompile some_picture.png decoded.pac
+# → ✓ wrote decoded.pac (768x768, K=24, 148 shapes [15 gradient], residual=84.8)
+#     weakest-fit regions: red_8=751, red_9=555, red_4=430
+
+# Round-trip: re-render the .pac to a new PNG.
+cargo run --release -p pac-cli -- compile decoded.pac roundtrip.png
+
+# Tuning knobs:
+cargo run --release -p pac-cli -- decompile some_picture.png decoded.pac \
+    --k 6                  # palette floor for auto-K (default 6)
+    --k-max 32             # palette ceiling for auto-K (default 24)
+    --target-residual 50   # tighter colour fidelity (default 80; smaller = more shapes)
+    --min-area 250         # keep finer details (default 400)
+    --epsilon 1.5          # smoother polygon outlines (default 2.0)
+    --curve-eps 1.0        # tighter Bezier fit (default 1.5; smaller = more segments)
+    --max-edge 1024        # process at higher resolution (default 768)
+    --no-smooth            # opt-out of Bezier curves; emit polygons
+    --no-gradients         # opt-out of gradient detection; emit solid fills
+```
+
+### Capability matrix — AI-generated stress test
+
+[`docs/pac-v0.2-ai-matrix.md`](docs/pac-v0.2-ai-matrix.md) is the **v0.2
+update** to the original [`docs/pac-v0.1-ai-matrix.md`](docs/pac-v0.1-ai-matrix.md):
+same four CC-licensed AI inputs, but now showing the v0.1 → v0.2 deltas
+(smooth Bézier edges, auto-grown palette, gradient-shaded sky/smoke regions,
+no magenta artefacts). The 4×3 visual side-by-side lives at
+`examples/wild/outputs/pac_v02_results.png`.
+
+Headline numbers (auto-K, default thresholds):
+
+| Image | v0.1 shapes | v0.2 shapes | v0.2 gradients | Auto-K chose | residual |
+|---|---|---|---|---|---|
+| Dream Machine | 89 | 107 | 5 | K=12 | 64 |
+| Night Pool | 57 | 127 | 6 | K=24 | 56 |
+| Watercolour Van Gogh | 75 | 148 | 15 | K=24 | 85 |
+| Mona Lisa | 67 | 76 | 4 | K=12 | 68 |

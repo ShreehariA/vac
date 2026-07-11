@@ -1,0 +1,14 @@
+[package]
+name = "pac-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PAC compiler: render a .pac document to a PNG"
+
+[dependencies]
+pac-format = { workspace = true }
+vac-format = { workspace = true }
+tiny-skia = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
