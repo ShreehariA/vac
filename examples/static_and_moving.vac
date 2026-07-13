@@ -1,0 +1,27 @@
+// v0.5.1 fixture: one static card + one moving ball.  The decompiler's
+// stationarity filter must emit the card as a bare `let` with no
+// `animate` block while the ball keeps its keyframes.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a1a2e
+
+  let card = rect(40, 40, 120, 60)
+  card.fill = #4488cc
+  card.stroke = none
+
+  let ball = ellipse(60, 240, 22, 22)
+  ball.fill = #e94560
+  ball.stroke = none
+
+  animate ball {
+    0ms    -> position(60, 240)
+    1500ms -> position(420, 240)
+    3s     -> position(60, 240)
+    easing: linear
+  }
+}

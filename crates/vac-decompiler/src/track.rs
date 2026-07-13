@@ -56,6 +56,15 @@ const MAX_GAP_FRAMES: usize = 3;
 /// noise track and dropped entirely from the output.
 const MIN_TRACK_SAMPLES: usize = 3;
 
+/// Stationarity gate (v0.5.1): a track whose every sample stays within
+/// this distance (px) of its mean position is emitted as a static
+/// shape with no `animate` block.  Deviation is measured from the mean
+/// rather than the first sample so a noisy first frame can't disguise
+/// a static shape as a mover.  The threshold sits just above the
+/// 1-2 px of centroid jitter that GIF palette flips and H.264 chroma
+/// subsampling inflict on genuinely static content.
+const STATIONARY_MAX_DEV_PX: f32 = 2.5;
+
 #[derive(Debug, Clone)]
 pub struct Track {
     pub id: usize,
@@ -137,6 +146,19 @@ fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
     let color = median_color(track.samples.iter().map(|(_, b)| b.color));
     let (first_t, first_b) = track.samples[0];
 
+    // A moving track is declared at its first-frame position (the
+    // animate block re-positions it from there).  A stationary track is
+    // declared at its median position, which averages out the per-frame
+    // centroid jitter that made it look like it was moving at all.
+    let stationary = is_stationary(&track.samples);
+    let (base_cx, base_cy) = if stationary {
+        let cxs: Vec<f32> = track.samples.iter().map(|(_, b)| b.cx).collect();
+        let cys: Vec<f32> = track.samples.iter().map(|(_, b)| b.cy).collect();
+        (median_f32(&cxs), median_f32(&cys))
+    } else {
+        (first_b.cx, first_b.cy)
+    };
+
     // Both primitives keep keyframe positions in the same coordinate the
     // compiler expects as `position(...)` anchor:
     //   Ellipse anchor = (cx, cy)
@@ -147,18 +169,17 @@ fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
             ShapeKind::Rect => (b.cx - rx, b.cy - ry),
         }
     };
-    let (first_x, first_y) = anchor_xy(&first_b);
 
     let shape = match kind {
         ShapeKind::Ellipse => Shape::Ellipse {
-            cx: round_to_int(first_b.cx),
-            cy: round_to_int(first_b.cy),
+            cx: round_to_int(base_cx),
+            cy: round_to_int(base_cy),
             rx,
             ry,
         },
         ShapeKind::Rect => Shape::Rect {
-            x: round_to_int(first_x),
-            y: round_to_int(first_y),
+            x: round_to_int(base_cx - rx),
+            y: round_to_int(base_cy - ry),
             w: 2.0 * rx,
             h: 2.0 * ry,
         },
@@ -192,7 +213,7 @@ fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
     keep.sort();
     keep.dedup();
 
-    if keep.len() >= 2 && trajectory_has_motion(blobs) {
+    if keep.len() >= 2 && !stationary {
         let easing = classify_easing(blobs, &keep);
 
         let keyframes: Vec<Keyframe> = keep
@@ -310,14 +331,18 @@ fn matching_cost(prev: &Blob, curr: &Blob) -> f32 {
     W_POS * pos + W_COL * col + W_RAD * rad + W_HU * hu
 }
 
-fn trajectory_has_motion(blobs: &[(u32, Blob)]) -> bool {
+/// v0.5.1 stationarity filter: true when every sample sits within
+/// `STATIONARY_MAX_DEV_PX` of the track's mean position.
+fn is_stationary(blobs: &[(u32, Blob)]) -> bool {
     if blobs.len() < 2 {
-        return false;
+        return true;
     }
-    let (cx0, cy0) = (blobs[0].1.cx, blobs[0].1.cy);
-    blobs
-        .iter()
-        .any(|(_, b)| ((b.cx - cx0).powi(2) + (b.cy - cy0).powi(2)).sqrt() > 1.5)
+    let n = blobs.len() as f32;
+    let mean_cx = blobs.iter().map(|(_, b)| b.cx).sum::<f32>() / n;
+    let mean_cy = blobs.iter().map(|(_, b)| b.cy).sum::<f32>() / n;
+    blobs.iter().all(|(_, b)| {
+        ((b.cx - mean_cx).powi(2) + (b.cy - mean_cy).powi(2)).sqrt() <= STATIONARY_MAX_DEV_PX
+    })
 }
 
 // --------------------------------------------------------------------
@@ -686,6 +711,78 @@ mod tests {
             yellow_last.cx < 200.0,
             "yellow did not advance: cx={}",
             yellow_last.cx
+        );
+    }
+
+    fn track_from(samples: Vec<(u32, Blob)>) -> Track {
+        let last = samples.len().saturating_sub(1);
+        Track {
+            id: 0,
+            samples,
+            last_seen_frame: last,
+            active: true,
+        }
+    }
+
+    /// v0.5.1 — a static label whose centroid flickers ±2 px from
+    /// frame to frame (GIF palette flips, H.264 chroma noise) must be
+    /// emitted as a static shape anchored at its median position, not
+    /// as a keyframe salad.  The old gate measured deviation from the
+    /// *first* sample, so this exact input produced an animate block.
+    #[test]
+    fn stationary_jittering_track_emits_no_animate_block() {
+        let jitter = [0.0f32, 1.5, -1.5, 2.0, -2.0, 1.0, -1.0, 0.5];
+        let samples: Vec<(u32, Blob)> = (0..40u32)
+            .map(|i| {
+                let j = jitter[(i as usize) % jitter.len()];
+                (i * 33, blob_at(100.0 + j, 80.0 + 0.5 * j))
+            })
+            .collect();
+
+        let mut statements = Vec::new();
+        emit_track(&mut statements, 0, &track_from(samples));
+
+        assert!(
+            !statements
+                .iter()
+                .any(|s| matches!(s, Statement::Animate(_))),
+            "stationary track produced an animate block: {statements:#?}"
+        );
+
+        let shape = statements
+            .iter()
+            .find_map(|s| match s {
+                Statement::Let { shape, .. } => Some(*shape),
+                _ => None,
+            })
+            .expect("no let statement emitted");
+        match shape {
+            Shape::Ellipse { cx, cy, .. } => {
+                assert!(
+                    (cx - 100.0).abs() <= 1.0 && (cy - 80.0).abs() <= 1.0,
+                    "static anchor should be the median position, got ({cx}, {cy})"
+                );
+            }
+            other => panic!("expected an ellipse, got {other:?}"),
+        }
+    }
+
+    /// Real motion must keep its animate block — the stationarity
+    /// filter only suppresses sub-jitter wobble.
+    #[test]
+    fn moving_track_keeps_its_animate_block() {
+        let samples: Vec<(u32, Blob)> = (0..=60u32)
+            .map(|i| (i * 33, blob_at(60.0 + (i as f32 / 60.0) * 480.0, 100.0)))
+            .collect();
+
+        let mut statements = Vec::new();
+        emit_track(&mut statements, 0, &track_from(samples));
+
+        assert!(
+            statements
+                .iter()
+                .any(|s| matches!(s, Statement::Animate(_))),
+            "moving track lost its animate block"
         );
     }
 }

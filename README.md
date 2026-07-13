@@ -801,3 +801,44 @@ Headline numbers (auto-K, default thresholds):
 | Night Pool | 57 | 127 | 6 | K=24 | 56 |
 | Watercolour Van Gogh | 75 | 148 | 15 | K=24 | 85 |
 | Mona Lisa | 67 | 76 | 4 | K=12 | 68 |
+
+---
+
+## v0.5.1 — Stationarity filter
+
+First slice of the capability-matrix backlog: tracks that don't actually
+move stop pretending they do.
+
+The decompiler used to decide "does this track animate?" by checking
+whether any sample strayed more than 1.5 px from the *first* sample — so
+a static label whose centroid flickers ±2 px under GIF palette flips or
+H.264 chroma noise got a full `animate` block with a keyframe for every
+wobble. v0.5.1 replaces that gate with a proper stationarity test:
+
+| Change | Where | Why |
+|---|---|---|
+| **`is_stationary`** — a track whose every sample sits within 2.5 px of its **mean** position is static | `vac-decompiler::track` | Deviation from the mean, not the first sample, so a noisy first frame can't disguise a static shape as a mover. |
+| **Median anchoring** — static shapes are declared at their median position | `track::emit_track` | Averages out per-frame centroid jitter instead of trusting frame 0. |
+| **No `animate` block for static tracks** | `track::emit_track` | A static card is `let card = rect(...)`, full stop — no keyframe salad. |
+| New fixture + tests | `examples/static_and_moving.vac`, unit tests in `track.rs`, round-trip test in `vac-cli` | A static card sharing the canvas with a moving ball: exactly one animate block must survive the round-trip. |
+
+Honest measurement on the wild corpus (animate blocks, before → after):
+
+| input | before | after |
+|---|---:|---:|
+| `real_newtons_cradle` | 60 | **53** |
+| `mandelbrot` | 27 | **22** |
+| `real_pendulum` | 59 | 58 |
+| `real_double_pendulum` | 36 | 36 |
+| `real_loader` | 12 | 12 |
+| every moving fixture (`ball`, `two_balls`, `sliding_rect`, …) | — | unchanged ✓ |
+
+The interesting result is what *didn't* change. The pendulum-class rows
+were predicted to clean up dramatically; measuring the surviving blocks
+shows their keyframe amplitudes are 17–300 px — the greedy matcher is
+chaining different dash / label / tick fragments into single track
+identities. That noise is **track churn, not stationary jitter**, so the
+real pendulum fix is velocity-aware tracking (v0.6), which now has hard
+numbers behind it. What the filter reliably buys is the UI /
+motion-graphics content class: static cards, labels and logos that
+jitter 1–2 px under codec noise now emit as bare `let` statements.

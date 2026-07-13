@@ -330,6 +330,59 @@ fn sliding_rect_round_trip_preserves_rect_kind_and_aspect() {
     assert_apex_recovered(&kfs, 300.0, 130.0, 4.0);
 }
 
+/// v0.5.1 — the stationarity filter.  A static card sharing the canvas
+/// with a moving ball must round-trip as a bare `let` (no `animate`
+/// block, no keyframe salad from centroid jitter) while the ball keeps
+/// its keyframes.
+#[test]
+fn static_shape_round_trips_without_animate_block() {
+    let (original, reconstructed) = round_trip("static_and_moving.vac");
+    assert_canvas_matches(&original, &reconstructed);
+
+    let names = shape_names(&reconstructed);
+    assert_eq!(names.len(), 2, "expected card + ball, got {names:?}");
+
+    let animated: Vec<&str> = reconstructed.scenes[0]
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            Statement::Animate(a) => Some(a.target.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        animated.len(),
+        1,
+        "exactly one shape should carry an animate block, got {animated:?}",
+    );
+
+    // The animated one must be the red ball, not the static blue card.
+    let ball_idx = shape_index_by_color(&reconstructed, Color::rgb(0xe9, 0x45, 0x60));
+    assert_eq!(
+        animated[0], names[ball_idx],
+        "the animate block should target the moving red ball",
+    );
+    let kfs = keyframes_for(&reconstructed, ball_idx);
+    assert!(kfs.len() >= 3, "ball lost its apex keyframe: {kfs:?}");
+    assert_apex_recovered(&kfs, 420.0, 240.0, 4.0);
+
+    // The static card survives as a rect at its source geometry.
+    let card_idx = 1 - ball_idx;
+    match shape_of(&reconstructed, &names[card_idx]) {
+        Shape::Rect { x, y, w, h } => {
+            assert!(
+                (x - 40.0).abs() <= 3.0 && (y - 40.0).abs() <= 3.0,
+                "card anchor drifted: got ({x}, {y}), expected (40, 40)",
+            );
+            assert!(
+                (w - 120.0).abs() <= 3.0 && (h - 60.0).abs() <= 3.0,
+                "card size drifted: got {w}x{h}, expected 120x60",
+            );
+        }
+        other => panic!("static card should stay a rect, got {other:?}"),
+    }
+}
+
 // --------------------------------------------------------------------
 // v0.4: MP4 round-trips
 //
