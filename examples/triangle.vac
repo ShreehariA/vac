@@ -1,0 +1,27 @@
+// v0.6 fixture: a triangle — neither rect nor ellipse — ping-ponging
+// horizontally.  The decompiler must recover it as a path() via the
+// PAC contour pipeline (Moore tracing → RDP → Bezier fitting), not
+// flatten it into a lying ellipse.
+//
+// The animate anchor is the triangle's area centroid:
+// ((80+140+200)/3, (220+100+220)/3) = (140, 180).
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a1a2e
+
+  let tri = path(M 80,220 L 140,100 L 200,220)
+  tri.fill = #4ec9b0
+  tri.stroke = none
+
+  animate tri {
+    0ms    -> position(140, 180)
+    1500ms -> position(340, 180)
+    3s     -> position(140, 180)
+    easing: linear
+  }
+}

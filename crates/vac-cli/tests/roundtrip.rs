@@ -283,7 +283,7 @@ fn shape_of(doc: &vac::Document, name: &str) -> Shape {
         } = stmt
         {
             if n == name {
-                return *shape;
+                return shape.clone();
             }
         }
     }
@@ -306,7 +306,7 @@ fn sliding_rect_round_trip_preserves_rect_kind_and_aspect() {
     assert_eq!(names.len(), 1, "expected exactly one non-bg shape");
 
     let shape = shape_of(&reconstructed, &names[0]);
-    match shape {
+    match &shape {
         Shape::Rect { w, h, .. } => {
             // Source rect is 120×60.  Allow ±3 px for chroma-subsampling
             // / antialiasing on the edges.
@@ -319,8 +319,8 @@ fn sliding_rect_round_trip_preserves_rect_kind_and_aspect() {
                 "rect height drifted: got {h}, expected 60",
             );
         }
-        Shape::Ellipse { .. } => panic!(
-            "regression: sliding_rect.vac round-tripped as Ellipse instead of Rect ({shape:?})",
+        other => panic!(
+            "regression: sliding_rect.vac round-tripped as {other:?} instead of Rect",
         ),
     }
 
@@ -381,6 +381,54 @@ fn static_shape_round_trips_without_animate_block() {
         }
         other => panic!("static card should stay a rect, got {other:?}"),
     }
+}
+
+/// v0.6 — the path() primitive.  A moving triangle fills ~0.5 of its
+/// bbox — far outside both the rect and ellipse bands — so it must
+/// round-trip as a `path(...)` traced by the PAC contour pipeline,
+/// with its ping-pong apex still recovered.
+#[test]
+fn triangle_round_trips_as_path_with_apex() {
+    let (original, reconstructed) = round_trip("triangle.vac");
+    assert_canvas_matches(&original, &reconstructed);
+
+    let names = shape_names(&reconstructed);
+    assert_eq!(names.len(), 1, "expected exactly one shape, got {names:?}");
+
+    let shape = shape_of(&reconstructed, &names[0]);
+    let Shape::Path(segs) = &shape else {
+        panic!("triangle should round-trip as Shape::Path, got {shape:?}");
+    };
+    assert!(
+        (3..=8).contains(&segs.len()),
+        "expected a compact outline (~3 corners), got {} segments: {segs:?}",
+        segs.len()
+    );
+
+    // The outline's bbox must match the source triangle (120 wide,
+    // 120 tall) — measured over on-curve points.
+    let pts: Vec<(f32, f32)> = segs
+        .iter()
+        .map(|s| match s {
+            vac::PathSeg::MoveTo(p) | vac::PathSeg::LineTo(p) => (p.x, p.y),
+            vac::PathSeg::CurveTo { p, .. } => (p.x, p.y),
+        })
+        .collect();
+    let w = pts.iter().map(|p| p.0).fold(f32::MIN, f32::max)
+        - pts.iter().map(|p| p.0).fold(f32::MAX, f32::min);
+    let h = pts.iter().map(|p| p.1).fold(f32::MIN, f32::max)
+        - pts.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+    assert!((w - 120.0).abs() <= 6.0, "outline width drifted: {w}");
+    assert!((h - 120.0).abs() <= 6.0, "outline height drifted: {h}");
+
+    // Colour survives.
+    let drift = color_l1(Color::rgb(0x4e, 0xc9, 0xb0), shape_color(&reconstructed, 0));
+    assert!(drift <= 12, "triangle colour drifted: L1={drift}");
+
+    // Motion survives: centroid ping-pongs (140,180) → (340,180) → back.
+    let kfs = keyframes_for(&reconstructed, 0);
+    assert!(kfs.len() >= 3, "triangle lost its apex keyframe: {kfs:?}");
+    assert_apex_recovered(&kfs, 340.0, 180.0, 5.0);
 }
 
 // --------------------------------------------------------------------

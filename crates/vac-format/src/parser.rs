@@ -13,6 +13,9 @@
 //! duration_stmt = "duration" Time
 //! let_stmt      = "let" Ident "=" shape_expr
 //! shape_expr    = ("rect" | "ellipse") "(" Number ("," Number){3} ")"
+//!               | "path" "(" path_seg+ ")"
+//! path_seg      = "M" point | "L" point | "C" point point point
+//! point         = Number "," Number
 //! assign_stmt   = Ident "." Ident "=" value
 //! value         = HexColor | "none"
 //! animate_stmt  = "animate" Ident "{" keyframe* easing_decl? "}"
@@ -576,6 +579,11 @@ impl Parser {
     fn parse_shape_expr(&mut self) -> Result<Shape, ParseError> {
         let (kind, span) = self.expect_ident()?;
         self.expect(&Token::LParen)?;
+        if kind == "path" {
+            let segs = self.parse_path_segs(span)?;
+            self.expect(&Token::RParen)?;
+            return Ok(Shape::Path(segs));
+        }
         let nums = self.parse_number_list()?;
         self.expect(&Token::RParen)?;
         match kind.as_str() {
@@ -612,9 +620,69 @@ impl Parser {
             }
             other => Err(ParseError::syntax(
                 span,
-                format!("unknown shape primitive `{other}` (expected rect or ellipse)"),
+                format!("unknown shape primitive `{other}` (expected rect, ellipse or path)"),
             )),
         }
+    }
+
+    /// Parse the body of `path(...)`: SVG-mini segments `M x,y`,
+    /// `L x,y`, `C cx1,cy1 cx2,cy2 x,y`.  The first segment must be
+    /// `M`; the path is implicitly closed by the renderer.
+    fn parse_path_segs(&mut self, span: Span) -> Result<Vec<PathSeg>, ParseError> {
+        let mut segs: Vec<PathSeg> = Vec::new();
+        loop {
+            let s = self.peek().clone();
+            match &s.tok {
+                Token::RParen => break,
+                Token::Ident(cmd) => {
+                    self.bump();
+                    let seg = match cmd.as_str() {
+                        "M" => PathSeg::MoveTo(self.parse_point()?),
+                        "L" => PathSeg::LineTo(self.parse_point()?),
+                        "C" => {
+                            let c1 = self.parse_point()?;
+                            let c2 = self.parse_point()?;
+                            let p = self.parse_point()?;
+                            PathSeg::CurveTo { c1, c2, p }
+                        }
+                        other => {
+                            return Err(ParseError::syntax(
+                                s.span,
+                                format!("unknown path command `{other}` (expected M, L or C)"),
+                            ))
+                        }
+                    };
+                    if segs.is_empty() && !matches!(seg, PathSeg::MoveTo(_)) {
+                        return Err(ParseError::syntax(
+                            s.span,
+                            "path must start with an `M x,y` segment",
+                        ));
+                    }
+                    segs.push(seg);
+                }
+                other => {
+                    return Err(ParseError::syntax(
+                        s.span,
+                        format!("expected path command (M / L / C) or `)`, got {other:?}"),
+                    ))
+                }
+            }
+        }
+        if segs.len() < 2 {
+            return Err(ParseError::syntax(
+                span,
+                "path() needs at least an M segment plus one more segment",
+            ));
+        }
+        Ok(segs)
+    }
+
+    /// A path coordinate pair: `Number "," Number`.
+    fn parse_point(&mut self) -> Result<Point, ParseError> {
+        let x = self.expect_number()?;
+        self.expect(&Token::Comma)?;
+        let y = self.expect_number()?;
+        Ok(Point::new(x, y))
     }
 
     fn parse_number_list(&mut self) -> Result<Vec<f32>, ParseError> {
@@ -911,5 +979,54 @@ scene s {
 "#;
         let doc = parse(s).expect("parse with comments");
         assert_eq!(doc.scenes[0].statements.len(), 1);
+    }
+
+    /// v0.6 — the path() primitive round-trips through parse → write →
+    /// parse, including curves, negative coordinates and fractions.
+    #[test]
+    fn path_shape_round_trips_through_writer() {
+        let s = r#"
+canvas 200x200 @30fps
+scene s {
+  duration 1s
+  let tri = path(M 80,220 L 140.5,100 C 160,110 190,-20 200,220)
+  tri.fill = #4ec9b0
+}
+"#;
+        let doc = parse(s).expect("parse path");
+        let shape = match &doc.scenes[0].statements[0] {
+            crate::ast::Statement::Let { shape, .. } => shape.clone(),
+            other => panic!("expected let, got {other:?}"),
+        };
+        let Shape::Path(segs) = &shape else {
+            panic!("expected Shape::Path, got {shape:?}");
+        };
+        assert_eq!(segs.len(), 3);
+        assert!(matches!(segs[0], PathSeg::MoveTo(p) if p.x == 80.0 && p.y == 220.0));
+        assert!(matches!(segs[1], PathSeg::LineTo(p) if p.x == 140.5));
+        assert!(
+            matches!(segs[2], PathSeg::CurveTo { c2, .. } if c2.y == -20.0),
+            "negative coordinate lost: {segs:?}"
+        );
+
+        let text = writer::write(&doc);
+        let redoc = parse(&text).expect("re-parse written path");
+        assert_eq!(doc, redoc, "path did not round-trip:\n{text}");
+    }
+
+    #[test]
+    fn path_must_start_with_moveto() {
+        assert!(parse(
+            "canvas 100x100 @30fps scene s { duration 1s\n  let p = path(L 10,10 L 20,20) }"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn path_rejects_unknown_commands() {
+        assert!(parse(
+            "canvas 100x100 @30fps scene s { duration 1s\n  let p = path(M 10,10 Q 20,20) }"
+        )
+        .is_err());
     }
 }

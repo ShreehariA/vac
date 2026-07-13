@@ -67,7 +67,7 @@ fn render_scene(doc: &Document, scene: &Scene) -> Result<Vec<RenderedFrame>, Com
         match stmt {
             Statement::Let { name, shape } => {
                 declared.push(name.clone());
-                shapes.insert(name.clone(), ShapeState::new(*shape));
+                shapes.insert(name.clone(), ShapeState::new(shape.clone()));
             }
             Statement::Assign {
                 target,
@@ -225,15 +225,26 @@ fn lerp_scalar(a: Option<f32>, b: Option<f32>, t: f32) -> Option<f32> {
 }
 
 fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
-    let (path, anchor) = match state.base {
+    let (path, anchor) = match &state.base {
         Shape::Rect { x, y, w, h } => {
             let pb = PathBuilder::from_rect(
-                tiny_skia::Rect::from_xywh(x, y, w, h)
+                tiny_skia::Rect::from_xywh(*x, *y, *w, *h)
                     .unwrap_or_else(|| tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap()),
             );
-            (pb, (x, y))
+            (pb, (*x, *y))
         }
-        Shape::Ellipse { cx, cy, rx, ry } => (build_ellipse_path(cx, cy, rx, ry), (cx, cy)),
+        Shape::Ellipse { cx, cy, rx, ry } => {
+            (build_ellipse_path(*cx, *cy, *rx, *ry), (*cx, *cy))
+        }
+        Shape::Path(segs) => {
+            let Some(path) = build_path(segs) else {
+                return;
+            };
+            // Anchor at the outline's shoelace centroid — this is the
+            // point `position(x, y)` keyframes move, matching the
+            // measured blob centroid the decompiler emits.
+            (path, vac_format::path_anchor(segs))
+        }
     };
 
     // World transform: (translate to origin) (scale) (translate to position)
@@ -262,6 +273,25 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
         };
         pixmap.stroke_path(&path, &paint, &stroke_settings, transform, None);
     }
+}
+
+/// Build a tiny-skia path from `path(...)` segments.  The path is
+/// implicitly closed, matching the `.pac` renderer's convention.
+fn build_path(segs: &[vac_format::PathSeg]) -> Option<tiny_skia::Path> {
+    use vac_format::PathSeg;
+    if segs.is_empty() {
+        return None;
+    }
+    let mut pb = PathBuilder::new();
+    for seg in segs {
+        match *seg {
+            PathSeg::MoveTo(p) => pb.move_to(p.x, p.y),
+            PathSeg::LineTo(p) => pb.line_to(p.x, p.y),
+            PathSeg::CurveTo { c1, c2, p } => pb.cubic_to(c1.x, c1.y, c2.x, c2.y, p.x, p.y),
+        }
+    }
+    pb.close();
+    pb.finish()
 }
 
 /// Build a closed elliptical path from four cubic-Bezier quadrants.

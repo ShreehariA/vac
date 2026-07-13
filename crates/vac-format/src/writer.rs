@@ -114,6 +114,30 @@ fn fmt_shape(s: &Shape) -> String {
                 fmt_num(*ry)
             )
         }
+        Shape::Path(segs) => {
+            let body = segs
+                .iter()
+                .map(fmt_path_seg)
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("path({body})")
+        }
+    }
+}
+
+fn fmt_path_seg(seg: &PathSeg) -> String {
+    match seg {
+        PathSeg::MoveTo(p) => format!("M {},{}", fmt_num(p.x), fmt_num(p.y)),
+        PathSeg::LineTo(p) => format!("L {},{}", fmt_num(p.x), fmt_num(p.y)),
+        PathSeg::CurveTo { c1, c2, p } => format!(
+            "C {},{} {},{} {},{}",
+            fmt_num(c1.x),
+            fmt_num(c1.y),
+            fmt_num(c2.x),
+            fmt_num(c2.y),
+            fmt_num(p.x),
+            fmt_num(p.y),
+        ),
     }
 }
 

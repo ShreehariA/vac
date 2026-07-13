@@ -21,8 +21,8 @@
 //! per-track and reuse the v0.2 implementation verbatim.
 
 use vac_format::{
-    Animation, Canvas, Color, Document, Easing, Keyframe, Property, Scene, Shape, Statement,
-    Transform, Value,
+    Animation, Canvas, Color, Document, Easing, Keyframe, PathSeg, Property, Scene, Shape,
+    Statement, Transform, Value,
 };
 
 use crate::detect::{Blob, Detection, ShapeKind};
@@ -65,11 +65,23 @@ const MIN_TRACK_SAMPLES: usize = 3;
 /// subsampling inflict on genuinely static content.
 const STATIONARY_MAX_DEV_PX: f32 = 2.5;
 
+/// Closed-loop RDP tolerance for path outlines, in pixels (v0.6 —
+/// same default as PAC's `--epsilon`).
+const PATH_RDP_EPSILON_PX: f32 = 2.0;
+
+/// Schneider Bezier fitting max-deviation tolerance, in pixels (v0.6 —
+/// same default as PAC's `--curve-eps`).
+const PATH_CURVE_EPSILON_PX: f32 = 1.5;
+
 #[derive(Debug, Clone)]
 pub struct Track {
     pub id: usize,
     /// (t_ms, blob) ordered by time.
     pub samples: Vec<(u32, Blob)>,
+    /// Source frame index of each sample, parallel to `samples`.
+    /// v0.6's path emission re-visits the frame to trace the blob's
+    /// outline.
+    pub frame_indices: Vec<usize>,
     last_seen_frame: usize,
     active: bool,
 }
@@ -118,7 +130,7 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
     });
 
     for (idx, track) in tracks.iter().enumerate() {
-        emit_track(&mut statements, idx, track);
+        emit_track(&mut statements, idx, track, frames, detections);
     }
 
     Document {
@@ -131,13 +143,19 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
     }
 }
 
-fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
+fn emit_track(
+    statements: &mut Vec<Statement>,
+    idx: usize,
+    track: &Track,
+    frames: &[VideoFrame],
+    detections: &[Detection],
+) {
     let name = format!("shape_{idx}");
     // Majority-vote the shape kind across all samples of the track.
     // A track that classifies inconsistently usually means antialiased
     // edges flipping the bbox fill-ratio across the threshold; majority
     // is more robust than per-frame.
-    let kind = majority_kind(&track.samples);
+    let mut kind = majority_kind(&track.samples);
     // Aggregate rx and ry independently so a wide rect stays wide.
     let rxs: Vec<f32> = track.samples.iter().map(|(_, b)| b.rx).collect();
     let rys: Vec<f32> = track.samples.iter().map(|(_, b)| b.ry).collect();
@@ -159,13 +177,28 @@ fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
         (first_b.cx, first_b.cy)
     };
 
-    // Both primitives keep keyframe positions in the same coordinate the
+    // v0.6: a Path-kind track gets its outline from PAC's pipeline —
+    // Moore contour tracing at a representative frame, closed-loop
+    // RDP, Schneider Bezier fitting — translated so the outline's
+    // centroid sits at the declaration anchor.  When tracing fails
+    // (blob vanished from its frame, degenerate contour) the track
+    // falls back to the ellipse primitive rather than being dropped.
+    let mut path_segs: Option<Vec<PathSeg>> = None;
+    if kind == ShapeKind::Path {
+        path_segs = trace_track_outline(track, frames, detections, (base_cx, base_cy));
+        if path_segs.is_none() {
+            kind = ShapeKind::Ellipse;
+        }
+    }
+
+    // All primitives keep keyframe positions in the same coordinate the
     // compiler expects as `position(...)` anchor:
     //   Ellipse anchor = (cx, cy)
     //   Rect    anchor = top-left (x, y) = (cx - rx, cy - ry)
+    //   Path    anchor = outline centroid = blob centroid (cx, cy)
     let anchor_xy = |b: &Blob| -> (f32, f32) {
         match kind {
-            ShapeKind::Ellipse => (b.cx, b.cy),
+            ShapeKind::Ellipse | ShapeKind::Path => (b.cx, b.cy),
             ShapeKind::Rect => (b.cx - rx, b.cy - ry),
         }
     };
@@ -183,6 +216,7 @@ fn emit_track(statements: &mut Vec<Statement>, idx: usize, track: &Track) {
             w: 2.0 * rx,
             h: 2.0 * ry,
         },
+        ShapeKind::Path => Shape::Path(path_segs.take().expect("checked above")),
     };
 
     statements.push(Statement::Let {
@@ -242,11 +276,87 @@ fn majority_kind(samples: &[(u32, Blob)]) -> ShapeKind {
         .iter()
         .filter(|(_, b)| b.kind == ShapeKind::Rect)
         .count();
+    let paths = samples
+        .iter()
+        .filter(|(_, b)| b.kind == ShapeKind::Path)
+        .count();
     if rects * 2 > samples.len() {
         ShapeKind::Rect
+    } else if paths * 2 > samples.len() {
+        ShapeKind::Path
     } else {
         ShapeKind::Ellipse
     }
+}
+
+/// Trace a Path-kind track's outline at its representative sample
+/// (median area — the frame where the blob is most typical), simplify
+/// with PAC's closed-loop RDP, fit Schneider Beziers, and translate
+/// the outline so its centroid sits at `declare_at` (the track's
+/// declaration anchor).  Coordinates are rounded to 2 decimals so the
+/// emitted `.vac` stays compact and write→parse→write is stable.
+fn trace_track_outline(
+    track: &Track,
+    frames: &[VideoFrame],
+    detections: &[Detection],
+    declare_at: (f32, f32),
+) -> Option<Vec<PathSeg>> {
+    let mut order: Vec<usize> = (0..track.samples.len()).collect();
+    order.sort_by_key(|&i| track.samples[i].1.area);
+    let rep = order[order.len() / 2];
+    let (_, rep_b) = track.samples[rep];
+    let fidx = *track.frame_indices.get(rep)?;
+    let frame = frames.get(fidx)?;
+    let bg = detections.get(fidx)?.bg;
+
+    let contour = crate::detect::extract_contour(
+        frame,
+        bg,
+        (rep_b.cx, rep_b.cy),
+        rep_b.rx.max(rep_b.ry).max(4.0),
+        (rep_b.area / 4).max(1),
+    )?;
+    let simplified = pac_decompiler::simplify::rdp(&contour, PATH_RDP_EPSILON_PX);
+    if simplified.len() < 3 {
+        return None;
+    }
+    // Degenerate outline (collapsed to a point / sliver): the traced
+    // component clearly wasn't the blob — fall back to the ellipse.
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for p in &simplified {
+        min_x = min_x.min(p.0);
+        max_x = max_x.max(p.0);
+        min_y = min_y.min(p.1);
+        max_y = max_y.max(p.1);
+    }
+    if max_x - min_x < 2.0 || max_y - min_y < 2.0 {
+        return None;
+    }
+
+    let dx = declare_at.0 - rep_b.cx;
+    let dy = declare_at.1 - rep_b.cy;
+    let moved: Vec<(f32, f32)> = simplified.iter().map(|p| (p.0 + dx, p.1 + dy)).collect();
+
+    let segs = pac_decompiler::curves::fit_closed(&moved, PATH_CURVE_EPSILON_PX);
+    if segs.len() < 2 {
+        return None;
+    }
+    let round2 = |v: f32| (v * 100.0).round() / 100.0;
+    let round_pt =
+        |p: vac_format::Point| vac_format::Point::new(round2(p.x), round2(p.y));
+    Some(
+        segs.into_iter()
+            .map(|seg| match seg {
+                PathSeg::MoveTo(p) => PathSeg::MoveTo(round_pt(p)),
+                PathSeg::LineTo(p) => PathSeg::LineTo(round_pt(p)),
+                PathSeg::CurveTo { c1, c2, p } => PathSeg::CurveTo {
+                    c1: round_pt(c1),
+                    c2: round_pt(c2),
+                    p: round_pt(p),
+                },
+            })
+            .collect(),
+    )
 }
 
 // --------------------------------------------------------------------
@@ -289,6 +399,7 @@ pub fn build_tracks(detections: &[Detection]) -> Vec<Track> {
                 continue;
             }
             tracks[t_idx].samples.push((det.t_ms, det.blobs[b_idx]));
+            tracks[t_idx].frame_indices.push(frame_idx);
             tracks[t_idx].last_seen_frame = frame_idx;
             blob_assigned[b_idx] = true;
             track_assigned.insert(t_idx);
@@ -300,6 +411,7 @@ pub fn build_tracks(detections: &[Detection]) -> Vec<Track> {
                 tracks.push(Track {
                     id: next_id,
                     samples: vec![(det.t_ms, *blob)],
+                    frame_indices: vec![frame_idx],
                     last_seen_frame: frame_idx,
                     active: true,
                 });
@@ -716,9 +828,11 @@ mod tests {
 
     fn track_from(samples: Vec<(u32, Blob)>) -> Track {
         let last = samples.len().saturating_sub(1);
+        let frame_indices = (0..samples.len()).collect();
         Track {
             id: 0,
             samples,
+            frame_indices,
             last_seen_frame: last,
             active: true,
         }
@@ -740,7 +854,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_track(&mut statements, 0, &track_from(samples));
+        emit_track(&mut statements, 0, &track_from(samples), &[], &[]);
 
         assert!(
             !statements
@@ -752,7 +866,7 @@ mod tests {
         let shape = statements
             .iter()
             .find_map(|s| match s {
-                Statement::Let { shape, .. } => Some(*shape),
+                Statement::Let { shape, .. } => Some(shape.clone()),
                 _ => None,
             })
             .expect("no let statement emitted");
@@ -776,7 +890,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_track(&mut statements, 0, &track_from(samples));
+        emit_track(&mut statements, 0, &track_from(samples), &[], &[]);
 
         assert!(
             statements

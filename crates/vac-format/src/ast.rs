@@ -38,10 +38,104 @@ pub enum Statement {
     Animate(Animation),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
     Rect { x: f32, y: f32, w: f32, h: f32 },
     Ellipse { cx: f32, cy: f32, rx: f32, ry: f32 },
+    /// Closed path of straight-line and cubic-Bezier segments (v0.6).
+    /// The path is implicitly closed: the renderer connects the final
+    /// point back to the first `MoveTo`.  Shared with the `.pac`
+    /// format, whose decompiler pipeline (Moore contour tracing → RDP
+    /// → Schneider Bezier fitting) produces these segments.
+    Path(Vec<PathSeg>),
+}
+
+/// Point in canvas pixels.  Shared by `.vac` paths and the `.pac`
+/// still-image format (which re-exports it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Point {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Point { x, y }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathSeg {
+    /// Move pen to (x, y).  Must be the first segment of every path.
+    /// Mirrors SVG's `M x,y`.
+    MoveTo(Point),
+    /// Straight line from current point to (x, y).  Mirrors SVG's `L x,y`.
+    LineTo(Point),
+    /// Cubic Bezier from current point through control points c1 and
+    /// c2 to endpoint p.  Mirrors SVG's `C cx1,cy1 cx2,cy2 x,y`.
+    CurveTo { c1: Point, c2: Point, p: Point },
+}
+
+/// Anchor point of a closed path: the area (shoelace) centroid of the
+/// flattened outline.  This is what `position(x, y)` keyframes move —
+/// for decompiled paths it coincides with the measured blob centroid
+/// to within a pixel, so declaration and animation agree.  Degenerate
+/// (near-zero-area) paths fall back to the vertex mean.
+pub fn path_anchor(segs: &[PathSeg]) -> (f32, f32) {
+    let pts = flatten_path(segs);
+    if pts.is_empty() {
+        return (0.0, 0.0);
+    }
+    let n = pts.len();
+    let mut area2 = 0.0f64;
+    let mut cx = 0.0f64;
+    let mut cy = 0.0f64;
+    for i in 0..n {
+        let (x0, y0) = (pts[i].0 as f64, pts[i].1 as f64);
+        let (x1, y1) = (pts[(i + 1) % n].0 as f64, pts[(i + 1) % n].1 as f64);
+        let cross = x0 * y1 - x1 * y0;
+        area2 += cross;
+        cx += (x0 + x1) * cross;
+        cy += (y0 + y1) * cross;
+    }
+    if area2.abs() < 1e-6 {
+        let sx: f32 = pts.iter().map(|p| p.0).sum();
+        let sy: f32 = pts.iter().map(|p| p.1).sum();
+        return (sx / n as f32, sy / n as f32);
+    }
+    ((cx / (3.0 * area2)) as f32, (cy / (3.0 * area2)) as f32)
+}
+
+/// Flatten a path to a polygon: on-curve points, with each cubic
+/// sampled at a fixed number of interior steps.
+fn flatten_path(segs: &[PathSeg]) -> Vec<(f32, f32)> {
+    const CURVE_STEPS: usize = 8;
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    let mut cur = (0.0f32, 0.0f32);
+    for seg in segs {
+        match *seg {
+            PathSeg::MoveTo(p) | PathSeg::LineTo(p) => {
+                out.push((p.x, p.y));
+                cur = (p.x, p.y);
+            }
+            PathSeg::CurveTo { c1, c2, p } => {
+                for k in 1..=CURVE_STEPS {
+                    let t = k as f32 / CURVE_STEPS as f32;
+                    let v = 1.0 - t;
+                    let b0 = v * v * v;
+                    let b1 = 3.0 * v * v * t;
+                    let b2 = 3.0 * v * t * t;
+                    let b3 = t * t * t;
+                    out.push((
+                        b0 * cur.0 + b1 * c1.x + b2 * c2.x + b3 * p.x,
+                        b0 * cur.1 + b1 * c1.y + b2 * c2.y + b3 * p.y,
+                    ));
+                }
+                cur = (p.x, p.y);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

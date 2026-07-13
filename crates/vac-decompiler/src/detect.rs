@@ -28,11 +28,15 @@ pub struct Detection {
 
 /// Primitive class the decompiler thinks best fits this blob's silhouette.
 /// Decided by the bbox fill ratio (`area / (bbox_w * bbox_h)`):
-/// a perfectly filled rect is 1.0, a perfectly filled ellipse is π/4 ≈ 0.785.
+/// a perfectly filled rect is 1.0, a perfectly filled ellipse is π/4 ≈ 0.785,
+/// and anything well below the ellipse band (a triangle is ~0.5, a star
+/// ~0.35, a thin diagonal ~0.1) is a `Path` — the v0.6 primitive that
+/// gets its outline from PAC's contour-tracing pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeKind {
     Rect,
     Ellipse,
+    Path,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +71,17 @@ pub struct Blob {
 /// a filled circle (~0.78) classifies as ellipse and a rounded rect
 /// (~0.85) lands in the ellipse bucket too (safer false-negative).
 pub const RECT_FILL_THRESHOLD: f32 = 0.90;
+
+/// Bbox fill-ratio floor for `ShapeKind::Ellipse` (v0.6).  A rasterised
+/// ellipse fills π/4 ≈ 0.785 of its bbox and codec noise pulls that to
+/// ~0.72 at worst; anything below is shaped like neither primitive and
+/// classifies as `Path`.
+pub const ELLIPSE_MIN_FILL: f32 = 0.70;
+
+/// Blobs smaller than this stay `Ellipse` even when their fill ratio
+/// says `Path`: a contour traced around a couple dozen pixels is
+/// quantisation noise, not a measurable outline.
+pub const MIN_PATH_AREA: u32 = 64;
 
 /// Squared Euclidean colour distance threshold for the
 /// foreground/background mask. ~24 per channel ≈ visually distinct
@@ -172,14 +187,13 @@ fn sample_block_avg(f: &VideoFrame, x0: i32, y0: i32, w: i32, h: i32) -> Option<
 // Multi-blob detection
 // --------------------------------------------------------------------
 
-fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
+/// Foreground mask against the estimated background.  Transparent
+/// pixels are background by definition — without the alpha guard, a
+/// transparent canvas (decoded as rgba(0,0,0,0)) turns into one giant
+/// foreground blob the moment the estimated background isn't black.
+fn foreground_mask(f: &VideoFrame, bg: Color) -> Vec<bool> {
     let w = f.width as usize;
     let h = f.height as usize;
-
-    // Foreground mask. Transparent pixels are background by
-    // definition — without the alpha guard, a transparent canvas
-    // (decoded as rgba(0,0,0,0)) turns into one giant foreground blob
-    // the moment the estimated background isn't black.
     let mut mask = vec![false; w * h];
     for i in 0..(w * h) {
         if f.pixels[i * 4 + 3] < MIN_OPAQUE_ALPHA {
@@ -194,7 +208,14 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
         let dist_sq = (dr * dr + dg * dg + db * db) as u32;
         mask[i] = dist_sq > FG_THRESHOLD_SQ;
     }
+    mask
+}
 
+fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
+    let w = f.width as usize;
+    let h = f.height as usize;
+
+    let mask = foreground_mask(f, bg);
     let labels = label_components_4(&mask, w, h);
 
     // Per-label area count.
@@ -340,8 +361,10 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
             };
             let kind = if fill_ratio >= RECT_FILL_THRESHOLD {
                 ShapeKind::Rect
-            } else {
+            } else if fill_ratio >= ELLIPSE_MIN_FILL || a.area < MIN_PATH_AREA {
                 ShapeKind::Ellipse
+            } else {
+                ShapeKind::Path
             };
             let color = if a.int_count > 0 {
                 Color::rgb(
@@ -371,6 +394,95 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
             }
         })
         .collect()
+}
+
+/// Re-trace the outer contour of the blob nearest `near` in `frame`
+/// (v0.6).  Re-runs the same deterministic mask + CCL as
+/// `detect_blobs`, picks the foreground component closest to `near`
+/// (within `max_seed_dist` pixels), and hands it to PAC's
+/// Moore-neighbour tracer.  Returns clockwise boundary pixels, or
+/// `None` when no component lies close enough — callers fall back to
+/// the ellipse primitive in that case.
+///
+/// `min_component_area` guards against seeding on noise: the labels
+/// array still contains sub-`MIN_BLOB_AREA` specks that `detect_blobs`
+/// filtered from its blob list, and a blob whose mask is a ring (a
+/// shaded ball with a near-background specular centre) has its
+/// centroid *inside the hole*, right next to any such speck.  Callers
+/// pass a fraction of the blob's measured area so the search can only
+/// land on the component that actually is the blob.
+pub fn extract_contour(
+    frame: &VideoFrame,
+    bg: Color,
+    near: (f32, f32),
+    max_seed_dist: f32,
+    min_component_area: u32,
+) -> Option<Vec<(f32, f32)>> {
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let mask = foreground_mask(frame, bg);
+    let labels = label_components_4(&mask, w, h);
+
+    // Component sizes, so the seed search can skip noise specks.
+    let mut label_area = std::collections::HashMap::<u32, u32>::new();
+    for &l in &labels {
+        if l != 0 {
+            *label_area.entry(l).or_insert(0) += 1;
+        }
+    }
+
+    // Nearest sufficiently-large labelled pixel to `near` within the
+    // search radius.
+    let r = max_seed_dist.ceil().max(1.0) as i32;
+    let cx = near.0.round() as i32;
+    let cy = near.1.round() as i32;
+    let mut best: Option<(f32, u32, usize, usize)> = None; // (dist_sq, label, x, y)
+    for y in (cy - r).max(0)..=(cy + r).min(h as i32 - 1) {
+        for x in (cx - r).max(0)..=(cx + r).min(w as i32 - 1) {
+            let l = labels[y as usize * w + x as usize];
+            if l == 0 || label_area.get(&l).copied().unwrap_or(0) < min_component_area {
+                continue;
+            }
+            let d = (x as f32 - near.0).powi(2) + (y as f32 - near.1).powi(2);
+            if best.map(|(bd, ..)| d < bd).unwrap_or(true) {
+                best = Some((d, l, x as usize, y as usize));
+            }
+        }
+    }
+    let (_, target, seed_x, seed_y) = best?;
+
+    // Full bbox + area of the chosen component (the tracer's start
+    // pixel must be the component's true topmost-leftmost pixel).
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    let mut area = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if labels[y * w + x] != target {
+                continue;
+            }
+            area += 1;
+            min_x = min_x.min(x as u32);
+            max_x = max_x.max(x as u32);
+            min_y = min_y.min(y as u32);
+            max_y = max_y.max(y as u32);
+        }
+    }
+    if area == 0 {
+        return None;
+    }
+
+    let region = pac_decompiler::regions::LabelledRegion {
+        cluster: 0,
+        area,
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        seed_x: seed_x as u32,
+        seed_y: seed_y as u32,
+        label: target,
+    };
+    pac_decompiler::contour::trace_outer_contour(&labels, frame.width, frame.height, &region)
 }
 
 /// Compute the 7 Hu moment invariants from a blob's central moments.
@@ -607,6 +719,42 @@ mod tests {
         for b in &blobs {
             assert_eq!(b.kind, ShapeKind::Rect, "fill_ratio={}", b.fill_ratio);
         }
+    }
+
+    /// v0.6 — a filled triangle fills ~0.5 of its bbox: far below the
+    /// ellipse band, so it must classify as `Path`, and its traced +
+    /// RDP-simplified contour must come back as ~3 vertices.
+    #[test]
+    fn classifier_recognises_triangle_as_path_and_traces_contour() {
+        // Apex (80, 20), base y=90 spanning x=30..130.
+        let inside = |x: u32, y: u32| -> bool {
+            if !(20..=90).contains(&y) {
+                return false;
+            }
+            let spread = (y as f32 - 20.0) * 50.0 / 70.0;
+            (x as f32) >= 80.0 - spread && (x as f32) <= 80.0 + spread
+        };
+        let f = synth_frame(160, 120, (20, 20, 20), (0, 200, 255), inside);
+        let bg = Color::rgb(20, 20, 20);
+
+        let blobs = detect_blobs(&f, bg);
+        assert_eq!(blobs.len(), 1, "expected one blob, got {blobs:?}");
+        let b = blobs[0];
+        assert_eq!(b.kind, ShapeKind::Path, "fill_ratio={}", b.fill_ratio);
+        assert!(
+            b.fill_ratio > 0.40 && b.fill_ratio < ELLIPSE_MIN_FILL,
+            "triangle fill_ratio should sit near 0.5, got {}",
+            b.fill_ratio
+        );
+
+        let contour = extract_contour(&f, bg, (b.cx, b.cy), b.rx.max(b.ry), (b.area / 4).max(1))
+            .expect("triangle contour");
+        let simplified = pac_decompiler::simplify::rdp(&contour, 2.0);
+        assert!(
+            (3..=6).contains(&simplified.len()),
+            "expected ~3 corners after RDP, got {}: {simplified:?}",
+            simplified.len()
+        );
     }
 
     /// Like `synth_frame`, but pixels where `opaque(x, y)` is false are

@@ -7,5 +7,8 @@ description = "VAC decompiler: turns video frames back into a .vac AST using pur
 
 [dependencies]
 vac-format.workspace = true
+# The v0.6 path() primitive reuses PAC's per-frame machinery: Moore
+# contour tracing, closed-loop RDP, and Schneider Bezier fitting.
+pac-decompiler.workspace = true
 image.workspace = true
 thiserror.workspace = true

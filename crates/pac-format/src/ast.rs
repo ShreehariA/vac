@@ -1,10 +1,12 @@
 //! AST for the `.pac` (Picture As Code) source format.
 //!
-//! Re-exports [`vac_format::Color`] so the two formats share a single
-//! colour type and there is no impedance mismatch if a future tool
-//! wants to convert one to the other.
+//! Re-exports [`vac_format::Color`], [`vac_format::Point`] and
+//! [`vac_format::PathSeg`] so the two formats share the same colour
+//! and path-geometry types — a `.pac` path segment IS a `.vac` path
+//! segment, which is what lets the PAC decompiler pipeline feed the
+//! VAC decompiler directly (v0.6).
 
-pub use vac_format::Color;
+pub use vac_format::{Color, PathSeg, Point};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Document {
@@ -63,26 +65,3 @@ pub enum Shape {
     Path(Vec<PathSeg>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl Point {
-    pub const fn new(x: f32, y: f32) -> Self {
-        Point { x, y }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PathSeg {
-    /// Move pen to (x, y).  Must be the first segment of every path.
-    /// Mirrors SVG's `M x,y`.
-    MoveTo(Point),
-    /// Straight line from current point to (x, y).  Mirrors SVG's `L x,y`.
-    LineTo(Point),
-    /// Cubic Bezier from current point through control points c1 and
-    /// c2 to endpoint p.  Mirrors SVG's `C cx1,cy1 cx2,cy2 x,y`.
-    CurveTo { c1: Point, c2: Point, p: Point },
-}

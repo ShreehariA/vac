@@ -621,9 +621,9 @@ cargo run --release -p vac-cli -- compile examples/ball.vac out.gif
 
 ### What's still on the list
 
-- **v0.5** — `path()` primitive: Suzuki contour tracing → RDP → least-squares Bezier fitting. The original Phase 1 work. Hu moments earn their keep when shapes stop being circles.
-- **v0.6** — velocity-aware tracking (handles same-colour ID-swap), scene-cut detection (histogram comparison).
-- **v0.7+** — real-world video (codec-artifact-tolerant background estimation, scale/opacity inference).
+- ~~**v0.5** — `path()` primitive: Suzuki contour tracing → RDP → least-squares Bezier fitting. The original Phase 1 work.~~ **Shipped in v0.6** (via PAC's Moore tracer + Schneider fitter — see the v0.6 section).
+- **v0.7** — velocity-aware tracking (handles same-colour ID-swap), scene-cut detection (histogram comparison).
+- **v0.8+** — real-world video (codec-artifact-tolerant background estimation, scale/opacity inference), per-keyframe outline morphing for deforming shapes.
 
 ### v0.4 — Capability matrix on external inputs
 
@@ -838,8 +838,8 @@ were predicted to clean up dramatically; measuring the surviving blocks
 shows their keyframe amplitudes are 17–300 px — the greedy matcher is
 chaining different dash / label / tick fragments into single track
 identities. That noise is **track churn, not stationary jitter**, so the
-real pendulum fix is velocity-aware tracking (v0.6), which now has hard
-numbers behind it. What the filter reliably buys is the UI /
+real pendulum fix is velocity-aware tracking (now scheduled v0.7), which
+has hard numbers behind it. What the filter reliably buys is the UI /
 motion-graphics content class: static cards, labels and logos that
 jitter 1–2 px under codec noise now emit as bare `let` statements.
 
@@ -870,3 +870,48 @@ untouched — all 117 recovered geometries of `real_pendulum` are
 byte-identical before/after; only the tie-break ordering of
 equal-length noise tracks shuffles. H.264/MP4 frames decode fully
 opaque, so the MP4 path is unaffected by construction.
+
+---
+
+## v0.6 — The `path()` primitive: PAC merges into VAC
+
+The strategic slice. The PAC section above states the thesis: *a video
+is a sequence of stills with cross-frame constraints, so if PAC
+decomposes a single frame well, VAC's job collapses to "PAC each frame
++ match tracks across frames."* v0.6 is the first realisation of that
+map: blobs whose silhouette is neither a rect nor an ellipse now
+round-trip as an editable `path(...)` traced by PAC's pipeline, instead
+of being flattened into a lying ellipse.
+
+```
+let tri = path(M 80,220 L 140,100 L 200,220)       ← .vac source
+   │ vac compile → H.264 → vac decompile
+let shape_0 = path(M 198.8,216.94 L 79.8,218.94 L 139.8,99.94 L 198.8,216.94)
+```
+
+Every vertex back within ~1.2 px, apex keyframe at exactly `1500ms`,
+colour drift L1 = 3 — through a lossy video codec.
+
+| Change | Where | Why |
+|---|---|---|
+| **Shared geometry types** — `Point` + `PathSeg` move into `vac-format`; `pac-format` re-exports them (as it already did `Color`) | `vac-format::ast`, `pac-format::ast` | A `.pac` path segment *is* a `.vac` path segment — PAC's Schneider fitter output feeds the VAC AST with no conversion layer. |
+| **`path(M … L … C …)` grammar** — SVG-mini segments, implicitly closed | `vac-format` parser + writer | Mirrors the `.pac` grammar exactly. First segment must be `M`; negative and fractional coordinates lex fine. |
+| **Path rendering** — tiny-skia `PathBuilder`, anchored at the outline's shoelace centroid | `vac-compiler::render` | `position(x, y)` keyframes move the area centroid, which coincides with the measured blob centroid to within a pixel — declaration and animation agree. |
+| **Three-band classifier** — fill ratio ≥ 0.90 → `rect`; ≥ 0.70 → `ellipse`; below (and area ≥ 64 px) → `path` | `vac-decompiler::detect` | A triangle fills ~0.5 of its bbox, a star ~0.35, a thin diagonal ~0.1 — all far outside the ellipse band. Small blobs stay ellipses; a contour around a dozen pixels is noise, not measurement. |
+| **Per-track outline tracing** — Moore contour trace at the track's median-area frame → closed-loop RDP (2.0 px) → Schneider Bézier fit (1.5 px), translated to the declaration anchor | `vac-decompiler::track::trace_track_outline` + `detect::extract_contour`, calling `pac-decompiler::{contour, simplify, curves}` | Literal code reuse — the decompiler crate now depends on `pac-decompiler`. The seed search skips components smaller than ¼ of the blob's area, so a ring-shaped mask (shaded ball with a near-background specular centre) traces the ring, not a noise speck in the hole. |
+| New fixture + tests | `examples/triangle.vac`, unit tests in `detect.rs`/`parser.rs`, round-trip test in `vac-cli` | A ping-ponging triangle must come back as `Shape::Path` with ~3 corners, exact-width bbox, and its apex on the millisecond. |
+
+Effect on the wild corpus (primitive counts after v0.6):
+
+| input | paths | ellipses | rects | note |
+|---|---:|---:|---:|---|
+| `vac_control`, `motion_graphics`, `slide_in_card`, `testsrc2` | **0** | unchanged | unchanged | Geometric content stays on the cheap primitives — no regression. |
+| `real_pendulum` | 13 | 80 | 24 | The hatched mount, dashed arc and force arrows now render as recognisable outlines — the round-trip finally *looks like a pendulum diagram* instead of two giant swept ellipses. |
+| `real_double_pendulum` | 24 | 11 | 5 | Same story: arms and title fragments become outlines. |
+| `real_newtons_cradle` | 34 | 105 | 4 | Still an honest pointillist failure (photographic content needs `raster(...)`), but the fragments are at least shaped like what they measure. |
+| `real_bouncing_ball` | 1 | 1 | 1 | The shaded big ball's mask is a *ring* (near-white specular centre); it now traces as a circular outline. This row is why the seed search has the ¼-area guard. |
+
+The remaining honest gap in this slice: paths are traced once per track
+(at the median-area frame) and only translated — a shape that *deforms*
+over time keeps its representative outline. Per-keyframe outline
+morphing is a v0.7+ candidate, behind velocity-aware tracking.
