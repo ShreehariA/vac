@@ -1,0 +1,34 @@
+// v0.7 fixture: two SAME-coloured balls crossing on the same row.
+// Colour, radius and Hu moments are all identical, so only motion can
+// tell them apart.  Without velocity-aware matching the greedy tracker
+// swaps their identities at the crossing — the round-trip shows them
+// "bouncing off" each other instead of passing through.
+
+canvas 640x360 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 640, 360)
+  bg.fill = #1a1a2e
+
+  let a = ellipse(60, 180, 12, 12)
+  a.fill = #e94560
+  a.stroke = none
+
+  let b = ellipse(580, 180, 12, 12)
+  b.fill = #e94560
+  b.stroke = none
+
+  animate a {
+    0ms -> position(60, 180)
+    3s  -> position(580, 180)
+    easing: linear
+  }
+
+  animate b {
+    0ms -> position(580, 180)
+    3s  -> position(60, 180)
+    easing: linear
+  }
+}

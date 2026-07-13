@@ -383,6 +383,40 @@ fn static_shape_round_trips_without_animate_block() {
     }
 }
 
+/// v0.7 — velocity-aware tracking.  Two SAME-coloured balls cross on
+/// the same row; colour, radius and Hu moments are identical, so only
+/// motion can tell them apart.  The v0.6 matcher produced 3 tracks
+/// here (one bounced at the crossing, one died, one phantom was born
+/// mid-canvas); the velocity-aware matcher must recover exactly 2
+/// tracks that both traverse the full width.
+#[test]
+fn crossing_round_trip_preserves_identities() {
+    let (original, reconstructed) = round_trip("crossing.vac");
+    assert_canvas_matches(&original, &reconstructed);
+
+    let names = shape_names(&reconstructed);
+    assert_eq!(
+        names.len(),
+        2,
+        "expected exactly 2 shapes (no phantom mid-canvas track), got {names:?}"
+    );
+
+    for i in 0..2 {
+        let kfs = keyframes_for(&reconstructed, i);
+        assert!(kfs.len() >= 2, "shape {i} lost its motion: {kfs:?}");
+        let (_, x0, y0) = kfs[0];
+        let (_, x1, y1) = *kfs.last().unwrap();
+        assert!(
+            (x1 - x0).abs() >= 400.0,
+            "shape {i} bounced at the crossing instead of passing through: {kfs:?}"
+        );
+        assert!(
+            (y0 - 180.0).abs() <= 4.0 && (y1 - 180.0).abs() <= 4.0,
+            "shape {i} drifted off its row: {kfs:?}"
+        );
+    }
+}
+
 /// v0.6 — the path() primitive.  A moving triangle fills ~0.5 of its
 /// bbox — far outside both the rect and ellipse bands — so it must
 /// round-trip as a `path(...)` traced by the PAC contour pipeline,

@@ -915,3 +915,55 @@ The remaining honest gap in this slice: paths are traced once per track
 (at the median-area frame) and only translated — a shape that *deforms*
 over time keeps its representative outline. Per-keyframe outline
 morphing is a v0.7+ candidate, behind velocity-aware tracking.
+
+---
+
+## v0.7 — Velocity-aware tracking
+
+Closes the oldest open problem in the tracker (on the books since
+v0.3): **two same-coloured balls crossing paths swapped identities.**
+Colour, radius and Hu moments are identical for the pair, so the only
+signal that can tell them apart is motion — and the matcher ignored it.
+
+The new fixture `examples/crossing.vac` (two identical red balls,
+same row, opposite directions, full occlusion merge at the centre)
+decompiled like this before:
+
+```
+shape_0: 60 → 320 → back to 65     ← bounced (identity swap)
+shape_1: 580 → 320, dies           ← track starved in the merge
+shape_2: born at 337 → 574         ← phantom appears mid-canvas
+```
+
+and like this now:
+
+```
+shape_0: 60 → 320 (merge plateau) → 574   ← passes through ✓
+shape_1: 580 → 320 (merge plateau) → 65   ← passes through ✓
+```
+
+| Change | Where | Why |
+|---|---|---|
+| **Constant-velocity prediction** — each track extrapolates its next position from its trailing samples; the matcher scores candidates against the *prediction*, not the last seen position | `track::predicted_position`, `matching_cost` | For smooth motion the position term now measures acceleration, not speed: fast movers stay matched, and crossings resolve by direction. Timestamps make it gap-aware — a track unseen for two frames predicts two frames ahead. |
+| **Time-bounded velocity window** (250 ms, not a sample count) | `VELOCITY_WINDOW_MS` | At 30 fps the window reaches *behind* the ~130 ms merge plateau (whose samples sit at the merge midpoint and would flatten the velocity to zero); at a 5 fps GIF it degrades to the freshest 2-sample estimate, which strongly curved motion needs. |
+| **Bootstrap gate** (160 vs the usual 80) for 1-sample tracks | `BOOTSTRAP_COST_GATE` | A 1-sample track has no velocity model, so a 100 px/frame mover could never acquire its second sample. Wrong bootstraps self-prune: a 2-sample track with bogus velocity predicts into empty space, starves, and falls under `MIN_TRACK_SAMPLES`. |
+| **Gap tolerance 3 → 5 frames** | `MAX_GAP_FRAMES` | The losing bidder starves for the whole merge window of a same-size crossing (~5 frames). Velocity prediction keeps stale re-acquisition safe — a dead track predicts *away* from unrelated blobs. |
+| **Filled-outline honesty cap** — a path whose outline area exceeds 6× the measured pixel count falls back to an ellipse *shrunk to the measured area* | `PATH_MAX_FILL_OVERCLAIM`, `trace_track_outline` | Surfaced by this slice: chase-tracking rode the double-pendulum's swept-trace web and filled its outline into a canvas-sized slab. Rings (shaded balls, ratio ≈ 4) still fill — sweeps (ratio 10-20×) never render more ink than was measured. |
+
+Honest measurement:
+
+- `crossing.vac` — **fixed** (2 tracks, both traverse, apex plateau is
+  the honest record of the occlusion frames). Locked in CI.
+- A 100 px/frame mover with a 2-frame detection drop-out — one track,
+  no fragments (unit-tested; impossible under the old gate).
+- `real_newtons_cradle` — track churn collapsed: animate blocks with
+  > 100 px amplitude went from dozens to **one**.
+- Every geometric fixture (`ball`, `two_balls`, `sliding_rect`,
+  `triangle`, `vac_control`, …) — byte-for-byte the same behaviour.
+- `real_pendulum` — **worse on phantom amplitude** (40 blocks over
+  100 px, max 421 px vs ~300 before): prediction happily *chases*
+  static dashes that blink as the swinging arm occludes them,
+  stringing them into longer phantom sweeps. No motion model fixes
+  blinking fragments — that row's real cure is occlusion reasoning /
+  static-scene layering (v0.8+ candidate), and the capability matrix
+  now says so.

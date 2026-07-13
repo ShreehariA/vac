@@ -17,6 +17,14 @@
 //! introduces non-elliptical primitives, but it costs nothing to
 //! compute now and adds a small bonus for ball-radius differences.
 //!
+//! v0.7 makes the position term velocity-aware: each track predicts
+//! its next position by constant-velocity extrapolation from its last
+//! two samples, and candidates are scored against that prediction.
+//! Two same-coloured balls crossing paths keep their identities
+//! because each ball's direction is part of the model, and fast
+//! movers whose per-frame displacement exceeds the gate stay matched
+//! because prediction error measures acceleration, not speed.
+//!
 //! Trajectory simplification and easing classification are
 //! per-track and reuse the v0.2 implementation verbatim.
 
@@ -37,20 +45,39 @@ const RDP_TOLERANCE_PX: f32 = 2.0;
 const EASING_IMPROVEMENT_RATIO: f64 = 0.90;
 
 // --- Tracking weights & gates ----------------------------------------
-// Cost = W_POS·|Δpos| + W_COL·|Δrgb| + W_RAD·|Δr| + W_HU·|Δhu|.
-// The weights are picked so that for two distinct-coloured balls a
-// frame apart the same-track cost is ~10 and the cross-track cost is
-// > GATE.  Values within ±2× still match correctly in practice.
+// Cost = W_POS·|pos − predicted| + W_COL·|Δrgb| + W_RAD·|Δr| + W_HU·|Δhu|,
+// where `predicted` is the track's constant-velocity extrapolation
+// (v0.7).  For smooth motion the position term measures acceleration
+// rather than speed, so fast movers stay matched and same-colour
+// crossings resolve by direction.  The weights are picked so that for
+// two distinct-coloured balls a frame apart the same-track cost is ~10
+// and the cross-track cost is > GATE.  Values within ±2× still match
+// correctly in practice.
 const W_POS: f32 = 1.0;
 const W_COL: f32 = 0.4;
 const W_RAD: f32 = 2.0;
 const W_HU: f32 = 30.0;
 const COST_GATE: f32 = 80.0;
 
+/// Gate for tracks with a single sample (v0.7).  A 1-sample track has
+/// no velocity model yet, so a fast mover whose per-frame displacement
+/// exceeds `COST_GATE` could never acquire its second sample — every
+/// frame would spawn a fresh singleton.  The wider bootstrap gate lets
+/// it, after which prediction takes over and the gate tightens.  Wrong
+/// bootstraps self-prune: a 2-sample track with a bogus velocity
+/// predicts into empty space, starves, and falls under
+/// `MIN_TRACK_SAMPLES`.
+const BOOTSTRAP_COST_GATE: f32 = 160.0;
+
 /// Maximum number of consecutive frames a track may go unseen
-/// before it is closed out.  Bumps a bit of robustness against
-/// brief occlusion / detection drop-outs.
-const MAX_GAP_FRAMES: usize = 3;
+/// before it is closed out.  Sized (v0.7) to survive a full
+/// merge-occlusion of two same-sized blobs crossing: while they
+/// overlap, detection sees one blob and the losing bidder starves
+/// for the whole merge window (~5 frames for ball-sized shapes at
+/// crossing speeds).  Velocity prediction keeps stale re-acquisition
+/// safe — a dead-object track predicts further along its exit path,
+/// away from unrelated blobs.
+const MAX_GAP_FRAMES: usize = 5;
 
 /// A blob fewer than this many samples long is treated as a
 /// noise track and dropped entirely from the output.
@@ -72,6 +99,17 @@ const PATH_RDP_EPSILON_PX: f32 = 2.0;
 /// Schneider Bezier fitting max-deviation tolerance, in pixels (v0.6 —
 /// same default as PAC's `--curve-eps`).
 const PATH_CURVE_EPSILON_PX: f32 = 1.5;
+
+/// Cap on how much more area a filled path outline may claim than the
+/// blob's measured pixel count (v0.7).  Filling the outer contour is
+/// right for compact shapes (ratio ≈ 1) and for ring-shaped masks like
+/// a shaded ball with a near-background specular centre (ratio ≈ 2-4,
+/// where filling the hole is exactly what we want) — but a sprawling
+/// swept-trace web encloses huge empty bays (ratio 10-20×) and would
+/// render as a giant solid slab.  Past this cap the track falls back
+/// to an ellipse shrunk to the measured pixel area, so the render
+/// never claims ink that was not measured.
+const PATH_MAX_FILL_OVERCLAIM: f32 = 6.0;
 
 #[derive(Debug, Clone)]
 pub struct Track {
@@ -159,8 +197,8 @@ fn emit_track(
     // Aggregate rx and ry independently so a wide rect stays wide.
     let rxs: Vec<f32> = track.samples.iter().map(|(_, b)| b.rx).collect();
     let rys: Vec<f32> = track.samples.iter().map(|(_, b)| b.ry).collect();
-    let rx = round_to_int(median_f32(&rxs));
-    let ry = round_to_int(median_f32(&rys));
+    let mut rx = round_to_int(median_f32(&rxs));
+    let mut ry = round_to_int(median_f32(&rys));
     let color = median_color(track.samples.iter().map(|(_, b)| b.color));
     let (first_t, first_b) = track.samples[0];
 
@@ -188,6 +226,19 @@ fn emit_track(
         path_segs = trace_track_outline(track, frames, detections, (base_cx, base_cy));
         if path_segs.is_none() {
             kind = ShapeKind::Ellipse;
+            // The component was too sprawling for a filled outline (or
+            // tracing failed outright).  A bbox-sized ellipse would
+            // overclaim just as badly, so shrink it to the measured
+            // pixel area — the render never paints more ink than was
+            // measured.  Compact blobs are unaffected (scale ≈ 1).
+            let areas: Vec<f32> = track.samples.iter().map(|(_, b)| b.area as f32).collect();
+            let median_area = median_f32(&areas);
+            let ellipse_area = std::f32::consts::PI * rx * ry;
+            if ellipse_area > 1.0 {
+                let scale = (median_area / ellipse_area).sqrt().min(1.0);
+                rx = round_to_int(rx * scale).max(1.0);
+                ry = round_to_int(ry * scale).max(1.0);
+            }
         }
     }
 
@@ -333,6 +384,14 @@ fn trace_track_outline(
         return None;
     }
 
+    // Filled-outline honesty check: a spidery component (swept traces,
+    // scribbles) has an outer contour enclosing far more area than its
+    // pixels — filling it would paint a slab nothing measured.
+    let outline_area = shoelace_area(&simplified);
+    if outline_area > rep_b.area as f32 * PATH_MAX_FILL_OVERCLAIM {
+        return None;
+    }
+
     let dx = declare_at.0 - rep_b.cx;
     let dy = declare_at.1 - rep_b.cy;
     let moved: Vec<(f32, f32)> = simplified.iter().map(|p| (p.0 + dx, p.1 + dy)).collect();
@@ -377,14 +436,21 @@ pub fn build_tracks(detections: &[Detection]) -> Vec<Track> {
             .filter_map(|(i, t)| if t.active { Some(i) } else { None })
             .collect();
 
-        // Build all viable (cost, blob, track) candidates.
+        // Build all viable (cost, blob, track) candidates, scoring
+        // position against each track's constant-velocity prediction.
         let mut candidates: Vec<(f32, usize, usize)> =
             Vec::with_capacity(det.blobs.len() * active.len());
-        for (b_idx, blob) in det.blobs.iter().enumerate() {
-            for &t_idx in &active {
-                let last_blob = tracks[t_idx].samples.last().unwrap().1;
-                let cost = matching_cost(&last_blob, blob);
-                if cost <= COST_GATE {
+        for &t_idx in &active {
+            let last_blob = tracks[t_idx].samples.last().unwrap().1;
+            let predicted = predicted_position(&tracks[t_idx], det.t_ms);
+            let gate = if tracks[t_idx].samples.len() < 2 {
+                BOOTSTRAP_COST_GATE
+            } else {
+                COST_GATE
+            };
+            for (b_idx, blob) in det.blobs.iter().enumerate() {
+                let cost = matching_cost(&last_blob, predicted, blob);
+                if cost <= gate {
                     candidates.push((cost, b_idx, t_idx));
                 }
             }
@@ -430,8 +496,49 @@ pub fn build_tracks(detections: &[Detection]) -> Vec<Track> {
     tracks
 }
 
-fn matching_cost(prev: &Blob, curr: &Blob) -> f32 {
-    let pos = ((curr.cx - prev.cx).powi(2) + (curr.cy - prev.cy).powi(2)).sqrt();
+/// How far back in time the velocity estimate reaches.  Time-bounded
+/// rather than sample-bounded so it is fps-independent: at 30 fps it
+/// spans ~8 samples — long enough to reach *behind* the ~130 ms
+/// plateau a track suffers while riding the merged blob of a
+/// same-size crossing (whose samples all sit at the merge midpoint
+/// and would otherwise flatten the velocity to zero) — while at a
+/// 5 fps GIF it degrades to the freshest 2-sample estimate, which is
+/// what strongly curved motion like a pendulum bob needs.
+const VELOCITY_WINDOW_MS: u32 = 250;
+
+/// Constant-velocity prediction of where a track's blob should be at
+/// `t_now`, extrapolated from its trailing samples (v0.7).  A track
+/// with a single sample predicts its last observed position.  The
+/// timestamps make the extrapolation gap-aware: a track unseen for
+/// two frames predicts two frames ahead.  The cost of this model is
+/// paid at direction reversals, where the overshoot is ~2× the
+/// per-frame motion — still far under the gate at any fps this
+/// pipeline meets, and the old measure was off by 1× there anyway.
+fn predicted_position(track: &Track, t_now: u32) -> (f32, f32) {
+    let n = track.samples.len();
+    let (t1, b1) = track.samples[n - 1];
+    if n < 2 {
+        return (b1.cx, b1.cy);
+    }
+    // Oldest sample still inside the velocity window.
+    let mut j = n - 2;
+    while j > 0 && t1.saturating_sub(track.samples[j - 1].0) <= VELOCITY_WINDOW_MS {
+        j -= 1;
+    }
+    let (t0, b0) = track.samples[j];
+    let dt = t1.saturating_sub(t0) as f32;
+    if dt < 1.0 {
+        return (b1.cx, b1.cy);
+    }
+    let dt_now = t_now.saturating_sub(t1) as f32;
+    (
+        b1.cx + (b1.cx - b0.cx) / dt * dt_now,
+        b1.cy + (b1.cy - b0.cy) / dt * dt_now,
+    )
+}
+
+fn matching_cost(prev: &Blob, predicted: (f32, f32), curr: &Blob) -> f32 {
+    let pos = ((curr.cx - predicted.0).powi(2) + (curr.cy - predicted.1).powi(2)).sqrt();
     let dr = curr.color.r as f32 - prev.color.r as f32;
     let dg = curr.color.g as f32 - prev.color.g as f32;
     let db = curr.color.b as f32 - prev.color.b as f32;
@@ -598,6 +705,21 @@ fn classify_easing(blobs: &[(u32, Blob)], keep: &[usize]) -> Easing {
     } else {
         Easing::Linear
     }
+}
+
+/// Unsigned shoelace area of a closed polygon.
+fn shoelace_area(pts: &[(f32, f32)]) -> f32 {
+    let n = pts.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut acc = 0.0f64;
+    for i in 0..n {
+        let (x0, y0) = (pts[i].0 as f64, pts[i].1 as f64);
+        let (x1, y1) = (pts[(i + 1) % n].0 as f64, pts[(i + 1) % n].1 as f64);
+        acc += x0 * y1 - x1 * y0;
+    }
+    (acc.abs() * 0.5) as f32
 }
 
 // --------------------------------------------------------------------
@@ -823,6 +945,99 @@ mod tests {
             yellow_last.cx < 200.0,
             "yellow did not advance: cx={}",
             yellow_last.cx
+        );
+    }
+
+    /// v0.7 — two SAME-coloured, same-sized balls crossing on the same
+    /// row, with a single merged detection at the crossing frame.
+    /// Colour, radius and Hu are all identical, so only the
+    /// constant-velocity prediction can keep the identities straight:
+    /// the track moving right must exit right, the one moving left
+    /// must exit left — not bounce.
+    #[test]
+    fn tracker_keeps_identities_through_same_colour_crossing() {
+        let red = Color::rgb(0xe9, 0x45, 0x60);
+        let mut detections: Vec<Detection> = Vec::new();
+        for i in 0..=60u32 {
+            let t = i * 33;
+            let xa = 60.0 + 8.0 * i as f32; // left ball → right
+            let xb = 540.0 - 8.0 * i as f32; // right ball → left
+            let blobs = if (xa - xb).abs() < 16.0 {
+                // Balls overlap: detection sees one merged blob.
+                vec![blob_full((xa + xb) / 2.0, 180.0, red)]
+            } else {
+                vec![blob_full(xa, 180.0, red), blob_full(xb, 180.0, red)]
+            };
+            detections.push(Detection {
+                frame_index: i as usize,
+                t_ms: t,
+                bg: Color::rgb(0x1a, 0x1a, 0x2e),
+                blobs,
+            });
+        }
+
+        let tracks = build_tracks(&detections);
+        let long: Vec<&Track> = tracks.iter().filter(|t| t.samples.len() >= 40).collect();
+        assert_eq!(
+            long.len(),
+            2,
+            "expected 2 long tracks through the crossing, got {} ({tracks:#?})",
+            long.len()
+        );
+
+        for t in long {
+            let x0 = t.samples.first().unwrap().1.cx;
+            let x1 = t.samples.last().unwrap().1.cx;
+            let travelled = x1 - x0;
+            if x0 < 300.0 {
+                assert!(
+                    travelled > 300.0,
+                    "left-starting track bounced instead of crossing: {x0} → {x1}"
+                );
+            } else {
+                assert!(
+                    travelled < -300.0,
+                    "right-starting track bounced instead of crossing: {x0} → {x1}"
+                );
+            }
+        }
+    }
+
+    /// v0.7 — a fast mover whose per-frame displacement exceeds the
+    /// cost gate must stay a single track: the prediction lands on the
+    /// blob even across a multi-frame detection drop-out.
+    #[test]
+    fn velocity_prediction_survives_fast_motion_and_gaps() {
+        let red = Color::rgb(0xe9, 0x45, 0x60);
+        let mut detections: Vec<Detection> = Vec::new();
+        for i in 0..=40u32 {
+            let t = i * 33;
+            // 100 px/frame — far beyond COST_GATE for a static matcher.
+            let blobs = if (18..=19).contains(&i) {
+                Vec::new() // two-frame detection drop-out mid-flight
+            } else {
+                vec![blob_full(60.0 + 100.0 * i as f32, 180.0, red)]
+            };
+            detections.push(Detection {
+                frame_index: i as usize,
+                t_ms: t,
+                bg: Color::rgb(0x1a, 0x1a, 0x2e),
+                blobs,
+            });
+        }
+
+        let tracks = build_tracks(&detections);
+        let long: Vec<&Track> = tracks.iter().filter(|t| t.samples.len() >= 10).collect();
+        assert_eq!(
+            long.len(),
+            1,
+            "fast mover fragmented into {} tracks ({tracks:#?})",
+            long.len()
+        );
+        assert!(
+            long[0].samples.len() >= 39,
+            "track lost samples: {}",
+            long[0].samples.len()
         );
     }
 
