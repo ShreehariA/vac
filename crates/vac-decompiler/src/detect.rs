@@ -77,6 +77,14 @@ const FG_THRESHOLD_SQ: u32 = 24 * 24 * 3;
 /// and discarded (smaller than a 3x3 cluster).
 const MIN_BLOB_AREA: u32 = 9;
 
+/// Alpha below this is treated as transparent and excluded from both
+/// background estimation and the foreground mask (v0.5.2). GIF alpha
+/// is binary (0 or 255) and H.264 frames decode with alpha = 255
+/// everywhere, so this only bites on transparent GIF canvases — where
+/// the decoder's rgba(0,0,0,0) fill used to masquerade as a black
+/// background.
+const MIN_OPAQUE_ALPHA: u8 = 128;
+
 /// Run detection across all frames.
 pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
     let mut out = Vec::with_capacity(frames.len());
@@ -97,6 +105,11 @@ pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
 }
 
 /// Sample a small block at each corner and return the median RGB.
+///
+/// Fully-transparent pixels are excluded from the samples. If *no*
+/// corner pixel is opaque, the canvas has no measurable background
+/// colour at all — fall back to white, the colour viewers composite
+/// transparent GIFs onto.
 fn estimate_background(f: &VideoFrame) -> Color {
     let w = f.width as i32;
     let h = f.height as i32;
@@ -114,7 +127,7 @@ fn estimate_background(f: &VideoFrame) -> Color {
         }
     }
     if samples.is_empty() {
-        return Color::rgb(0, 0, 0);
+        return Color::rgb(255, 255, 255);
     }
     let mut rs: Vec<u8> = samples.iter().map(|c| c.0).collect();
     let mut gs: Vec<u8> = samples.iter().map(|c| c.1).collect();
@@ -140,6 +153,9 @@ fn sample_block_avg(f: &VideoFrame, x0: i32, y0: i32, w: i32, h: i32) -> Option<
     for y in y0..y1 {
         for x in x0..x1 {
             let i = ((y * fw + x) * 4) as usize;
+            if f.pixels[i + 3] < MIN_OPAQUE_ALPHA {
+                continue;
+            }
             sr += f.pixels[i] as u32;
             sg += f.pixels[i + 1] as u32;
             sb += f.pixels[i + 2] as u32;
@@ -160,9 +176,15 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
     let w = f.width as usize;
     let h = f.height as usize;
 
-    // Foreground mask.
+    // Foreground mask. Transparent pixels are background by
+    // definition — without the alpha guard, a transparent canvas
+    // (decoded as rgba(0,0,0,0)) turns into one giant foreground blob
+    // the moment the estimated background isn't black.
     let mut mask = vec![false; w * h];
     for i in 0..(w * h) {
+        if f.pixels[i * 4 + 3] < MIN_OPAQUE_ALPHA {
+            continue;
+        }
         let r = f.pixels[i * 4];
         let g = f.pixels[i * 4 + 1];
         let b = f.pixels[i * 4 + 2];
@@ -585,6 +607,91 @@ mod tests {
         for b in &blobs {
             assert_eq!(b.kind, ShapeKind::Rect, "fill_ratio={}", b.fill_ratio);
         }
+    }
+
+    /// Like `synth_frame`, but pixels where `opaque(x, y)` is false are
+    /// written as rgba(0, 0, 0, 0) — exactly what the GIF decoder
+    /// leaves in transparent regions.
+    fn synth_frame_transparent(
+        w: u32,
+        h: u32,
+        fg: (u8, u8, u8),
+        opaque: impl Fn(u32, u32) -> bool,
+    ) -> VideoFrame {
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                if opaque(x, y) {
+                    let i = ((y * w + x) * 4) as usize;
+                    pixels[i] = fg.0;
+                    pixels[i + 1] = fg.1;
+                    pixels[i + 2] = fg.2;
+                    pixels[i + 3] = 255;
+                }
+            }
+        }
+        VideoFrame {
+            width: w,
+            height: h,
+            pixels,
+            delay_ms: 33,
+        }
+    }
+
+    /// v0.5.2 — a fully-transparent canvas has no measurable background;
+    /// the estimator must fall back to white (the viewer compositing
+    /// default), not report the decoder's rgba(0,0,0,0) fill as black.
+    #[test]
+    fn transparent_corners_fall_back_to_white_background() {
+        let f = synth_frame_transparent(32, 32, (60, 60, 60), |x, y| {
+            // Opaque dark disk in the middle; corners fully transparent.
+            let dx = x as i32 - 16;
+            let dy = y as i32 - 16;
+            dx * dx + dy * dy <= 6 * 6
+        });
+        let bg = estimate_background(&f);
+        assert_eq!(
+            (bg.r, bg.g, bg.b),
+            (255, 255, 255),
+            "transparent corners should fall back to white, got {bg:?}"
+        );
+    }
+
+    /// v0.5.2 — opaque corner pixels must win over transparent ones in
+    /// the same corner block instead of being averaged with black.
+    #[test]
+    fn background_estimation_ignores_transparent_pixels_in_corner_blocks() {
+        // Every even pixel is opaque mid-grey, every odd pixel is
+        // transparent — a 50% dither. The estimate must be the grey,
+        // not grey averaged toward rgba(0,0,0,0).
+        let f = synth_frame_transparent(32, 32, (200, 200, 200), |x, y| (x + y) % 2 == 0);
+        let bg = estimate_background(&f);
+        assert_eq!(
+            (bg.r, bg.g, bg.b),
+            (200, 200, 200),
+            "transparent pixels leaked into the estimate: {bg:?}"
+        );
+    }
+
+    /// v0.5.2 — transparent pixels are background by definition. With a
+    /// white estimated background, the transparent canvas (decoded as
+    /// black) must NOT become one giant foreground blob; only the
+    /// opaque tick is a blob.
+    #[test]
+    fn transparent_canvas_does_not_become_a_foreground_blob() {
+        let f = synth_frame_transparent(32, 32, (60, 60, 60), |x, y| {
+            (14..18).contains(&x) && (4..12).contains(&y)
+        });
+        let blobs = detect_blobs(&f, Color::rgb(255, 255, 255));
+        assert_eq!(
+            blobs.len(),
+            1,
+            "expected only the opaque tick as a blob, got {blobs:?}"
+        );
+        let b = blobs[0];
+        assert!((b.cx - 15.5).abs() <= 1.0, "cx={}", b.cx);
+        assert!((b.cy - 7.5).abs() <= 1.0, "cy={}", b.cy);
+        assert_eq!((b.color.r, b.color.g, b.color.b), (60, 60, 60));
     }
 }
 

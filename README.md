@@ -842,3 +842,31 @@ real pendulum fix is velocity-aware tracking (v0.6), which now has hard
 numbers behind it. What the filter reliably buys is the UI /
 motion-graphics content class: static cards, labels and logos that
 jitter 1–2 px under codec noise now emit as bare `let` statements.
+
+---
+
+## v0.5.2 — Alpha-aware background estimation
+
+Second capability-matrix slice: transparent GIF canvases stop reading
+as black.
+
+The GIF decoder fills fully-transparent pixels with `rgba(0, 0, 0, 0)`,
+and the corner-sampling background estimator happily averaged that
+black into its estimate — which is how `real_loader.gif` (a spinner on
+a transparent canvas) round-tripped with `bg.fill = #000000` and an
+inverted look. v0.5.2 makes `detect.rs` alpha-aware:
+
+- **Background estimation** skips sub-opaque pixels; if *no* corner
+  pixel is opaque the canvas has no measurable background colour, and
+  the estimator falls back to white — the colour viewers composite
+  transparent GIFs onto.
+- **The foreground mask** treats transparent pixels as background by
+  definition, so a transparent canvas can't become one giant
+  foreground blob the moment the estimated background isn't black.
+
+Measured effect: the loader's background flips `#000000 → #ffffff`
+(all 12 tick tracks intact), and opaque inputs are geometrically
+untouched — all 117 recovered geometries of `real_pendulum` are
+byte-identical before/after; only the tie-break ordering of
+equal-length noise tracks shuffles. H.264/MP4 frames decode fully
+opaque, so the MP4 path is unaffected by construction.
