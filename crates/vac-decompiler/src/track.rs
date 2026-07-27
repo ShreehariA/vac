@@ -25,6 +25,13 @@
 //! movers whose per-frame displacement exceeds the gate stay matched
 //! because prediction error measures acceleration, not speed.
 //!
+//! v0.8 changes what reaches the tracker rather than the tracker
+//! itself.  `layer::StaticLayer` measures the persistent scene first
+//! and strips it out of every frame, so the blobs arriving here are
+//! moving content only; the scenery is emitted ahead of the tracks as
+//! `static_<n>`, using this module's own classifier and outline tracer
+//! via one-sample tracks.
+//!
 //! Trajectory simplification and easing classification are
 //! per-track and reuse the v0.2 implementation verbatim.
 
@@ -35,6 +42,7 @@ use vac_format::{
 
 use crate::detect::{Blob, Detection, ShapeKind};
 use crate::frames::{estimate_fps, VideoFrame};
+use crate::layer::StaticLayer;
 
 /// 1D RDP tolerance, in pixels.  Below this, deviations from the
 /// straight-line interpolation between segment endpoints are noise.
@@ -124,7 +132,11 @@ pub struct Track {
     active: bool,
 }
 
-pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Document {
+pub fn build_document(
+    frames: &[VideoFrame],
+    detections: &[Detection],
+    layer: Option<&StaticLayer>,
+) -> Document {
     let canvas = Canvas {
         width: frames[0].width,
         height: frames[0].height,
@@ -155,6 +167,40 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
         value: Value::Color(bg_color),
     });
 
+    // v0.8: the persistent scene is emitted first, so it renders behind
+    // everything that moves — which is where it was measured.  Each
+    // static shape is a one-sample track, which routes it through
+    // exactly the same classifier, outline tracer and honesty checks a
+    // moving object gets, and drops out of the animate path for free.
+    if let Some(l) = layer {
+        let plate = l.plate();
+        let mut blobs = crate::detect::detect_blobs(&plate, l.bg);
+        blobs.sort_by(|a, b| b.area.cmp(&a.area).then_with(|| crate::detect::cmp_position(a, b)));
+        let plate_dets = [Detection {
+            frame_index: 0,
+            t_ms: 0,
+            bg: l.bg,
+            blobs: blobs.clone(),
+        }];
+        let plate_frames = [plate];
+        for (idx, blob) in blobs.iter().enumerate() {
+            let scenery = Track {
+                id: idx,
+                samples: vec![(0, *blob)],
+                frame_indices: vec![0],
+                last_seen_frame: 0,
+                active: false,
+            };
+            emit_shape(
+                &mut statements,
+                &format!("static_{idx}"),
+                &scenery,
+                &plate_frames,
+                &plate_dets,
+            );
+        }
+    }
+
     let mut tracks = build_tracks(detections);
     // Filter out tracks that are too short to be meaningful.
     tracks.retain(|t| t.samples.len() >= MIN_TRACK_SAMPLES);
@@ -168,7 +214,13 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
     });
 
     for (idx, track) in tracks.iter().enumerate() {
-        emit_track(&mut statements, idx, track, frames, detections);
+        emit_shape(
+            &mut statements,
+            &format!("shape_{idx}"),
+            track,
+            frames,
+            detections,
+        );
     }
 
     Document {
@@ -181,14 +233,18 @@ pub fn build_document(frames: &[VideoFrame], detections: &[Detection]) -> Docume
     }
 }
 
-fn emit_track(
+/// Emit one recovered object: a `let`, its fill and stroke, and — when
+/// it actually moved — an `animate` block.  Used for both moving tracks
+/// and (v0.8) the static scene, whose shapes arrive as one-sample
+/// tracks measured on the median plate.
+fn emit_shape(
     statements: &mut Vec<Statement>,
-    idx: usize,
+    name: &str,
     track: &Track,
     frames: &[VideoFrame],
     detections: &[Detection],
 ) {
-    let name = format!("shape_{idx}");
+    let name = name.to_string();
     // Majority-vote the shape kind across all samples of the track.
     // A track that classifies inconsistently usually means antialiased
     // edges flipping the bbox fill-ratio across the threshold; majority
@@ -1069,7 +1125,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_track(&mut statements, 0, &track_from(samples), &[], &[]);
+        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[]);
 
         assert!(
             !statements
@@ -1105,7 +1161,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_track(&mut statements, 0, &track_from(samples), &[], &[]);
+        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[]);
 
         assert!(
             statements

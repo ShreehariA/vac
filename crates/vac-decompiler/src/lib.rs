@@ -9,6 +9,11 @@
 //!
 //! The pipeline itself is intentionally algorithmic, not classifier-based:
 //!
+//! 0. **Static-scene layering** (v0.8): a per-pixel temporal median
+//!    plate plus a per-pixel agreement count separate the persistent
+//!    scene from the moving content, and strip it out of every frame
+//!    where it is actually visible. Scene furniture is emitted once as
+//!    `static_<n>`; the tracker below never sees it blink.
 //! 1. **Background estimate**: sample frame corners → median colour.
 //! 2. **Foreground mask**: pixels whose colour distance from the
 //!    background exceeds a threshold.
@@ -34,11 +39,28 @@
 pub mod detect;
 pub mod frames;
 pub mod frames_mp4;
+pub mod layer;
 pub mod track;
 
 use std::path::Path;
 
 use vac_format::Document;
+
+/// Knobs for the decompiler. `Default` is what the CLI and the `vac`
+/// facade use; the flags exist so a regression can be measured against
+/// the previous version's behaviour with the same binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// Measure and strip the persistent scene before tracking (v0.8).
+    /// Off reproduces the v0.7 single-layer pipeline exactly.
+    pub static_layer: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { static_layer: true }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecompileError {
@@ -52,8 +74,7 @@ pub enum DecompileError {
 
 /// Decompile an animated GIF into a [`Document`].
 pub fn decompile_gif(input: &Path) -> Result<Document, DecompileError> {
-    let frames = frames::load_gif(input)?;
-    decompile_frames(&frames)
+    decompile_gif_with(input, &Options::default())
 }
 
 /// Decompile an MP4 (any codec ffmpeg can decode) into a [`Document`].
@@ -61,14 +82,37 @@ pub fn decompile_gif(input: &Path) -> Result<Document, DecompileError> {
 /// Requires the system `ffmpeg` and `ffprobe` binaries on PATH.
 /// Use [`frames_mp4::ffmpeg_available`] for a runtime probe.
 pub fn decompile_mp4(input: &Path) -> Result<Document, DecompileError> {
-    let frames = frames_mp4::load_mp4(input)?;
-    decompile_frames(&frames)
+    decompile_mp4_with(input, &Options::default())
 }
 
-fn decompile_frames(frames: &[frames::VideoFrame]) -> Result<Document, DecompileError> {
+/// [`decompile_gif`] with explicit [`Options`].
+pub fn decompile_gif_with(input: &Path, opts: &Options) -> Result<Document, DecompileError> {
+    decompile_frames(frames::load_gif(input)?, opts)
+}
+
+/// [`decompile_mp4`] with explicit [`Options`].
+pub fn decompile_mp4_with(input: &Path, opts: &Options) -> Result<Document, DecompileError> {
+    decompile_frames(frames_mp4::load_mp4(input)?, opts)
+}
+
+/// Frames are taken by value because the static-scene pass edits them:
+/// stripping the persistent scene in place is what keeps peak memory at
+/// one copy of the clip rather than two.
+fn decompile_frames(
+    mut frames: Vec<frames::VideoFrame>,
+    opts: &Options,
+) -> Result<Document, DecompileError> {
     if frames.is_empty() {
         return Err(DecompileError::Other("no frames in input".into()));
     }
-    let detections = detect::detect_all(frames);
-    Ok(track::build_document(frames, &detections))
+    let scene = if opts.static_layer {
+        layer::StaticLayer::measure(&frames)
+    } else {
+        None
+    };
+    if let Some(l) = &scene {
+        l.strip(&mut frames);
+    }
+    let detections = detect::detect_all(&frames);
+    Ok(track::build_document(&frames, &detections, scene.as_ref()))
 }

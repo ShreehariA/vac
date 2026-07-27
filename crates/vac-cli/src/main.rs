@@ -6,6 +6,8 @@
 //!
 //! vac decompile ball.mp4              # → ball.vac (next to source)
 //! vac decompile ball.gif out.vac      # → out.vac
+//!
+//! vac decompile clip.mp4 --no-static-layer   # skip v0.8 scene layering
 //! ```
 //!
 //! Format dispatch is by extension: `.mp4` (preferred) and `.gif` (legacy
@@ -47,6 +49,11 @@ enum Cmd {
         input: PathBuf,
         /// Output `.vac` path. Defaults to `<input>.vac` next to the video.
         output: Option<PathBuf>,
+        /// Skip static-scene layering (v0.8) and treat every frame as a
+        /// single layer, the way v0.7 did. Useful for measuring what the
+        /// layering pass actually changed.
+        #[arg(long)]
+        no_static_layer: bool,
     },
 }
 
@@ -54,7 +61,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Compile { input, output } => run_compile(&input, output.as_deref()),
-        Cmd::Decompile { input, output } => run_decompile(&input, output.as_deref()),
+        Cmd::Decompile {
+            input,
+            output,
+            no_static_layer,
+        } => run_decompile(
+            &input,
+            output.as_deref(),
+            &vac::DecompileOptions {
+                static_layer: !no_static_layer,
+            },
+        ),
     }
 }
 
@@ -83,14 +100,18 @@ fn run_compile(input: &Path, output: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn run_decompile(input: &Path, output: Option<&Path>) -> Result<()> {
+fn run_decompile(
+    input: &Path,
+    output: Option<&Path>,
+    opts: &vac::DecompileOptions,
+) -> Result<()> {
     let out_path: PathBuf = output
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| input.with_extension("vac"));
 
     eprintln!("decompiling {} ...", input.display());
-    let doc =
-        vac::read_video(input).with_context(|| format!("decompiling {}", input.display()))?;
+    let doc = vac::read_video_with(input, opts)
+        .with_context(|| format!("decompiling {}", input.display()))?;
 
     doc.to_vac(&out_path)
         .with_context(|| format!("writing {}", out_path.display()))?;

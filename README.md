@@ -967,3 +967,130 @@ Honest measurement:
   blinking fragments — that row's real cure is occlusion reasoning /
   static-scene layering (v0.8+ candidate), and the capability matrix
   now says so.
+
+---
+
+## v0.8 — Static-scene layering and occlusion reasoning
+
+Every version up to here treated a video as **one layer**: mask each
+frame against its background, and whatever survives is a moving object.
+That is wrong for the most ordinary kind of footage there is — a scene
+with furniture in it. A pendulum's scale, a dial's tick marks, the
+wires and end-posts of a Newton's cradle: they never move, but the
+mover *passes in front of them*, so from the tracker's point of view
+they blink out and back. A blinking blob is indistinguishable from a
+fast-moving one.
+
+v0.8 measures the scene before tracking anything:
+
+| Step | What it measures | Where |
+|---|---|---|
+| **Temporal median plate** | Per pixel, the median colour over the clip. A pixel showing furniture 80% of the time medians to the furniture; a pixel a ball crosses for six frames medians to the background. No thresholds — just the middle value. | `layer::temporal_median` |
+| **Agreement** | For every plate pixel that reads as foreground, the fraction of frames whose actual colour matches the plate. *This is the occlusion measurement*: furniture briefly hidden scores 0.75-1.0; an object that merely rests in one spot for half the clip scores ~0.5 and is rejected. | `STATIC_MIN_AGREEMENT` |
+| **Conditional strip** | Blank the persistent pixels back to background — **only in the frames where they agree**. Where a static pixel disagrees, something is standing in front of it, and those pixels are left untouched so the occluder keeps its silhouette instead of being punched full of holes. | `StaticLayer::strip` |
+| **Emit as scenery** | The plate's shapes are emitted ahead of the tracks as `static_<n>`, through the same classifier, outline tracer and honesty checks a moving object gets (they arrive as one-sample tracks, so they drop out of the animate path for free). | `track::build_document` |
+
+`--no-static-layer` on `vac decompile` turns the whole pass off and
+reproduces the v0.7 single-layer pipeline, so every number below is an
+A/B against the same binary.
+
+### The fixture
+
+`examples/occlusion.vac` — a ball crossing in front of a static post.
+The two touch, so connected components merge them, and under one layer
+the damage is total:
+
+```
+shape_0: post   + a 10-keyframe animate block wobbling ±6 px
+shape_1: ball fragment  276 → 420 → 276
+shape_2: ball fragment   60 → 204
+shape_3: ball fragment  203 → 68        ← one ball, three tracks
+```
+
+With the scene measured and stripped first:
+
+```
+static_0: rect(230, 40, 20, 240)        ← exactly the source post, no animate
+shape_0:  ball  60 → 420 → 68           ← one unbroken track
+```
+
+Locked in CI.
+
+### Honest measurement (whole wild corpus, same binary, `--no-static-layer` vs default)
+
+| Input | shapes | animate blocks | keyframes | `.vac` size |
+|---|---|---|---|---|
+| `real_double_pendulum` | 49 → 91 | **45 → 19** | **1159 → 186** | **54.0 KB → 25.5 KB** |
+| `real_loader` | 12 → 15 | **12 → 3** | **75 → 28** | **3.9 KB → 2.4 KB** |
+| `real_newtons_cradle` | 137 → 185 | **50 → 38** | **354 → 267** | 33.2 KB → 36.5 KB |
+| `real_pendulum` | 119 → 110 | 63 → 60 | 496 → 480 | 35.0 KB → 33.3 KB |
+| `real_bouncing_ball` | 2 → 2 | 1 → 1 | 33 → 36 | 1.6 KB → 1.7 KB |
+| `mandelbrot` | 26 → 45 | 21 → 27 | 77 → 128 | 8.0 KB → 15.9 KB |
+| `testsrc2` | 1 → 75 | 0 → 47 | 0 → 458 | 0.2 KB → 25.0 KB |
+| `motion_graphics`, `slide_in_card`, `vac_control` | byte-for-byte identical (no persistent scenery to measure) | | | |
+
+Reading the rows that got *bigger*:
+
+- **`real_newtons_cradle`** — the +48 shapes are the words *PRINCIPIA
+  MATHEMATICA* on the book under the cradle. They were always in the
+  frame; one layer swallowed them, and they now come out as scenery
+  legible in the render. Meanwhile the moving pass got quieter: 12
+  fewer animate blocks, 87 fewer keyframes.
+- **`testsrc2`** — the whole test pattern used to collapse into a
+  single canvas-sized blob (194 bytes of output, a flat grey
+  rectangle). Stripping the persistent slab exposes what was
+  underneath, and the round-trip now shows the checkerboard, the
+  diagonal sweep and the coloured blocks. Still nothing like the
+  source, and the colour bars still merge into one grey component —
+  VAC has no colour segmentation, which is a separate gap.
+- **`mandelbrot`** — the extra shapes buy a visibly truer cardioid
+  silhouette (see `mandelbrot_compare.png`); the fractal remains
+  out of scope by design.
+
+### The counter-finding: v0.7's diagnosis of the pendulum was wrong
+
+v0.7 recorded that `real_pendulum`'s phantom tracks were static dashes
+blinking as the arm occluded them, and routed the fix here. Building
+the fix disproved it. Layering cleans up the pendulum's actual
+scenery — the hatched ceiling and dotted plumb line now render crisply
+instead of as smeared artefacts — but the phantom amplitude is
+unchanged (16 blocks over 100 px, max 191.8 px, identical with and
+without the pass).
+
+Reading the offenders shows why: every one of them is a `#007f00`,
+2 px-radius blob. They are the dots of the **dotted green force
+vectors**, which are not scenery at all — they *move*, and a dotted
+stroke rasterises into dozens of interchangeable 4-pixel fragments.
+The tracker matches dot *k* in one frame to dot *k+3* in the next
+because nothing distinguishes them. That is a fragment-grouping
+problem (do these dots share one rigid transform?), not an occlusion
+problem, and no amount of scene measurement will touch it.
+
+### Also fixed: the decompiler was not reproducible
+
+Found while A/B-ing the corpus: **the same binary on the same file
+produced different output between runs.** `detect_blobs` collected its
+kept labels straight out of a randomly-seeded `HashMap`, so the blob
+order — and with it the tie-break between equal-area blobs and the
+emitted `shape_<n>` numbering — was whatever the hasher felt like that
+process. `motion_graphics` (three identical 44×44 squares) flipped
+between two orderings roughly half the time.
+
+Labels come out of the raster-scan union-find in first-appearance
+order, so sorting them restores determinism, and equal-area blobs now
+tie-break in raster order. Ten runs across the corpus, byte-identical.
+A decompiler whose output isn't reproducible can't be measured, and
+every before/after table in this README depends on it.
+
+### Still open after v0.8
+
+- **Dashed and dotted strokes fragment.** The pendulum row above.
+  Wants co-moving fragment grouping: cluster blobs that share a rigid
+  transform between frames and emit them as one object.
+- **No colour segmentation.** Adjacent regions of different colours
+  merge into one component (the `testsrc2` bars, the Newton's cradle
+  frame). PAC already does k-means palette extraction; VAC's mask is
+  still binary foreground/background.
+- **Scene cuts.** A single median plate assumes one continuous shot.
+- **Per-keyframe outline morphing** for shapes that deform as they
+  move — the outline is traced once, at a representative frame.

@@ -8,6 +8,7 @@ use image::RgbaImage;
 
 use crate::DecompileError;
 
+#[derive(Clone)]
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,

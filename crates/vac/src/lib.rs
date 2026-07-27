@@ -47,7 +47,7 @@ pub use vac_format::{
 // Re-export the underlying error types so callers can pattern-match if they
 // want to, without taking direct dependencies on the sub-crates.
 pub use vac_compiler::CompileError;
-pub use vac_decompiler::DecompileError;
+pub use vac_decompiler::{DecompileError, Options as DecompileOptions};
 
 // --------------------------------------------------------------------
 // Errors
@@ -93,10 +93,15 @@ pub fn parse(src: &str) -> Result<Document> {
 ///
 /// Format is dispatched by extension. Supported: `.mp4`, `.gif`.
 pub fn read_video<P: AsRef<Path>>(path: P) -> Result<Document> {
+    read_video_with(path, &DecompileOptions::default())
+}
+
+/// [`read_video`] with explicit decompiler [`DecompileOptions`].
+pub fn read_video_with<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Document> {
     let path = path.as_ref();
     match video_format(path)? {
-        VideoFormat::Mp4 => Ok(vac_decompiler::decompile_mp4(path)?),
-        VideoFormat::Gif => Ok(vac_decompiler::decompile_gif(path)?),
+        VideoFormat::Mp4 => Ok(vac_decompiler::decompile_mp4_with(path, opts)?),
+        VideoFormat::Gif => Ok(vac_decompiler::decompile_gif_with(path, opts)?),
     }
 }
 

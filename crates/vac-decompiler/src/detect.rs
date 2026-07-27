@@ -98,7 +98,7 @@ const MIN_BLOB_AREA: u32 = 9;
 /// everywhere, so this only bites on transparent GIF canvases — where
 /// the decoder's rgba(0,0,0,0) fill used to masquerade as a black
 /// background.
-const MIN_OPAQUE_ALPHA: u8 = 128;
+pub(crate) const MIN_OPAQUE_ALPHA: u8 = 128;
 
 /// Run detection across all frames.
 pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
@@ -107,7 +107,7 @@ pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
     for (i, f) in frames.iter().enumerate() {
         let bg = estimate_background(f);
         let mut blobs = detect_blobs(f, bg);
-        blobs.sort_by(|a, b| b.area.cmp(&a.area));
+        blobs.sort_by(|a, b| b.area.cmp(&a.area).then_with(|| cmp_position(a, b)));
         out.push(Detection {
             frame_index: i,
             t_ms,
@@ -125,7 +125,7 @@ pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
 /// corner pixel is opaque, the canvas has no measurable background
 /// colour at all — fall back to white, the colour viewers composite
 /// transparent GIFs onto.
-fn estimate_background(f: &VideoFrame) -> Color {
+pub(crate) fn estimate_background(f: &VideoFrame) -> Color {
     let w = f.width as i32;
     let h = f.height as i32;
     let block = 5i32;
@@ -191,7 +191,7 @@ fn sample_block_avg(f: &VideoFrame, x0: i32, y0: i32, w: i32, h: i32) -> Option<
 /// pixels are background by definition — without the alpha guard, a
 /// transparent canvas (decoded as rgba(0,0,0,0)) turns into one giant
 /// foreground blob the moment the estimated background isn't black.
-fn foreground_mask(f: &VideoFrame, bg: Color) -> Vec<bool> {
+pub(crate) fn foreground_mask(f: &VideoFrame, bg: Color) -> Vec<bool> {
     let w = f.width as usize;
     let h = f.height as usize;
     let mut mask = vec![false; w * h];
@@ -211,7 +211,7 @@ fn foreground_mask(f: &VideoFrame, bg: Color) -> Vec<bool> {
     mask
 }
 
-fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
+pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
     let w = f.width as usize;
     let h = f.height as usize;
 
@@ -228,10 +228,19 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
 
     // Keep labels above min area; build a stable ordering for the per-blob
     // accumulators below.
-    let kept_labels: Vec<u32> = counts
+    //
+    // The sort is load-bearing, not cosmetic: `counts` is a HashMap with
+    // a randomly-seeded hasher, so iterating it directly makes the blob
+    // order — and therefore the tie-break between equal-area blobs, and
+    // therefore the emitted `shape_<n>` numbering — differ between runs
+    // of the same binary on the same file. Labels come out of the
+    // raster-scan union-find in first-appearance order, so sorting them
+    // makes the output reproducible.
+    let mut kept_labels: Vec<u32> = counts
         .iter()
         .filter_map(|(&l, &c)| if c >= MIN_BLOB_AREA { Some(l) } else { None })
         .collect();
+    kept_labels.sort_unstable();
     if kept_labels.is_empty() {
         return Vec::new();
     }
@@ -394,6 +403,16 @@ fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
             }
         })
         .collect()
+}
+
+/// Raster-order tie-break (top-to-bottom, then left-to-right) for
+/// blobs the area sort can't separate — two identically-sized boxes on
+/// the same frame must always come out in the same order.
+pub(crate) fn cmp_position(a: &Blob, b: &Blob) -> std::cmp::Ordering {
+    a.cy
+        .partial_cmp(&b.cy)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.cx.partial_cmp(&b.cx).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 /// Re-trace the outer contour of the blob nearest `near` in `frame`

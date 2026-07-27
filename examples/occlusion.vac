@@ -1,0 +1,32 @@
+// v0.8 fixture: a ball crossing in front of a static post.
+//
+// Under the single-layer pipeline the ball and the post touch, so
+// connected-component labelling merges them into one blob and the
+// ball's measured centroid and radius jump to the merged shape's.
+// Static-scene layering measures the post as scenery, strips it from
+// every frame where it is actually visible, and leaves the ball's
+// pixels alone where the ball is standing in front of it.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a1a2e
+
+  let post = rect(230, 40, 20, 240)
+  post.fill = #50c878
+  post.stroke = none
+
+  let ball = ellipse(60, 160, 20, 20)
+  ball.fill = #e94560
+  ball.stroke = none
+
+  animate ball {
+    0ms    -> position(60, 160)
+    1500ms -> position(420, 160)
+    3s     -> position(60, 160)
+    easing: linear
+  }
+}

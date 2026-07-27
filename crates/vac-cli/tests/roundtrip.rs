@@ -417,6 +417,72 @@ fn crossing_round_trip_preserves_identities() {
     }
 }
 
+/// v0.8 — static-scene layering.  A ball crosses in front of a static
+/// post.  Under the single-layer pipeline the two touch, connected
+/// components merge them, and the damage is total: the post picks up a
+/// 10-keyframe animate block wobbling ±6 px, and the ball shatters into
+/// *three* fragment tracks as its identity is destroyed at each
+/// crossing.  With the scene measured and stripped first, the post is a
+/// bare `let` at its source geometry and the ball is one unbroken
+/// track.
+#[test]
+fn ball_crossing_a_static_post_keeps_one_track_and_a_bare_post() {
+    let (original, reconstructed) = round_trip("occlusion.vac");
+    assert_canvas_matches(&original, &reconstructed);
+
+    let names = shape_names(&reconstructed);
+    assert_eq!(names.len(), 2, "expected post + ball, got {names:?}");
+
+    let animated: Vec<&str> = reconstructed.scenes[0]
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            Statement::Animate(a) => Some(a.target.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        animated.len(),
+        1,
+        "only the ball may move — the post must not wobble: {animated:?}",
+    );
+
+    let ball_idx = shape_index_by_color(&reconstructed, Color::rgb(0xe9, 0x45, 0x60));
+    assert_eq!(animated[0], names[ball_idx], "the animate block lost the ball");
+
+    // The ball keeps its own radius: a merged ball+post blob measures
+    // ~120 px wide, not 40.
+    match shape_of(&reconstructed, &names[ball_idx]) {
+        Shape::Ellipse { rx, ry, .. } => {
+            assert!(
+                (rx - 20.0).abs() <= 3.0 && (ry - 20.0).abs() <= 3.0,
+                "ball absorbed the post it crossed: rx={rx}, ry={ry} (expected ~20)",
+            );
+        }
+        other => panic!("ball should stay an ellipse, got {other:?}"),
+    }
+
+    // Both crossings survive: the ball still reaches its far apex.
+    let kfs = keyframes_for(&reconstructed, ball_idx);
+    assert!(kfs.len() >= 3, "ball lost its apex keyframe: {kfs:?}");
+    assert_apex_recovered(&kfs, 420.0, 160.0, 4.0);
+
+    // The post survives as scenery at its source geometry.
+    match shape_of(&reconstructed, &names[1 - ball_idx]) {
+        Shape::Rect { x, y, w, h } => {
+            assert!(
+                (x - 230.0).abs() <= 3.0 && (y - 40.0).abs() <= 3.0,
+                "post anchor drifted: got ({x}, {y}), expected (230, 40)",
+            );
+            assert!(
+                (w - 20.0).abs() <= 3.0 && (h - 240.0).abs() <= 3.0,
+                "post size drifted: got {w}x{h}, expected 20x240",
+            );
+        }
+        other => panic!("static post should stay a rect, got {other:?}"),
+    }
+}
+
 /// v0.6 — the path() primitive.  A moving triangle fills ~0.5 of its
 /// bbox — far outside both the rect and ellipse bands — so it must
 /// round-trip as a `path(...)` traced by the PAC contour pipeline,
