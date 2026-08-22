@@ -63,6 +63,8 @@ pub enum Error {
     Compile(#[from] CompileError),
     #[error("decompile: {0}")]
     Decompile(#[from] DecompileError),
+    #[error("measure: {0}")]
+    Measure(#[from] MetricError),
     #[error("unsupported video format `.{ext}` (supported: mp4, gif)")]
     UnsupportedVideoFormat { ext: String },
     #[error("path has no extension; can't decide format: {path}")]
@@ -182,5 +184,168 @@ fn video_format(path: &Path) -> Result<VideoFormat> {
         other => Err(Error::UnsupportedVideoFormat {
             ext: other.to_string(),
         }),
+    }
+}
+
+// --------------------------------------------------------------------
+// Measurement (v0.9)
+// --------------------------------------------------------------------
+//
+// Every VAC version through v0.8 measured itself with proxies — shape
+// counts, keyframe counts, `.vac` byte size.  Those describe the *rate*
+// side of the tradeoff and say nothing about the *distortion* side.
+// These entry points supply the missing axis.
+
+pub use vac_compiler::render::RenderedFrame;
+pub use vac_decompiler::frames::VideoFrame;
+pub use vac_metrics::{CompareOptions, Fidelity, FrameScore, MetricError, Rgb};
+
+/// Rasterise a document to frames in memory, with no encoder involved.
+pub fn render(doc: &Document) -> Result<Vec<RenderedFrame>> {
+    Ok(vac_compiler::render::render_document(doc)?)
+}
+
+/// Decode a video's frames without running the decompiler on them.
+pub fn load_video_frames<P: AsRef<Path>>(path: P) -> Result<Vec<VideoFrame>> {
+    let path = path.as_ref();
+    Ok(match video_format(path)? {
+        VideoFormat::Mp4 => vac_decompiler::frames_mp4::load_mp4(path)?,
+        VideoFormat::Gif => vac_decompiler::frames::load_gif(path)?,
+    })
+}
+
+/// Run the decompiler on frames already in memory.
+///
+/// This is the codec-free path: rendering a `.vac` straight to frames and
+/// feeding them back through here isolates the decompiler's own error
+/// from GIF palette quantisation and H.264 lossiness.
+pub fn decompile_frames(
+    frames: Vec<VideoFrame>,
+    opts: &DecompileOptions,
+) -> Result<Document> {
+    Ok(vac_decompiler::decompile_frames(frames, opts)?)
+}
+
+/// Reinterpret rendered frames as decoder frames. Both sides are
+/// non-premultiplied RGBA8, so this only attaches timing.
+///
+/// Timing uses **rational stamping**, matching the renderer exactly:
+/// `vac_compiler` places frame `i` at `t = i * 1000 / fps` with integer
+/// division, giving 0, 33, 66, **100**, 133 … for 30 fps. A flat
+/// `delay = 1000/fps = 33` would look equivalent and is not: it drifts
+/// 0.33 ms per frame, reaching 29 ms — a whole frame — by the end of a
+/// 3 s clip, so the recovered duration comes back 2970 ms instead of
+/// 3000 ms and the re-render emits 89 frames where the source had 90.
+/// The harness would then be measuring a defect it introduced itself.
+pub fn rendered_to_video_frames(frames: &[RenderedFrame], fps: u32) -> Vec<VideoFrame> {
+    let fps = fps.max(1) as u64;
+    let stamp = |i: u64| (i * 1000) / fps;
+    frames
+        .iter()
+        .enumerate()
+        .map(|(i, f)| VideoFrame {
+            width: f.width,
+            height: f.height,
+            pixels: f.rgba.clone(),
+            delay_ms: (stamp(i as u64 + 1) - stamp(i as u64)) as u32,
+        })
+        .collect()
+}
+
+/// Measure how much of `original` survived into `doc`.
+///
+/// Renders `doc`, aligns it onto the source timeline, and scores each
+/// source frame against the reconstruction that should be showing at
+/// that instant. The ink mask is measured against the **source** frame's
+/// background: judging the reconstruction on its own estimated
+/// background would be circular precisely when background estimation is
+/// the thing under suspicion.
+pub fn measure(original: &[VideoFrame], doc: &Document) -> Result<Fidelity> {
+    measure_with(original, doc, &CompareOptions::default())
+}
+
+/// [`measure`] with explicit [`CompareOptions`].
+pub fn measure_with(
+    original: &[VideoFrame],
+    doc: &Document,
+    opts: &CompareOptions,
+) -> Result<Fidelity> {
+    let rendered = render(doc)?;
+    let delays: Vec<u32> = original.iter().map(|f| f.delay_ms).collect();
+    let times = vac_metrics::timeline_from_delays(&delays);
+    let idx = vac_metrics::align(&times, rendered.len(), doc.canvas.fps);
+
+    let src: Vec<vac_metrics::FrameRef> = original
+        .iter()
+        .map(|f| vac_metrics::FrameRef::new(f.width, f.height, &f.pixels))
+        .collect();
+    let recon: Vec<vac_metrics::FrameRef> = idx
+        .iter()
+        .map(|&i| {
+            let r = &rendered[i];
+            vac_metrics::FrameRef::new(r.width, r.height, &r.rgba)
+        })
+        .collect();
+    // The ink reference is measured from the source frames themselves,
+    // by `vac-metrics`, and deliberately *not* by calling the
+    // decompiler's own `estimate_background`. If the metric shared the
+    // pipeline's background rule, tuning that rule would silently move
+    // every committed baseline and "the decompiler improved" would be
+    // indistinguishable from "the ruler moved".
+    let bg = vac_metrics::modal_background(&src);
+    let backgrounds: Vec<Rgb> = vec![bg; src.len()];
+
+    Ok(vac_metrics::compare(&src, &recon, &backgrounds, opts)?)
+}
+
+/// Rate *and* distortion for one clip — everything `vac verify` reports.
+#[derive(Debug, Clone)]
+pub struct Verification {
+    pub fidelity: Fidelity,
+    pub document: Document,
+    /// Frames decoded from the source.
+    pub source_frames: usize,
+    /// Size of the emitted `.vac` source, in bytes. The "rate" axis.
+    pub vac_bytes: usize,
+    pub shapes: usize,
+    pub animate_blocks: usize,
+    pub keyframes: usize,
+}
+
+/// Decompile a video, re-render the result, and score it against the
+/// source. The full round trip, measured.
+pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verification> {
+    let frames = load_video_frames(path)?;
+    let source_frames = frames.len();
+    let doc = decompile_frames(frames.clone(), opts)?;
+    let fidelity = measure(&frames, &doc)?;
+    Ok(summarise(doc, fidelity, source_frames))
+}
+
+fn summarise(doc: Document, fidelity: Fidelity, source_frames: usize) -> Verification {
+    let text = vac_format::write(&doc);
+    let mut shapes = 0usize;
+    let mut animate_blocks = 0usize;
+    let mut keyframes = 0usize;
+    for scene in &doc.scenes {
+        for st in &scene.statements {
+            match st {
+                Statement::Let { .. } => shapes += 1,
+                Statement::Animate(a) => {
+                    animate_blocks += 1;
+                    keyframes += a.keyframes.len();
+                }
+                Statement::Assign { .. } => {}
+            }
+        }
+    }
+    Verification {
+        fidelity,
+        document: doc,
+        source_frames,
+        vac_bytes: text.len(),
+        shapes,
+        animate_blocks,
+        keyframes,
     }
 }

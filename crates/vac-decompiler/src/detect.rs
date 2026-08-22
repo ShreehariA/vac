@@ -125,7 +125,9 @@ pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
 /// corner pixel is opaque, the canvas has no measurable background
 /// colour at all — fall back to white, the colour viewers composite
 /// transparent GIFs onto.
-pub(crate) fn estimate_background(f: &VideoFrame) -> Color {
+/// Public since v0.9: the fidelity metric needs the *source* frame's
+/// background as the reference its ink mask is measured against.
+pub fn estimate_background(f: &VideoFrame) -> Color {
     let w = f.width as i32;
     let h = f.height as i32;
     let block = 5i32;

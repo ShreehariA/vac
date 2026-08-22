@@ -378,13 +378,80 @@ mod tests {
                 (50.0 + 40.0 * t.cos(), 50.0 + 40.0 * t.sin())
             })
             .collect();
-        let segs = fit_open(&pts, 0.5);
+        let tolerance = 0.5;
+        let segs = fit_open(&pts, tolerance);
 
-        // Re-evaluate each segment at u=0.5 and verify it lies within
-        // 1px of *some* sample point (sanity: not a wild divergence).
-        let _ = segs; // smoke test — full deviation is verified by the algorithm.
-        for &p in &pts {
-            let _ = dist(p, p);
+        // Flatten the fitted curve densely, then check that every input
+        // sample lies close to *some* point on it. Anything less than
+        // this does not test the fit at all.
+        //
+        // Before v0.9 this test's body was `let _ = segs;` followed by
+        // `dist(p, p)`, which is identically zero — it could never fail.
+        // It was the only assertion-free test in the workspace.
+        let mut curve: Vec<(f32, f32)> = vec![pts[0]];
+        let mut cursor = pts[0];
+        for seg in &segs {
+            match seg {
+                PathSeg::MoveTo(p) => {
+                    cursor = (p.x, p.y);
+                    curve.push(cursor);
+                }
+                PathSeg::LineTo(p) => {
+                    let end = (p.x, p.y);
+                    for i in 1..=32 {
+                        let u = i as f32 / 32.0;
+                        curve.push((
+                            cursor.0 + (end.0 - cursor.0) * u,
+                            cursor.1 + (end.1 - cursor.1) * u,
+                        ));
+                    }
+                    cursor = end;
+                }
+                PathSeg::CurveTo { c1, c2, p } => {
+                    let (a, b, c, d) = (cursor, (c1.x, c1.y), (c2.x, c2.y), (p.x, p.y));
+                    for i in 1..=32 {
+                        let u = i as f32 / 32.0;
+                        let v = 1.0 - u;
+                        let x = v * v * v * a.0
+                            + 3.0 * v * v * u * b.0
+                            + 3.0 * v * u * u * c.0
+                            + u * u * u * d.0;
+                        let y = v * v * v * a.1
+                            + 3.0 * v * v * u * b.1
+                            + 3.0 * v * u * u * c.1
+                            + u * u * u * d.1;
+                        curve.push((x, y));
+                    }
+                    cursor = d;
+                }
+            }
         }
+
+        // Distance to the polyline's *segments*, not to its vertices.
+        // Measuring vertex-to-vertex instead reports roughly half the
+        // sampling step as error, which on a coarse flattening looks
+        // exactly like a fitter that misses its tolerance.
+        let point_to_segment = |p: (f32, f32), a: (f32, f32), b: (f32, f32)| -> f32 {
+            let (vx, vy) = (b.0 - a.0, b.1 - a.1);
+            let len_sq = vx * vx + vy * vy;
+            if len_sq <= f32::EPSILON {
+                return dist(p, a);
+            }
+            let t = (((p.0 - a.0) * vx + (p.1 - a.1) * vy) / len_sq).clamp(0.0, 1.0);
+            dist(p, (a.0 + vx * t, a.1 + vy * t))
+        };
+
+        let mut worst = 0.0f32;
+        for &p in &pts {
+            let nearest = curve
+                .windows(2)
+                .map(|w| point_to_segment(p, w[0], w[1]))
+                .fold(f32::INFINITY, f32::min);
+            worst = worst.max(nearest);
+        }
+        assert!(
+            worst <= tolerance,
+            "fitted curve strays {worst:.3}px from the samples (tolerance {tolerance})"
+        );
     }
 }

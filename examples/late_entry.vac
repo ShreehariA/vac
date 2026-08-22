@@ -1,0 +1,36 @@
+// Frontier fixture (v0.9): an object that is not on screen at t=0.
+//
+// The card sits fully off-canvas to the left for the first second, then
+// slides in and parks. Every other fixture in this directory has all of
+// its objects visible from frame 0, which is why this case has never
+// been exercised.
+//
+// The decompiler normalises each track's keyframe times to the track's
+// *first sighting* (`t_norm = t - first_t` in `track.rs`) and the
+// emitted `animate` block carries no start offset, so a track that
+// begins at 1000 ms emits its first keyframe at 0 ms — and on re-render
+// the card is already on screen when the source is still empty.
+//
+// This is invisible to a shape-count or keyframe-count assertion: the
+// recovered AST looks entirely reasonable. Only pixel comparison sees it.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a1a2e
+
+  let card = rect(-200, 130, 180, 60)
+  card.fill = #ff5050
+  card.stroke = none
+
+  animate card {
+    0ms    -> position(-200, 130)
+    1000ms -> position(-200, 130)
+    2s     -> position(150, 130)
+    3s     -> position(150, 130)
+    easing: linear
+  }
+}

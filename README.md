@@ -1094,3 +1094,197 @@ every before/after table in this README depends on it.
 - **Scene cuts.** A single median plate assumes one continuous shot.
 - **Per-keyframe outline morphing** for shapes that deform as they
   move — the outline is traced once, at a representative frame.
+
+---
+
+## v0.9 — Closing the loop: reconstruction becomes measurable
+
+`RESEARCH.md` states VAC's claim in four words: **Deterministic ·
+Measurable · Editable · Human-Readable**. Eight versions in, three of
+those were true.
+
+Nothing in this repository had ever compared reconstructed pixels
+against original pixels. Zero occurrences of PSNR, SSIM, MAE, RMSE or
+any per-pixel diff, in Rust, shell or Python. The only "compare"
+operation in the project was an ffmpeg `hstack` producing a side-by-side
+PNG, followed literally by `# 6. Open the .png pairs in your image
+viewer of choice.`
+
+Every measured claim in the eight sections above is a **proxy**: shape
+counts, animate-block counts, keyframe counts, `.vac` byte size. Those
+describe how *small* the output is. None of them describes how *right*
+it is, and a proxy can improve while the picture gets worse.
+
+v0.9 adds the missing axis.
+
+```
+vac verify clip.gif          # decompile → re-render → score against the source
+vac verify clip.gif --json   # machine-readable, feeds the baseline
+vac verify clip.gif --ab     # the v0.8 static-layer switch, finally measured
+```
+
+### What is measured
+
+Three numbers, because one cannot express what goes wrong here.
+
+| Metric | Answers | Catches |
+|---|---|---|
+| **ink IoU** | Is the ink in the right place? | A pendulum reconstructing as three superimposed bodies |
+| **residual** | Are the colours right? (per-channel MSE; 100 ⇒ each R/G/B within ~10) | Colour bars reconstructing as a flat grey field |
+| **worst frame** | Did it collapse *anywhere*? | A tracking failure a mean would hide entirely |
+
+PSNR is reported alongside, derived from the same MSE for free, because
+it is the number everyone reads. It is not the gate: squared error
+concentrates at edges, so a recovery whose edges sit 1–2 px off scores
+worse than a blurry aligned one.
+
+The ink reference is a **modal colour measured by `vac-metrics` itself**,
+deliberately not `detect::estimate_background`. A metric that shared the
+pipeline's own background rule would silently rescale every baseline the
+moment that rule was tuned, and "the decompiler improved" would become
+indistinguishable from "the ruler moved."
+
+### The corpus, measured
+
+First real fidelity numbers in the project's history.
+
+| input | ink IoU | worst | residual | psnr dB | spurious ink | shapes |
+|---|---|---|---|---|---|---|
+| `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
+| `vac_control.mp4` | 0.9596 | 0.9449 | 9.1 | 38.54 | 2.9% | 3 |
+| `real_bouncing_ball.gif` | 0.8758 | 0.8736 | 413.8 | 21.96 | 13.0% | 3 |
+| `testsrc2.mp4` | 0.8398 | 0.8387 | **15127.9** | 6.33 | 19.1% | 76 |
+| `slide_in_card.mp4` | 0.8182 | **0.0000** | 157.4 | 26.16 | 14.2% | 2 |
+| `mandelbrot.mp4` | 0.7162 | 0.6362 | 4644.6 | 11.46 | 27.3% | 46 |
+| `real_newtons_cradle.gif` | 0.5996 | 0.5948 | 732.4 | 19.48 | 57.0% | 186 |
+| `real_loader.gif` | 0.5012 | 0.4766 | 258.9 | 24.00 | 76.2% | 16 |
+| `real_pendulum.gif` | 0.1579 | 0.1006 | 2122.7 | 14.86 | **230.1%** | 111 |
+| `real_double_pendulum.gif` | 0.0706 | 0.0386 | 8425.9 | 8.87 | **616.6%** | 92 |
+
+The top two rows are VAC's own output and ffmpeg `drawbox` rectangles —
+flat-shaded content of exactly the kind the detector was built for. The
+spread between those and the bottom of the table is the honest statement
+of where VAC stands.
+
+### Correcting the record
+
+**v0.8's headline win was a compression win, not a fidelity win.** It
+recorded the double pendulum improving 45 → 19 animate blocks, 1159 →
+186 keyframes, 54 KB → 25 KB. All of that is true and none of it was
+wrong. Measured on the other axis, the same clip reconstructs at an ink
+IoU of **0.0706**, painting **6.2× more ink than the source contained**.
+Both facts were always true; only one of them was measurable.
+
+The same applies, more mildly, to the Newton's cradle row (v0.8: "+48
+shapes, the PRINCIPIA MATHEMATICA text now legible"). The text is
+partially legible. The swinging balls — the subject — are gone. IoU
+0.5996, 57% spurious ink.
+
+None of this means v0.8 was a mistake. It means v0.8 could not tell.
+
+### What the first run found
+
+Three defects that eight versions of count-based testing walked past.
+Full detail with fixtures and mechanisms in [`docs/frontier.md`](docs/frontier.md).
+
+**1. Objects that appear after t=0 are time-shifted.** `emit_shape`
+normalises keyframe times to the track's first sighting and the emitted
+`animate` block carries no start offset, so a track beginning at 1200 ms
+emits its first keyframe at 0 ms. On `examples/late_entry.vac` — a card
+that holds off-canvas until 1000 ms and parks at 2000 ms — the recovered
+source parks it at **840 ms**.
+
+The recovered AST looks perfect: two shapes, one animate block, four
+keyframes, correct geometry, correct colour. **Every structural count
+matches.** No count-based assertion can see this defect. Only pixel
+comparison can. That single fixture is the argument for this whole
+version.
+
+**2. Repeated round-trips inflate shapes without converging.** Feeding
+the pipeline its own output, ink IoU falls 0.9523 → 0.9149 → 0.8788 →
+0.8459 over four generations, because each recovered ellipse comes back
+one pixel wider than the one that drew it (22 → 23 → 24 → 25 → 26 → 27),
+forever. `sliding_rect` gains 2 px of width per generation. Anyone using
+VAC iteratively watches their shapes swell.
+
+The *trigger* is not yet established — a static shape never drifts, but
+neither does the moving ellipse in `static_and_moving.vac`, which
+travels horizontally exactly like the two that do. It is recorded
+undiagnosed rather than explained away. v0.7 shipped a confident
+diagnosis that v0.8 disproved; once was enough.
+
+**3. A test that could never fail.** `fitted_curve_stays_within_tolerance`
+in `pac-decompiler` discarded its fitted curve and asserted
+`dist(p, p) == 0`. It was the only assertion-free test in the workspace,
+and it is now repaired to measure real point-to-segment deviation. (My
+first repair reported the fitter missing its tolerance by 3.5×; that was
+my flattening being too coarse, not a fitter bug. The fitter is fine.)
+
+### Testing, rebuilt
+
+71 tests → **118**. Five tiers, and the two new ones cover complementary
+ground — verified by deliberately breaking the pipeline and seeing which
+tier notices:
+
+| Perturbation | Hermetic tier | Corpus tier |
+|---|---|---|
+| `FG_THRESHOLD_SQ` 24² → 60² | **caught** (IoU 0.9997 → 0.9839) | caught |
+| `RDP_TOLERANCE_PX` 2.0 → 20.0 | missed | **caught** (IoU 0.5012 → 0.2258) |
+
+The **hermetic tier** runs `.vac → render → decompile → render → compare`
+with no codec, no ffmpeg, no network and no temp files, so it isolates
+the decompiler's own error. It is a sensitive regression detector and
+*not* evidence about real video — it feeds the detector exactly the
+flat-shaded content its thresholds were tuned on. The **corpus tier** is
+the one that measures progress.
+
+That distinction has teeth. An earlier draft of the hermetic tier used a
+single global IoU floor of 0.80 against measured values of 0.91–0.9997,
+and under it the `FG_THRESHOLD_SQ` break passed all twelve tests. Floors
+are now per-fixture.
+
+Corpus baselines live in `benches/corpus-baseline.tsv` — the repo's first
+machine-readable measurement record. Inputs are gitignored and
+externally fetched, so each row carries an FNV-1a hash of its input: a
+changed file is reported as *changed*, loudly skipped, never as a
+fidelity regression. Recording is separate from gating; a baseline that
+silently self-updates measures nothing.
+
+```
+cargo test --release -p vac --test corpus -- --nocapture
+VAC_UPDATE_BASELINES=1 cargo test --release -p vac --test corpus
+```
+
+### A bug found in the measuring apparatus itself
+
+Worth recording because it nearly poisoned everything above. The first
+version of the frame bridge attached a flat `delay_ms = 1000/fps = 33`,
+which looks equivalent to what the renderer does and is not: the
+renderer stamps frame *i* at `i*1000/fps` with integer division, giving
+0, 33, 66, **100**, 133. Flat delays drift 0.33 ms per frame, reaching a
+full frame by the end of a 3 s clip.
+
+Under that bug `ball.vac` scored 35.7 dB and IoU 0.893. With rational
+stamping it scores **61.6 dB and 0.9986** — the harness had been
+measuring a defect it introduced itself. Validating the metric against
+known-answer cases *before* measuring anything with it is not ceremony.
+
+### Still open after v0.9
+
+Ranked by measured fidelity cost, which inverts the previous ranking —
+the v0.8 list put fragment grouping first, chosen by proxy counts.
+
+- **Colour: the single-flat-background model.** The whole background
+  model is four 5×5 corner blocks reduced to a *per-channel* median, so
+  it can name a colour appearing nowhere in the frame. `testsrc2`
+  residual 15127.9. PAC — already a dependency — has
+  `kmeans::quantize_auto` and `regions::label_regions_per_cluster`. v0.6
+  took PAC's pen and left its eyes behind.
+- **Dotted strokes fragment.** Now quantified: 230% and 617% spurious
+  ink on the two pendulums.
+- **Late-entry time shift**, **generational inflation**, **`scale()` /
+  `opacity()` never recovered**, **strokes never recovered** — see
+  `docs/frontier.md`.
+- **`apply_animation` drops held transforms.** Latent only because a
+  single transform kind is ever emitted; it becomes live the moment
+  scale or opacity recovery lands, so it must be fixed first.

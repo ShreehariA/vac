@@ -9,4 +9,8 @@ description = "VAC — top-level facade. Pandas-style API for reading, writing, 
 vac-format.workspace = true
 vac-compiler.workspace = true
 vac-decompiler.workspace = true
+vac-metrics.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+vac-format.workspace = true

@@ -51,6 +51,23 @@ jobs:
           shapes=$(grep -c '^  let shape_' target/ci/two_balls.gif.vac || true)
           test "$shapes" = "2"
 
+      # v0.9: a shape count says how *small* the output is, not how
+      # *right* it is. `vac verify` decompiles, re-renders, and compares
+      # the pixels against the source. The gate is ink IoU, which is what
+      # catches a reconstruction that emits exactly the expected number
+      # of shapes and puts them in the wrong place.
+      - name: Measure round-trip fidelity (v0.9)
+        run: |
+          cargo run --release -q -p vac-cli -- verify target/ci/ball.gif
+          cargo run --release -q -p vac-cli -- verify target/ci/two_balls.gif --json \
+            > target/ci/two_balls.fidelity.json
+          cat target/ci/two_balls.fidelity.json
+          # Measured 2026-08-22: two_balls scores 0.9523 through the
+          # hermetic loop and 0.8399 through GIF. That 0.112 gap is the
+          # codec penalty — GIF palette quantisation, not the decompiler.
+          # The floor is set below the GIF number, not the hermetic one.
+          python3 -c 'import json,sys; d=json.load(open("target/ci/two_balls.fidelity.json"))["result"]; iou=d["ink_iou"]; print("two_balls.gif ink IoU = %.4f" % iou); sys.exit("ink IoU %.4f below floor 0.80" % iou) if iou < 0.80 else None'
+
       - name: Smoke-test the MP4 path (v0.4)
         run: |
           cargo run --release -p vac-cli -- compile   examples/ball.vac      target/ci/ball.mp4

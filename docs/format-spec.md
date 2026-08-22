@@ -1,5 +1,15 @@
 # `.vac` Format Specification — v0.1 (Moving Ball Subset)
 
+> **Stale as of v0.9.** This document still describes only the v0.1
+> subset and does not cover `path(...)`, shipped in v0.6 and now the most
+> common primitive in emitted output (137 `path(` declarations across the
+> corpus). The grammar as actually parsed is in
+> `crates/vac-format/src/parser.rs`, whose header doc-comment carries an
+> accurate EBNF. Two facts worth knowing that contradict the text below:
+> `duration` is documented as required but the parser defaults it to 0,
+> and `scale()` / `opacity()` are fully implemented in parser, writer and
+> renderer yet are emitted by nothing — see `docs/frontier.md`.
+
 This is the **v0.1 subset** of the VAC source format — deliberately tiny, scoped to what a single moving ball needs. Every later version of this spec is a strict superset.
 
 > **Round-trip invariant**: for any `.vac` document `D` that uses only v0.1 features, `parse(write(D)) == D`. The `vac-format` crate has tests asserting this.

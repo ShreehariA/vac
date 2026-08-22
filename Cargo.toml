@@ -5,6 +5,7 @@ members = [
     "crates/vac-format",
     "crates/vac-compiler",
     "crates/vac-decompiler",
+    "crates/vac-metrics",
     "crates/vac-cli",
     "crates/pac-format",
     "crates/pac-decompiler",
@@ -13,23 +14,24 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourname/vac"
-description = "VAC — Video As Code. A purely algorithmic compiler/decompiler between video and structured source code. v0.8 measures the scene before it tracks anything: a temporal-median plate plus per-pixel agreement separate persistent scenery from moving content, occluders keep their silhouettes, and the decompiler is now reproducible run to run."
+description = "VAC — Video As Code. A purely algorithmic compiler/decompiler between video and structured source code. v0.9 closes the loop: reconstruction quality is now measured in pixels, not proxied by shape counts. `vac verify` decompiles, re-renders, and scores the result against the source; the corpus is baselined and regression-gated; and the first run found defects eight versions of count-based testing had missed."
 
 [workspace.dependencies]
 # Internal crates — VAC
-vac = { path = "crates/vac", version = "0.8.0" }
-vac-format = { path = "crates/vac-format", version = "0.8.0" }
-vac-compiler = { path = "crates/vac-compiler", version = "0.8.0" }
-vac-decompiler = { path = "crates/vac-decompiler", version = "0.8.0" }
+vac = { path = "crates/vac", version = "0.9.0" }
+vac-format = { path = "crates/vac-format", version = "0.9.0" }
+vac-compiler = { path = "crates/vac-compiler", version = "0.9.0" }
+vac-decompiler = { path = "crates/vac-decompiler", version = "0.9.0" }
+vac-metrics = { path = "crates/vac-metrics", version = "0.9.0" }
 
 # Internal crates — PAC (Picture As Code, still-image sibling of VAC)
-pac-format = { path = "crates/pac-format", version = "0.8.0" }
-pac-decompiler = { path = "crates/pac-decompiler", version = "0.8.0" }
-pac-compiler = { path = "crates/pac-compiler", version = "0.8.0" }
+pac-format = { path = "crates/pac-format", version = "0.9.0" }
+pac-decompiler = { path = "crates/pac-decompiler", version = "0.9.0" }
+pac-compiler = { path = "crates/pac-compiler", version = "0.9.0" }
 
 # External crates (wide version reqs so cargo picks the latest compatible)
 anyhow = "1"

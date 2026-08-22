@@ -95,10 +95,17 @@ pub fn decompile_mp4_with(input: &Path, opts: &Options) -> Result<Document, Deco
     decompile_frames(frames_mp4::load_mp4(input)?, opts)
 }
 
+/// Run the pipeline on frames already in memory.
+///
 /// Frames are taken by value because the static-scene pass edits them:
 /// stripping the persistent scene in place is what keeps peak memory at
 /// one copy of the clip rather than two.
-fn decompile_frames(
+///
+/// Public since v0.9 so the pipeline can be measured without a codec in
+/// the loop — rendering a `.vac` straight to frames and feeding them back
+/// here isolates *the decompiler's own error* from GIF palette
+/// quantisation and H.264 lossiness.  See `vac::measure`.
+pub fn decompile_frames(
     mut frames: Vec<frames::VideoFrame>,
     opts: &Options,
 ) -> Result<Document, DecompileError> {

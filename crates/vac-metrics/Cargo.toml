@@ -1,0 +1,9 @@
+[package]
+name = "vac-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "VAC — reconstruction-fidelity measurement. Compares decoded source frames against re-rendered frames."
+
+[dependencies]
