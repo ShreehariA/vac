@@ -1359,3 +1359,24 @@ so this is a hermetic win, not evidence about real footage. The new tests
 check recovered values against the source curve (radius within 3 px, opacity
 within 0.05), and the pre-v0.11 fixtures must stay position-only. Each of the
 three mechanisms was deliberately disabled and a test failed every time.
+
+## v0.12 — Only drawn while alive
+
+With `opacity()` available, a track that first appears or last appears
+mid-canvas is hidden outside its lifetime. v0.10's edge rule still handles
+objects that enter or leave through the canvas border.
+
+| | ink IoU | spurious ink | residual |
+|---|---|---|---|
+| `pop_in.vac` (hermetic) | 0.662 → **0.988** | 50.5% → 0.5% | 323.9 → 2.4 |
+| `real_pendulum.gif` | 0.191 → **0.376** | 228% → **45%** | 2059 → 872 |
+| `real_double_pendulum.gif` | 0.079 → **0.174** | 559% → **136%** | 7627 → 2456 |
+| `real_newtons_cradle.gif` | 0.600 → 0.605 | 57.0% → 57.1% | 728 → 706 |
+
+The fixture was written for a small case, and the corpus gain was not
+predicted. The pendulums' dotted strokes break into many short tracks. Each
+one used to stay on screen for the whole clip at its first or last position,
+and that was most of their 6× ink overclaim. The fragmentation itself is still
+open (`docs/frontier.md`). v0.12 stopped the fragments from outliving
+themselves, not from existing. `mandelbrot.mp4` moved 0.7235 → 0.7227, inside
+tolerance.

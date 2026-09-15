@@ -190,6 +190,28 @@ fn shapes_of(doc: &Document) -> usize {
         .count()
 }
 
+/// **FIXED in v0.12 — objects that pop in or out mid-canvas.**
+///
+/// A track first seen late, or last seen early, without touching the
+/// canvas edge was drawn for the whole clip. `pop_in.vac` scored ink IoU
+/// 0.662 with 50.5% spurious ink. It is now hidden with `opacity(0)`
+/// outside its lifetime.
+///
+/// The same mechanism is what moved the wild corpus: short fragment
+/// tracks stopped persisting, and `real_pendulum.gif` went 0.19 → 0.38.
+#[test]
+fn objects_are_only_drawn_during_their_lifetime() {
+    let (_, recovered, fid) = hermetic("pop_in.vac");
+    println!("{}\n{fid}", vac::to_string(&recovered));
+    assert!(fid.ink_iou >= 0.97, "pop_in.vac ink IoU {:.4}", fid.ink_iou);
+    assert!(fid.spurious_ink <= 0.02, "pop_in.vac spurious {:.3}", fid.spurious_ink);
+    // Frame 0: the dot is not visible yet, the tag is.
+    // Frame 75 (2500 ms): the tag has gone.
+    for (i, f) in [(0usize, &fid.frames[0]), (75, &fid.frames[75])] {
+        assert!(f.ink_iou >= 0.9, "frame {i}: IoU {:.4}", f.ink_iou);
+    }
+}
+
 /// **DEFECT — strokes are never recovered.**
 ///
 /// `emit_shape` writes `stroke = none` unconditionally, and the renderer

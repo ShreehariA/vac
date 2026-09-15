@@ -1,0 +1,35 @@
+// Fixture (v0.12): objects that appear and disappear mid-canvas, not
+// through an edge.  Before v0.12 a late track that did not touch the
+// canvas edge was drawn from t=0, and one that vanished early was held
+// on screen to the end.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #10141f
+
+  let dot = ellipse(120, 160, 30, 30)
+  dot.fill = #ff6080
+  dot.stroke = none
+
+  animate dot {
+    0ms    -> position(120, 160), opacity(0)
+    990ms  -> position(120, 160), opacity(0)
+    1000ms -> position(120, 160), opacity(1)
+    3s     -> position(360, 160), opacity(1)
+    easing: linear
+  }
+
+  let tag = rect(300, 60, 100, 40)
+  tag.fill = #40e0a0
+  tag.stroke = none
+
+  animate tag {
+    0ms    -> opacity(1)
+    1990ms -> opacity(1)
+    2000ms -> opacity(0)
+  }
+}

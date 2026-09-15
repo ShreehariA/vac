@@ -539,15 +539,74 @@ fn emit_shape(
     // scales about its top-left anchor, so a scaling rect needs position
     // keyframes to stay centred.
     let emit_pos = !stationary || (scales.is_some() && kind == ShapeKind::Rect);
-    if keep.len() >= 2 && (emit_pos || scales.is_some() || opacity.is_some()) {
-        let easing = classify_easing(blobs, &keep);
+    let has_channels = keep.len() >= 2 && (emit_pos || scales.is_some() || opacity.is_some());
 
-        // v0.10: keyframe times are *absolute* clip time.  Through v0.9
-        // they were re-based to the track's first sighting, so an object
-        // entering at 1000 ms replayed its whole trajectory a second
-        // early (docs/frontier.md, row 1).
-        let mut keyframes: Vec<Keyframe> = keep
-            .iter()
+    // Lifetime.  A track first seen after the clip starts, or last seen
+    // before it ends, was not on screen the whole time.
+    let timeline: Vec<u32> = frames
+        .iter()
+        .scan(0u32, |acc, f| {
+            let t = *acc;
+            *acc += f.delay_ms;
+            Some(t)
+        })
+        .collect();
+    let clip_end = frames.iter().map(|f| f.delay_ms).sum::<u32>();
+    let (last_t, last_b) = blobs[last_idx];
+    let prev_frame = timeline.iter().copied().take_while(|&t| t < first_t).last();
+    let next_frame = timeline
+        .iter()
+        .copied()
+        .find(|&t| t > last_t)
+        .filter(|&t| t < clip_end);
+
+    // v0.10: if it was clipped by the canvas edge at that moment it came
+    // or went *through* the edge, and is held just off-canvas.
+    let off = |b: &Blob| -> Option<(f32, f32)> {
+        let (w, h) = canvas?;
+        let (mut cx, mut cy) = (b.cx, b.cy);
+        if b.cx - b.rx <= CLIP_EDGE_PX {
+            cx = -rx;
+        } else if b.cx + b.rx >= w - CLIP_EDGE_PX {
+            cx = w + rx;
+        } else if b.cy - b.ry <= CLIP_EDGE_PX {
+            cy = -ry;
+        } else if b.cy + b.ry >= h - CLIP_EDGE_PX {
+            cy = h + ry;
+        } else {
+            return None;
+        }
+        let (ax, ay) = anchor_xy(&Blob {
+            cx,
+            cy,
+            rx,
+            ry,
+            ..*b
+        });
+        Some((round_to_int(ax), round_to_int(ay)))
+    };
+    let enter_via_edge = prev_frame.and(if emit_pos { off(&first_b) } else { None });
+    let exit_via_edge = next_frame.and(if emit_pos { off(&last_b) } else { None });
+    // v0.12: otherwise it popped in or out mid-canvas, and is hidden with
+    // `opacity(0)` outside its lifetime.  Before v0.12 it was drawn from
+    // t=0 and held on screen to the end (`examples/pop_in.vac`).
+    let pop_in = prev_frame.is_some() && enter_via_edge.is_none();
+    let pop_out = next_frame.is_some() && exit_via_edge.is_none();
+
+    if !(has_channels || pop_in || pop_out) {
+        return;
+    }
+    let easing = if has_channels {
+        classify_easing(blobs, &keep)
+    } else {
+        Easing::Linear
+    };
+
+    // v0.10: keyframe times are *absolute* clip time.  Through v0.9 they
+    // were re-based to the track's first sighting, so an object entering
+    // at 1000 ms replayed its whole trajectory a second early.
+    let mut keyframes: Vec<Keyframe> = if has_channels {
+        keep.iter()
             .map(|&i| {
                 let (t, b) = blobs[i];
                 let s = scales.as_ref().map(|sc| sc[i]);
@@ -571,86 +630,70 @@ fn emit_shape(
                     transforms,
                 }
             })
-            .collect();
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-        // A track that first appears late while clipped by the canvas
-        // edge entered *through* that edge: hold it just off-canvas
-        // until the frame it was first seen, instead of letting the
-        // renderer hold its first on-canvas position from t=0.  The
-        // same reasoning, mirrored, applies to a track that leaves
-        // through an edge before the clip ends.
-        if let (true, Some(f0)) = (emit_pos, frames.first()) {
-            let (w, h) = (f0.width as f32, f0.height as f32);
-            let clip_end = frames.iter().map(|f| f.delay_ms).sum::<u32>();
-            let off = |b: &Blob| -> Option<(f32, f32)> {
-                let (mut cx, mut cy) = (b.cx, b.cy);
-                if b.cx - b.rx <= CLIP_EDGE_PX {
-                    cx = -rx;
-                } else if b.cx + b.rx >= w - CLIP_EDGE_PX {
-                    cx = w + rx;
-                } else if b.cy - b.ry <= CLIP_EDGE_PX {
-                    cy = -ry;
-                } else if b.cy + b.ry >= h - CLIP_EDGE_PX {
-                    cy = h + ry;
-                } else {
-                    return None;
-                }
-                let (ax, ay) = anchor_xy(&Blob {
-                    cx,
-                    cy,
-                    rx,
-                    ry,
-                    ..*b
-                });
-                Some((round_to_int(ax), round_to_int(ay)))
-            };
-            let kf = |t: u32, (x, y): (f32, f32)| Keyframe {
-                time_ms: t,
-                transforms: vec![Transform::Position(x, y)],
-            };
-            let prev_frame = frames
-                .iter()
-                .scan(0u32, |acc, f| {
-                    let t = *acc;
-                    *acc += f.delay_ms;
-                    Some(t)
-                })
-                .take_while(|&t| t < first_t)
-                .last();
-            if let Some(pt) = prev_frame {
-                if let Some(p) = off(&first_b) {
-                    // Off-canvas on the last frame it was unseen, so the
-                    // entry interpolates across one real frame gap.
-                    keyframes.insert(0, kf(pt, p));
-                    if pt > 0 {
-                        keyframes.insert(0, kf(0, p));
-                    }
+    let at_pos = |t: u32, (x, y): (f32, f32)| Keyframe {
+        time_ms: t,
+        transforms: vec![Transform::Position(x, y)],
+    };
+    let at_opacity = |t: u32, o: f32| Keyframe {
+        time_ms: t,
+        transforms: vec![Transform::Opacity(o)],
+    };
+    // The opacity the shape has while visible at sample `i`: the
+    // channel value if one was measured, else fully opaque.
+    let visible_opacity = |i: usize| {
+        opacity
+            .as_ref()
+            .map_or(1.0, |(al, _)| (al[i] * 100.0).round() / 100.0)
+    };
+    // Make sure the keyframe at time `t` carries an opacity, so the
+    // per-channel renderer does not hold the hidden value past it.
+    let ensure_opacity = |kfs: &mut Vec<Keyframe>, t: u32, o: f32| {
+        match kfs.iter_mut().find(|k| k.time_ms == t) {
+            Some(k) => {
+                if !k.transforms.iter().any(|x| matches!(x, Transform::Opacity(_))) {
+                    k.transforms.push(Transform::Opacity(o));
                 }
             }
-            let (last_t, last_b) = blobs[last_idx];
-            let next_frame = frames
-                .iter()
-                .scan(0u32, |acc, f| {
-                    let t = *acc;
-                    *acc += f.delay_ms;
-                    Some(t)
-                })
-                .find(|&t| t > last_t);
-            if let Some(nt) = next_frame {
-                if nt < clip_end {
-                    if let Some(p) = off(&last_b) {
-                        keyframes.push(kf(nt, p));
-                    }
-                }
+            None => {
+                kfs.push(at_opacity(t, o));
+                kfs.sort_by_key(|k| k.time_ms);
             }
         }
+    };
 
-        statements.push(Statement::Animate(Animation {
-            target: name,
-            keyframes,
-            easing,
-        }));
+    if let (Some(pt), Some(p)) = (prev_frame, enter_via_edge) {
+        // Off-canvas on the last frame it was unseen, so the entry
+        // interpolates across one real frame gap.
+        keyframes.insert(0, at_pos(pt, p));
+        if pt > 0 {
+            keyframes.insert(0, at_pos(0, p));
+        }
     }
+    if let (Some(nt), Some(p)) = (next_frame, exit_via_edge) {
+        keyframes.push(at_pos(nt, p));
+    }
+    if let (true, Some(pt)) = (pop_in, prev_frame) {
+        ensure_opacity(&mut keyframes, first_t, visible_opacity(0));
+        keyframes.insert(0, at_opacity(pt, 0.0));
+        if pt > 0 {
+            keyframes.insert(0, at_opacity(0, 0.0));
+        }
+    }
+    if let (true, Some(nt)) = (pop_out, next_frame) {
+        ensure_opacity(&mut keyframes, last_t, visible_opacity(last_idx));
+        keyframes.push(at_opacity(nt, 0.0));
+    }
+
+    statements.push(Statement::Animate(Animation {
+        target: name,
+        keyframes,
+        easing,
+    }));
 }
 
 fn majority_kind(samples: &[(u32, Blob)]) -> ShapeKind {

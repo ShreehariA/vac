@@ -144,6 +144,15 @@ always true; only one of them was measurable.
   row moved: nothing in the corpus scales or fades cleanly, so this is a
   hermetic win only, stated as such.
 
+- **v0.12 — objects are only drawn during their lifetime.** A track seen late
+  or lost early without touching the edge is hidden with `opacity(0)` outside
+  its lifetime. `pop_in.vac` 0.662 → **0.988**. In the corpus this cut the
+  pendulums' spurious ink by stopping short fragment tracks from persisting
+  all clip: `real_pendulum.gif` 0.191 → **0.376** (spurious 228% → 45%),
+  `real_double_pendulum.gif` 0.079 → **0.174** (559% → 136%). The dotted-stroke
+  fragmentation itself (row 4) is still open. This only stopped the fragments
+  from outliving themselves.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -155,12 +164,12 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9596 | 0.9449 | 9.1 | 38.54 | 2.9% | 3 |
 | `real_bouncing_ball.gif` | 0.8758 | 0.8736 | 413.8 | 21.96 | 13.0% | 3 |
-| `testsrc2.mp4` | 0.8398 | 0.8387 | 15004.6 | 6.37 | 19.1% | 76 |
-| `mandelbrot.mp4` | 0.7235 | 0.6469 | 4497.5 | 11.60 | 32.4% | 46 |
-| `real_newtons_cradle.gif` | 0.5996 | 0.5949 | 727.6 | 19.51 | 57.0% | 186 |
-| `real_loader.gif` | 0.5012 | 0.4766 | 258.9 | 24.00 | 76.2% | 16 |
-| `real_pendulum.gif` | 0.1906 | 0.1045 | 2059.5 | 14.99 | 228.3% | 111 |
-| `real_double_pendulum.gif` | 0.0792 | 0.0476 | 7627.0 | 9.31 | 559.1% | 92 |
+| `testsrc2.mp4` | 0.8398 | 0.8387 | 15063.1 | 6.35 | 19.1% | 76 |
+| `mandelbrot.mp4` | 0.7227 | 0.6513 | 4508.3 | 11.59 | 33.3% | 46 |
+| `real_newtons_cradle.gif` | 0.6049 | 0.5996 | 705.7 | 19.64 | 57.1% | 186 |
+| `real_loader.gif` | 0.5012 | 0.4766 | 258.7 | 24.00 | 76.2% | 16 |
+| `real_pendulum.gif` | 0.3760 | 0.2207 | 871.7 | 18.73 | 44.8% | 111 |
+| `real_double_pendulum.gif` | 0.1742 | 0.1011 | 2456.1 | 14.23 | 136.0% | 92 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread
