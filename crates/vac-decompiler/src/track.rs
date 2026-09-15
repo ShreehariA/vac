@@ -147,7 +147,10 @@ pub fn build_document(
 
     let total_ms = detections
         .last()
-        .map(|d| d.t_ms.saturating_add(frames.last().map(|f| f.delay_ms).unwrap_or(0)))
+        .map(|d| {
+            d.t_ms
+                .saturating_add(frames.last().map(|f| f.delay_ms).unwrap_or(0))
+        })
         .unwrap_or(0);
 
     let mut statements = Vec::new();
@@ -175,7 +178,11 @@ pub fn build_document(
     if let Some(l) = layer {
         let plate = l.plate();
         let mut blobs = crate::detect::detect_blobs(&plate, l.bg);
-        blobs.sort_by(|a, b| b.area.cmp(&a.area).then_with(|| crate::detect::cmp_position(a, b)));
+        blobs.sort_by(|a, b| {
+            b.area
+                .cmp(&a.area)
+                .then_with(|| crate::detect::cmp_position(a, b))
+        });
         let plate_dets = [Detection {
             frame_index: 0,
             t_ms: 0,
@@ -237,6 +244,10 @@ pub fn build_document(
 /// it actually moved — an `animate` block.  Used for both moving tracks
 /// and (v0.8) the static scene, whose shapes arrive as one-sample
 /// tracks measured on the median plate.
+/// How close a bbox edge must sit to the canvas border to count as
+/// clipped by it.
+const CLIP_EDGE_PX: f32 = 1.5;
+
 fn emit_shape(
     statements: &mut Vec<Statement>,
     name: &str,
@@ -303,7 +314,34 @@ fn emit_shape(
     //   Ellipse anchor = (cx, cy)
     //   Rect    anchor = top-left (x, y) = (cx - rx, cy - ry)
     //   Path    anchor = outline centroid = blob centroid (cx, cy)
+    // A blob clipped by the canvas edge has a bbox centre biased toward
+    // the canvas interior: a card 3 px on screen reads as centred 1.5 px
+    // in.  Recover the true centre from the *visible* opposite edge and
+    // the track's full measured extent.
+    let canvas = frames.first().map(|f| (f.width as f32, f.height as f32));
+    let unclip = |b: &Blob| -> Blob {
+        let Some((w, h)) = canvas else { return *b };
+        let mut u = *b;
+        if b.rx < rx {
+            if b.cx - b.rx <= CLIP_EDGE_PX {
+                u.cx = b.cx + b.rx - rx;
+            } else if b.cx + b.rx >= w - CLIP_EDGE_PX {
+                u.cx = b.cx - b.rx + rx;
+            }
+        }
+        if b.ry < ry {
+            if b.cy - b.ry <= CLIP_EDGE_PX {
+                u.cy = b.cy + b.ry - ry;
+            } else if b.cy + b.ry >= h - CLIP_EDGE_PX {
+                u.cy = b.cy - b.ry + ry;
+            }
+        }
+        u.rx = u.rx.max(rx);
+        u.ry = u.ry.max(ry);
+        u
+    };
     let anchor_xy = |b: &Blob| -> (f32, f32) {
+        let b = &unclip(b);
         match kind {
             ShapeKind::Ellipse | ShapeKind::Path => (b.cx, b.cy),
             ShapeKind::Rect => (b.cx - rx, b.cy - ry),
@@ -341,7 +379,10 @@ fn emit_shape(
         value: Value::None,
     });
 
-    let blobs = &track.samples;
+    // Simplify the *unclipped* trajectory, so an edge-clipped entry is
+    // not mistaken for a slow start.
+    let unclipped: Vec<(u32, Blob)> = track.samples.iter().map(|(t, b)| (*t, unclip(b))).collect();
+    let blobs = &unclipped;
 
     let mut keep = simplify_trajectory(blobs, RDP_TOLERANCE_PX);
     if !keep.contains(&0) {
@@ -357,18 +398,93 @@ fn emit_shape(
     if keep.len() >= 2 && !stationary {
         let easing = classify_easing(blobs, &keep);
 
-        let keyframes: Vec<Keyframe> = keep
+        // v0.10: keyframe times are *absolute* clip time.  Through v0.9
+        // they were re-based to the track's first sighting, so an object
+        // entering at 1000 ms replayed its whole trajectory a second
+        // early (docs/frontier.md, row 1).
+        let mut keyframes: Vec<Keyframe> = keep
             .iter()
             .map(|&i| {
                 let (t, b) = blobs[i];
-                let t_norm = if i == 0 { 0 } else { t.saturating_sub(first_t) };
                 let (ax, ay) = anchor_xy(&b);
                 Keyframe {
-                    time_ms: t_norm,
+                    time_ms: t,
                     transforms: vec![Transform::Position(round_to_int(ax), round_to_int(ay))],
                 }
             })
             .collect();
+
+        // A track that first appears late while clipped by the canvas
+        // edge entered *through* that edge: hold it just off-canvas
+        // until the frame it was first seen, instead of letting the
+        // renderer hold its first on-canvas position from t=0.  The
+        // same reasoning, mirrored, applies to a track that leaves
+        // through an edge before the clip ends.
+        if let Some(f0) = frames.first() {
+            let (w, h) = (f0.width as f32, f0.height as f32);
+            let clip_end = frames.iter().map(|f| f.delay_ms).sum::<u32>();
+            let off = |b: &Blob| -> Option<(f32, f32)> {
+                let (mut cx, mut cy) = (b.cx, b.cy);
+                if b.cx - b.rx <= CLIP_EDGE_PX {
+                    cx = -rx;
+                } else if b.cx + b.rx >= w - CLIP_EDGE_PX {
+                    cx = w + rx;
+                } else if b.cy - b.ry <= CLIP_EDGE_PX {
+                    cy = -ry;
+                } else if b.cy + b.ry >= h - CLIP_EDGE_PX {
+                    cy = h + ry;
+                } else {
+                    return None;
+                }
+                let (ax, ay) = anchor_xy(&Blob {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    ..*b
+                });
+                Some((round_to_int(ax), round_to_int(ay)))
+            };
+            let kf = |t: u32, (x, y): (f32, f32)| Keyframe {
+                time_ms: t,
+                transforms: vec![Transform::Position(x, y)],
+            };
+            let prev_frame = frames
+                .iter()
+                .scan(0u32, |acc, f| {
+                    let t = *acc;
+                    *acc += f.delay_ms;
+                    Some(t)
+                })
+                .take_while(|&t| t < first_t)
+                .last();
+            if let Some(pt) = prev_frame {
+                if let Some(p) = off(&first_b) {
+                    // Off-canvas on the last frame it was unseen, so the
+                    // entry interpolates across one real frame gap.
+                    keyframes.insert(0, kf(pt, p));
+                    if pt > 0 {
+                        keyframes.insert(0, kf(0, p));
+                    }
+                }
+            }
+            let (last_t, last_b) = blobs[last_idx];
+            let next_frame = frames
+                .iter()
+                .scan(0u32, |acc, f| {
+                    let t = *acc;
+                    *acc += f.delay_ms;
+                    Some(t)
+                })
+                .find(|&t| t > last_t);
+            if let Some(nt) = next_frame {
+                if nt < clip_end {
+                    if let Some(p) = off(&last_b) {
+                        keyframes.push(kf(nt, p));
+                    }
+                }
+            }
+        }
 
         statements.push(Statement::Animate(Animation {
             target: name,
@@ -457,8 +573,7 @@ fn trace_track_outline(
         return None;
     }
     let round2 = |v: f32| (v * 100.0).round() / 100.0;
-    let round_pt =
-        |p: vac_format::Point| vac_format::Point::new(round2(p.x), round2(p.y));
+    let round_pt = |p: vac_format::Point| vac_format::Point::new(round2(p.x), round2(p.y));
     Some(
         segs.into_iter()
             .map(|seg| match seg {
@@ -600,9 +715,7 @@ fn matching_cost(prev: &Blob, predicted: (f32, f32), curr: &Blob) -> f32 {
     let db = curr.color.b as f32 - prev.color.b as f32;
     let col = (dr * dr + dg * dg + db * db).sqrt();
     let rad = (curr.radius - prev.radius).abs();
-    let hu = (0..7)
-        .map(|i| (curr.hu[i] - prev.hu[i]).abs())
-        .sum::<f32>();
+    let hu = (0..7).map(|i| (curr.hu[i] - prev.hu[i]).abs()).sum::<f32>();
     W_POS * pos + W_COL * col + W_RAD * rad + W_HU * hu
 }
 
@@ -996,7 +1109,11 @@ mod tests {
         // Red moves 60 → 540, yellow moves 540 → 60. End positions confirm.
         let (_, red_last) = red_track.samples.last().unwrap();
         let (_, yellow_last) = yellow_track.samples.last().unwrap();
-        assert!(red_last.cx > 400.0, "red did not advance: cx={}", red_last.cx);
+        assert!(
+            red_last.cx > 400.0,
+            "red did not advance: cx={}",
+            red_last.cx
+        );
         assert!(
             yellow_last.cx < 200.0,
             "yellow did not advance: cx={}",

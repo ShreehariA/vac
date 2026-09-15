@@ -51,63 +51,40 @@ fn first_keyframe_times(doc: &Document) -> Vec<(String, u32, u32)> {
         .collect()
 }
 
-/// **DEFECT — objects that appear after t=0 have their whole trajectory
-/// shifted earlier.**
+/// **FIXED in v0.10 — objects that appear after t=0 were time-shifted.**
 ///
-/// `emit_shape` normalises keyframe times to the track's first sighting
-/// (`t_norm = t.saturating_sub(first_t)`) and the emitted `animate`
-/// block carries no start offset, so a track that begins at 1200 ms
-/// emits its first keyframe at 0 ms. On re-render the object is already
-/// moving while the source frame is still empty.
+/// Through v0.9, `emit_shape` re-based keyframe times to the track's
+/// first sighting, so the card in `examples/late_entry.vac` (off-canvas
+/// until 1000 ms, parked at 2000 ms) was recovered parking at 840 ms:
+/// ink IoU 0.394, worst frame 0.000. Every structural count was correct,
+/// which is why no count-based test ever saw it.
 ///
-/// Measured on `examples/late_entry.vac`, whose card holds off-canvas
-/// until 1000 ms and parks at x=150 at 2000 ms. The recovered source
-/// parks it at **840 ms** — over a second early — and scores ink IoU
-/// 0.394 with a worst frame of 0.000.
-///
-/// The reason this survived eight versions: **the recovered AST looks
-/// completely reasonable.** Two shapes, one animate block, four
-/// keyframes, correct geometry, correct colour. Every count matches. No
-/// count-based assertion can see it; only pixel comparison can.
+/// Keyframes are now absolute, and a track clipped by the canvas edge at
+/// its first sighting is held just off-canvas until then. This is now a
+/// floor, not a defect guard.
 #[test]
-fn late_entering_objects_are_time_shifted() {
+fn late_entering_objects_keep_their_timing() {
     let (source, recovered, fidelity) = hermetic("late_entry.vac");
+    println!("{}", vac::to_string(&recovered));
+    println!("{fidelity}");
 
-    let src_times = first_keyframe_times(&source);
-    let got_times = first_keyframe_times(&recovered);
-    assert_eq!(src_times.len(), 1, "fixture should have one animate block");
-    assert_eq!(got_times.len(), 1, "recovered should have one animate block");
+    let src = first_keyframe_times(&source);
+    let got = first_keyframe_times(&recovered);
+    assert_eq!(got.len(), 1, "recovered should have one animate block");
 
-    // Every structural count is correct. This is the point.
-    let count_shapes = |d: &Document| {
-        d.scenes
-            .iter()
-            .flat_map(|s| &s.statements)
-            .filter(|st| matches!(st, Statement::Let { name, .. } if name != "bg"))
-            .count()
-    };
-    assert_eq!(count_shapes(&source), count_shapes(&recovered));
-
-    // And yet the picture is wrong.
+    // Measured 0.9318 after the fix (0.394 before).
     assert!(
-        fidelity.ink_iou < 0.60,
-        "late-entry defect appears fixed (ink IoU {:.4}) — if so, tighten this \
-         assertion into a real floor and drop the row from docs/frontier.md",
+        fidelity.ink_iou >= 0.92,
+        "late-entry timing regressed: ink IoU {:.4}",
         fidelity.ink_iou
     );
-    assert_eq!(
-        fidelity.worst_iou_frame, 0,
-        "the failure should be worst at frame 0, where the source is empty \
-         and the reconstruction has already painted the card"
-    );
-
-    // The recovered animation ends far earlier than the source's.
-    let src_end = src_times[0].2;
-    let got_end = got_times[0].2;
+    // The recovered trajectory must end within a frame of the source's
+    // last sighting, not a second early.
     assert!(
-        got_end + 500 < src_end,
-        "expected the recovered trajectory to end early (defect); \
-         source ends {src_end}ms, recovered ends {got_end}ms"
+        got[0].2 + 100 >= src[0].2 - 1000,
+        "recovered trajectory ends at {}ms, source at {}ms",
+        got[0].2,
+        src[0].2
     );
 }
 
@@ -122,7 +99,12 @@ fn late_entering_objects_are_time_shifted() {
 /// constant-size, fully-opaque shape. Real footage is full of both.
 #[test]
 fn scale_and_opacity_are_never_emitted() {
-    for sample in ["ball.vac", "two_balls.vac", "occlusion.vac", "late_entry.vac"] {
+    for sample in [
+        "ball.vac",
+        "two_balls.vac",
+        "occlusion.vac",
+        "late_entry.vac",
+    ] {
         let (_, recovered, _) = hermetic(sample);
         for st in recovered.scenes.iter().flat_map(|s| &s.statements) {
             if let Statement::Animate(a) = st {

@@ -1,6 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
-Every number here was produced by `vac verify` on 2026-08-22 at v0.9 and is
+Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
+table re-measured 2026-09-15 at v0.10) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -29,46 +30,7 @@ scores the reverse.
 
 ---
 
-## 1. Objects that appear after t=0 are time-shifted
-
-**Status: open. Fixture: `examples/late_entry.vac`. Test:
-`late_entering_objects_are_time_shifted`.**
-
-`emit_shape` normalises each track's keyframe times to the track's *first
-sighting* (`t_norm = t.saturating_sub(first_t)` in
-`crates/vac-decompiler/src/track.rs`), and the emitted `animate` block carries
-no start offset. A track that first appears at 1200 ms therefore emits its
-first keyframe at 0 ms, and on re-render the object is already moving while the
-source frame is still empty.
-
-`late_entry.vac` holds a card fully off-canvas until 1000 ms and parks it at
-x=150 at 2000 ms. Recovered:
-
-```vac
-animate shape_0 {
-  0ms    -> position(-89, 130)
-  450ms  -> position(-2, 130)
-  840ms  -> position(150, 130)     // source parks at 2000ms
-  1710ms -> position(150, 130)     // source runs to 3000ms
-  easing: linear
-}
-```
-
-| | ink IoU | worst | residual | missing | spurious |
-|---|---|---|---|---|---|
-| `late_entry.vac` | 0.394 | **0.000** @ frame 0 | 906.3 | 25.7% | 97.5% |
-
-**Why this survived eight versions:** the recovered AST looks entirely
-reasonable. Two shapes, one animate block, four keyframes, correct geometry,
-correct colour — every structural count matches the source exactly. No
-count-based assertion can see this. Only pixel comparison can.
-
-It shows up in the wild corpus too: `slide_in_card.mp4` scores a mean IoU of
-0.818 with a **worst frame of 0.000**, because its card is off-canvas at t=0.
-
----
-
-## 2. Repeated round-trips inflate shapes without converging
+## 1. Repeated round-trips inflate shapes without converging
 
 **Status: open. Test:
 `repeated_round_trips_do_not_drift_worse_than_the_recorded_defect`.**
@@ -101,7 +63,7 @@ diagnosis of the pendulum that v0.8 proved wrong, and once was enough.
 
 ---
 
-## 3. `scale()` and `opacity()` are never recovered
+## 2. `scale()` and `opacity()` are never recovered
 
 **Status: open. Test: `scale_and_opacity_are_never_emitted`.**
 
@@ -121,7 +83,7 @@ kind is ever emitted; it becomes a live bug the moment a second one is.
 
 ---
 
-## 4. Strokes are never recovered
+## 3. Strokes are never recovered
 
 **Status: open. Test: `strokes_are_never_recovered`.**
 
@@ -131,7 +93,7 @@ shape comes back as a bare fill.
 
 ---
 
-## 5. Colour: the single-flat-background model
+## 4. Colour: the single-flat-background model
 
 **Status: open. Best-evidenced fidelity gap. Corpus rows: `testsrc2.mp4`,
 `mandelbrot.mp4`.**
@@ -160,7 +122,7 @@ pen — while leaving its eyes behind.
 
 ---
 
-## 6. Dotted and dashed strokes fragment
+## 5. Dotted and dashed strokes fragment
 
 **Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
 
@@ -183,6 +145,15 @@ always true; only one of them was measurable.
 
 ---
 
+## Fixed
+
+- **v0.10 — objects that appear after t=0 were time-shifted.** Keyframes were
+  re-based to each track's first sighting, so `late_entry.vac` parked its card
+  at 840 ms instead of 2000 ms (IoU 0.394, worst frame 0.000). Now absolute,
+  with edge-clipped entries/exits held off-canvas and clipped centroids
+  corrected. `late_entry.vac` 0.394 → **0.9928**; `slide_in_card.mp4` 0.818 →
+  **0.9918**, worst frame 0.000 → 0.879, residual 157.4 → 3.0.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -190,16 +161,16 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
+| `slide_in_card.mp4` | 0.9918 | 0.8792 | 3.0 | 43.42 | 0.3% | 2 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9596 | 0.9449 | 9.1 | 38.54 | 2.9% | 3 |
 | `real_bouncing_ball.gif` | 0.8758 | 0.8736 | 413.8 | 21.96 | 13.0% | 3 |
-| `testsrc2.mp4` | 0.8398 | 0.8387 | 15127.9 | 6.33 | 19.1% | 76 |
-| `slide_in_card.mp4` | 0.8182 | **0.0000** | 157.4 | 26.16 | 14.2% | 2 |
-| `mandelbrot.mp4` | 0.7162 | 0.6362 | 4644.6 | 11.46 | 27.3% | 46 |
-| `real_newtons_cradle.gif` | 0.5996 | 0.5948 | 732.4 | 19.48 | 57.0% | 186 |
+| `testsrc2.mp4` | 0.8398 | 0.8387 | 15004.6 | 6.37 | 19.1% | 76 |
+| `mandelbrot.mp4` | 0.7235 | 0.6469 | 4497.5 | 11.60 | 32.4% | 46 |
+| `real_newtons_cradle.gif` | 0.5996 | 0.5947 | 731.3 | 19.49 | 57.0% | 186 |
 | `real_loader.gif` | 0.5012 | 0.4766 | 258.9 | 24.00 | 76.2% | 16 |
-| `real_pendulum.gif` | 0.1579 | 0.1006 | 2122.7 | 14.86 | 230.1% | 111 |
-| `real_double_pendulum.gif` | 0.0706 | 0.0386 | 8425.9 | 8.87 | 616.6% | 92 |
+| `real_pendulum.gif` | 0.1906 | 0.1045 | 2059.5 | 14.99 | 228.3% | 111 |
+| `real_double_pendulum.gif` | 0.0792 | 0.0476 | 7627.0 | 9.31 | 559.1% | 92 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread

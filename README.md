@@ -1288,3 +1288,35 @@ the v0.8 list put fragment grouping first, chosen by proxy counts.
 - **`apply_animation` drops held transforms.** Latent only because a
   single transform kind is ever emitted; it becomes live the moment
   scale or opacity recovery lands, so it must be fixed first.
+
+## v0.10 — Late entries keep their timing
+
+The first slice chosen by measurement rather than by proxy. v0.9's frontier
+list opened with a defect no count-based test could see: `emit_shape`
+re-based every track's keyframes to its first sighting, so anything that
+entered after t=0 replayed its whole trajectory early.
+
+Three changes in `crates/vac-decompiler/src/track.rs`:
+
+1. **Absolute keyframe times.** No re-basing.
+2. **Edge-clipped centroids are corrected.** A card 3 px on screen has a bbox
+   centre 1.5 px in; the true centre is recovered from the visible opposite
+   edge and the track's full extent, before trajectory simplification.
+3. **Entry/exit through an edge is held off-canvas** until the last unseen
+   frame (and from the first unseen frame after an exit).
+
+| | ink IoU | worst frame | residual |
+|---|---|---|---|
+| `late_entry.vac` (hermetic) | 0.394 → **0.9928** | 0.000 → 0.667 | 906.3 → 1.70 |
+| `slide_in_card.mp4` | 0.8182 → **0.9918** | 0.0000 → **0.8792** | 157.4 → 3.0 |
+| `real_pendulum.gif` | 0.1579 → 0.1906 | 0.1006 → 0.1045 | 2122.7 → 2059.5 |
+| `real_double_pendulum.gif` | 0.0706 → 0.0792 | 0.0386 → 0.0476 | 8425.9 → 7627.0 |
+| `mandelbrot.mp4` | 0.7162 → 0.7235 | 0.6362 → 0.6469 | 4644.6 → 4497.5 |
+
+No corpus row or hermetic fixture regressed. The frontier test became a real
+floor (`late_entering_objects_keep_their_timing`), `late_entry.vac` joined the
+hermetic baselines, and the row left `docs/frontier.md`.
+
+**Still open:** a late-appearing object that does *not* enter through an edge
+(pops or fades in mid-canvas) is drawn from t=0 — hiding it needs `opacity()`,
+which is blocked on the `apply_animation` hold bug.
