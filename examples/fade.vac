@@ -1,0 +1,23 @@
+// Fixture (v0.11): a shape that fades out while moving, then back in.
+// Through v0.10 the decompiler emitted only position(), so this
+// round-tripped fully opaque.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #10141f
+
+  let card = rect(60, 130, 120, 60)
+  card.fill = #ffd040
+  card.stroke = none
+
+  animate card {
+    0ms    -> position(60, 130), opacity(1.0)
+    1500ms -> position(300, 130), opacity(0.3)
+    3s     -> position(300, 130), opacity(1.0)
+    easing: linear
+  }
+}

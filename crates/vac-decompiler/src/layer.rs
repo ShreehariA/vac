@@ -68,6 +68,21 @@ const MAX_PLATE_SAMPLES: usize = 96;
 ///   and the output is byte-for-byte the v0.7 result.
 const STATIC_MIN_AGREEMENT: f32 = 0.75;
 
+/// Components smaller than this are never tested for bleeding; they are
+/// below the blob detector's floor anyway.
+const BLEED_MIN_COMPONENT_PX: usize = 16;
+/// A frame "bleeds" when at least this fraction of a component's outer
+/// ring shows the component's own colour.
+const BLEED_RING_FRACTION: f32 = 0.5;
+/// A component that bleeds in at least this fraction of frames is the
+/// core of a moving or growing shape, not scenery.
+const BLEED_MIN_FRAMES: f32 = 0.25;
+
+/// Minimum `area / bbox area` for a component to be tested at all.
+const BLEED_MIN_FILL: f32 = 0.6;
+/// ...and shows plain background in at least this fraction.
+const BLEED_MIN_CLEAR_FRAMES: f32 = 0.10;
+
 /// Squared RGB distance within which a frame's pixel counts as "the
 /// plate is visible here".  Deliberately looser than the foreground
 /// threshold: codec noise on a static element must not read as an
@@ -149,6 +164,8 @@ impl StaticLayer {
             }
         }
 
+        reject_bleeding_cores(&mut mask, &median, frames, width, height, bg);
+
         // Note that the mask deliberately keeps persistent pixels too
         // small to become a `static_<n>` shape of their own.  Restricting
         // it to emittable components was tried and is worse: those
@@ -227,6 +244,148 @@ impl StaticLayer {
 }
 
 /// Is pixel `i` of `frame` showing what the plate says is there?
+/// v0.11: a persistent region is not scenery if the same colour keeps
+/// spilling past its edge.
+///
+/// A growing or pulsing shape has a core that is covered in every frame,
+/// so it passes the agreement test exactly like furniture does — and
+/// stripping it leaves the motion pass a ring, which fragments into a
+/// dozen tracks (`examples/grow.vac`: 10 shapes, ink IoU 0.644).
+/// Furniture is different in one measurable way: its outline stays put.
+/// So look two pixels outside each mask component (one pixel out is
+/// anti-aliasing) and count the frames in which most of that ring shows
+/// the component's own colour.  If that happens often, the region is
+/// the core of something that moves or grows, and it goes back to the
+/// motion pass whole — provided the ring is also plain background in
+/// some frames (see the Mandelbrot note below).
+fn reject_bleeding_cores(
+    mask: &mut [bool],
+    median: &[u8],
+    frames: &[VideoFrame],
+    width: u32,
+    height: u32,
+    bg: Color,
+) {
+    let (w, h) = (width as usize, height as usize);
+    let mut label = vec![usize::MAX; w * h];
+    let mut comps: Vec<Vec<usize>> = Vec::new();
+    for start in 0..w * h {
+        if !mask[start] || label[start] != usize::MAX {
+            continue;
+        }
+        let id = comps.len();
+        let mut stack = vec![start];
+        let mut pix = Vec::new();
+        label[start] = id;
+        while let Some(i) = stack.pop() {
+            pix.push(i);
+            let (x, y) = (i % w, i / w);
+            let mut push = |j: usize| {
+                if mask[j] && label[j] == usize::MAX {
+                    label[j] = id;
+                    stack.push(j);
+                }
+            };
+            if x > 0 { push(i - 1); }
+            if x + 1 < w { push(i + 1); }
+            if y > 0 { push(i - w); }
+            if y + 1 < h { push(i + w); }
+        }
+        comps.push(pix);
+    }
+
+    for (id, pix) in comps.iter().enumerate() {
+        if pix.len() < BLEED_MIN_COMPONENT_PX {
+            continue;
+        }
+        // Only compact components are returned to the motion pass: that
+        // is where it can track them as one shape.  Sprawling regions
+        // (the Mandelbrot zoom's filaments) do genuinely grow, but the
+        // motion pass shreds them — measured, handing them back cost
+        // that clip 0.72 → 0.65 ink IoU.  They stay scenery.
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+        for &i in pix {
+            let (x, y) = (i % w, i / w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        let bbox = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f32;
+        if (pix.len() as f32) < bbox * BLEED_MIN_FILL {
+            continue;
+        }
+        // Chebyshev distance 1 and 2 around the component.
+        let near = |i: usize, r: usize| -> Vec<usize> {
+            let (x, y) = (i % w, i / w);
+            let mut out = Vec::new();
+            for yy in y.saturating_sub(r)..=(y + r).min(h - 1) {
+                for xx in x.saturating_sub(r)..=(x + r).min(w - 1) {
+                    out.push(yy * w + xx);
+                }
+            }
+            out
+        };
+        let mut d1 = std::collections::HashSet::new();
+        for &i in pix {
+            d1.extend(near(i, 1));
+        }
+        let mut ring = std::collections::BTreeSet::new();
+        for &i in &d1 {
+            for j in near(i, 1) {
+                if label[j] != id && !d1.contains(&j) {
+                    ring.insert(j);
+                }
+            }
+        }
+        if ring.is_empty() {
+            continue;
+        }
+        let mut sum = [0u64; 3];
+        for &i in pix {
+            for c in 0..3 {
+                sum[c] += median[i * 4 + c] as u64;
+            }
+        }
+        let n = pix.len() as u64;
+        let colour = [sum[0] / n, sum[1] / n, sum[2] / n].map(|v| v as u8);
+        let same = |px: &[u8], i: usize| {
+            let d = |c: usize| px[i * 4 + c] as i32 - colour[c] as i32;
+            (d(0) * d(0) + d(1) * d(1) + d(2) * d(2)) as u32 <= STATIC_MATCH_TOL_SQ
+        };
+        let bleeding = frames
+            .iter()
+            .filter(|f| {
+                let hits = ring.iter().filter(|&&i| same(&f.pixels, i)).count();
+                hits as f32 >= ring.len() as f32 * BLEED_RING_FRACTION
+            })
+            .count();
+        // The surround must also show plain background in some frames:
+        // a grower's edge alternates between its own colour and the
+        // background, whereas scenery embedded in similar-coloured
+        // texture (the Mandelbrot zoom) is simply always surrounded.
+        let bg_rgb = [bg.r, bg.g, bg.b];
+        let is_bg = |px: &[u8], i: usize| {
+            let d = |c: usize| px[i * 4 + c] as i32 - bg_rgb[c] as i32;
+            (d(0) * d(0) + d(1) * d(1) + d(2) * d(2)) as u32 <= STATIC_MATCH_TOL_SQ
+        };
+        let clear = frames
+            .iter()
+            .filter(|f| {
+                let hits = ring.iter().filter(|&&i| is_bg(&f.pixels, i)).count();
+                hits as f32 >= ring.len() as f32 * BLEED_RING_FRACTION
+            })
+            .count();
+        if bleeding as f32 >= frames.len() as f32 * BLEED_MIN_FRAMES
+            && clear as f32 >= frames.len() as f32 * BLEED_MIN_CLEAR_FRAMES
+        {
+            for &i in pix {
+                mask[i] = false;
+            }
+        }
+    }
+}
+
 fn plate_visible(frame: &[u8], median: &[u8], i: usize) -> bool {
     let p = i * 4;
     if frame[p + 3] < MIN_OPAQUE_ALPHA {

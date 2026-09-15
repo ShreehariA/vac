@@ -1320,3 +1320,42 @@ hermetic baselines, and the row left `docs/frontier.md`.
 **Still open:** a late-appearing object that does *not* enter through an edge
 (pops or fades in mid-canvas) is drawn from t=0 — hiding it needs `opacity()`,
 which is blocked on the `apply_animation` hold bug.
+
+## v0.11 — Things that grow and fade
+
+v0.10 ended blocked: a late object that appears mid-canvas needs `opacity()`,
+and emitting any second transform kind was unsafe because of a renderer bug.
+This slice does it in the order the frontier doc demanded.
+
+1. **Renderer: per-channel transforms.** `apply_animation` used only the two
+   keyframes bracketing `t`, so a transform kind missing from both reverted
+   to its base value. Each kind now interpolates between the nearest
+   keyframes that *carry* it and holds outside them. Two unit tests pin the
+   exact case that used to break.
+2. **Decompiler: `scale()`.** Per sample, `sqrt(area / median area)`,
+   median-filtered over 5 samples. Samples whose aspect ratio departs from
+   the track's (two balls merging side by side double the width, not the
+   height) hold the previous value. Without that guard `crossing.vac`
+   emitted a phantom 1.25× pulse at the merge.
+3. **Decompiler: `opacity()`.** The renderer composites
+   `bg + a·(fill − bg)`, so each sample's colour is projected onto that
+   segment. A sample off the segment means a hue change, and nothing is
+   claimed.
+4. **Static layer: growing cores are not scenery.** A growing disc's centre
+   is covered in every frame, so it passed the agreement test and the motion
+   pass got a ring that shattered into 10 tracks. A compact component whose
+   own colour keeps spilling past its outline, and whose surround is plain
+   background in other frames, goes back to the motion pass. The first
+   version of this rule cost `mandelbrot.mp4` 0.72 → 0.65 IoU. The corpus
+   gate caught that, and compactness plus the background condition fixed it.
+
+| fixture | ink IoU | residual | shapes |
+|---|---|---|---|
+| `grow.vac` | 0.644 → **0.970** | 824 → 18.6 | 10 → 1 |
+| `fade.vac` | 0.9995 → 1.0000 | 59.8 → **0.01** | 1 → 1 |
+
+**No corpus row moved.** Nothing in the wild corpus scales or fades cleanly,
+so this is a hermetic win, not evidence about real footage. The new tests
+check recovered values against the source curve (radius within 3 px, opacity
+within 0.05), and the pre-v0.11 fixtures must stay position-only. Each of the
+three mechanisms was deliberately disabled and a test failed every time.

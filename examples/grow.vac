@@ -1,0 +1,23 @@
+// Fixture (v0.11): a shape that changes size in place.
+// Through v0.10 the decompiler emitted only position(), so this
+// round-tripped as a constant-size ellipse.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #10141f
+
+  let pulse = ellipse(240, 160, 40, 40)
+  pulse.fill = #40c0ff
+  pulse.stroke = none
+
+  animate pulse {
+    0ms    -> scale(0.5)
+    1500ms -> scale(2.0)
+    3s     -> scale(1.0)
+    easing: linear
+  }
+}

@@ -244,6 +244,23 @@ pub fn build_document(
 /// it actually moved — an `animate` block.  Used for both moving tracks
 /// and (v0.8) the static scene, whose shapes arrive as one-sample
 /// tracks measured on the median plate.
+/// Smallest max/min scale ratio across a track that is claimed as a real
+/// size change rather than anti-aliasing jitter.
+const SCALE_MIN_RATIO: f32 = 1.12;
+/// How far a sample's rx/ry may drift from the track's median aspect and
+/// still count as a measurement of its uniform scale.
+const SCALE_MAX_ASPECT_DRIFT: f32 = 0.15;
+/// A fill closer than this (RGB distance) to the background cannot carry a
+/// measurable opacity.
+const OPACITY_MIN_CONTRAST: f32 = 60.0;
+/// How far (RGB distance) a sample may sit off the background→fill segment
+/// before the colour change is read as a hue change instead of a fade.
+const OPACITY_MAX_OFF_AXIS: f32 = 12.0;
+/// Opacity is emitted only if some sample drops to or below this.
+const OPACITY_MAX_EMITTED: f32 = 0.88;
+/// Keyframe tolerance for the opacity channel, in 0–255 levels.
+const OPACITY_RDP_TOLERANCE: f32 = 6.0;
+
 /// How close a bbox edge must sit to the canvas border to count as
 /// clipped by it.
 const CLIP_EDGE_PX: f32 = 1.5;
@@ -348,6 +365,119 @@ fn emit_shape(
         }
     };
 
+    // v0.11: size and opacity channels.  Each is measured per sample
+    // and emitted only when it varies by more than detector noise, so a
+    // track that neither grows nor fades produces exactly the source it
+    // did before.
+    let touches_edge = |b: &Blob| {
+        canvas.is_some_and(|(w, h)| {
+            b.cx - b.rx <= CLIP_EDGE_PX
+                || b.cy - b.ry <= CLIP_EDGE_PX
+                || b.cx + b.rx >= w - CLIP_EDGE_PX
+                || b.cy + b.ry >= h - CLIP_EDGE_PX
+        })
+    };
+    // Scale = sqrt(area / median area).  Area rather than bbox extent:
+    // it integrates every pixel, so anti-aliasing jitter averages out.
+    // Skipped for paths (their outline is traced at one frame, so no
+    // single reference size exists) and for any track clipped by the
+    // canvas edge, whose visible area shrinks without the shape doing so.
+    let scales: Option<Vec<f32>> = (|| {
+        if kind == ShapeKind::Path
+            || track.samples.len() < 3
+            || track.samples.iter().any(|(_, b)| touches_edge(b))
+        {
+            return None;
+        }
+        let areas: Vec<f32> = track.samples.iter().map(|(_, b)| b.area as f32).collect();
+        let med = median_f32(&areas).max(1.0);
+        // `scale()` is uniform, so a real size change keeps the aspect
+        // ratio.  A sample whose aspect departs from the track's median
+        // (two blobs merged side by side double the width, not the
+        // height) is not a measurement of this shape's size: it holds
+        // the previous valid value instead.
+        let aspects: Vec<f32> = track
+            .samples
+            .iter()
+            .map(|(_, b)| b.rx / b.ry.max(0.5))
+            .collect();
+        let med_aspect = median_f32(&aspects);
+        let mut raw: Vec<f32> = Vec::with_capacity(areas.len());
+        let mut held: Option<f32> = None;
+        for (a, asp) in areas.iter().zip(&aspects) {
+            if (asp / med_aspect - 1.0).abs() <= SCALE_MAX_ASPECT_DRIFT {
+                held = Some((a / med).sqrt());
+            }
+            raw.push(held.unwrap_or(f32::NAN));
+        }
+        let first_valid = raw.iter().copied().find(|v| !v.is_nan())?;
+        for v in raw.iter_mut() {
+            if v.is_nan() {
+                *v = first_valid;
+            }
+        }
+        // Temporal median over 5 samples: a real size change is smooth,
+        // while the area spikes of a merge (two same-colour blobs
+        // crossing) last a frame or two and must not read as growth.
+        let s: Vec<f32> = (0..raw.len())
+            .map(|i| {
+                let lo = i.saturating_sub(2);
+                let hi = (i + 3).min(raw.len());
+                median_f32(&raw[lo..hi])
+            })
+            .collect();
+        let lo = s.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = s.iter().cloned().fold(0.0, f32::max);
+        (hi / lo.max(1e-3) >= SCALE_MIN_RATIO).then_some(s)
+    })();
+    // Opacity: the renderer composites `bg + a·(fill − bg)`, so every
+    // sample's colour should lie on the segment from its frame's
+    // background to the full-strength fill.  The full-strength fill is
+    // the sample furthest from the background; `a` is the projection
+    // onto that segment.  If any sample sits off the segment the colour
+    // is changing hue, not fading, and no opacity is claimed.
+    let opacity: Option<(Vec<f32>, Color)> = (|| {
+        if track.samples.len() < 3 || track.frame_indices.len() != track.samples.len() {
+            return None;
+        }
+        let rgb = |c: Color| [c.r as f32, c.g as f32, c.b as f32];
+        let bgs: Vec<[f32; 3]> = track
+            .frame_indices
+            .iter()
+            .map(|&fi| detections.get(fi).map(|d| rgb(d.bg)))
+            .collect::<Option<_>>()?;
+        let diff = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let (k_full, _) = track
+            .samples
+            .iter()
+            .enumerate()
+            .map(|(k, (_, b))| {
+                let u = diff(rgb(b.color), bgs[k]);
+                (k, dot(u, u))
+            })
+            .fold((0, -1.0), |acc, x| if x.1 > acc.1 { x } else { acc });
+        let full = track.samples[k_full].1.color;
+        let mut alphas = Vec::with_capacity(track.samples.len());
+        for (k, (_, b)) in track.samples.iter().enumerate() {
+            let v = diff(rgb(full), bgs[k]);
+            let vv = dot(v, v);
+            if vv < OPACITY_MIN_CONTRAST * OPACITY_MIN_CONTRAST {
+                return None;
+            }
+            let u = diff(rgb(b.color), bgs[k]);
+            let a = (dot(u, v) / vv).clamp(0.0, 1.0);
+            let off = diff(u, [v[0] * a, v[1] * a, v[2] * a]);
+            if dot(off, off).sqrt() > OPACITY_MAX_OFF_AXIS {
+                return None;
+            }
+            alphas.push(a);
+        }
+        let lo = alphas.iter().cloned().fold(1.0, f32::min);
+        (lo <= OPACITY_MAX_EMITTED).then_some((alphas, full))
+    })();
+    let color = opacity.as_ref().map_or(color, |(_, full)| *full);
+
     let shape = match kind {
         ShapeKind::Ellipse => Shape::Ellipse {
             cx: round_to_int(base_cx),
@@ -385,6 +515,16 @@ fn emit_shape(
     let blobs = &unclipped;
 
     let mut keep = simplify_trajectory(blobs, RDP_TOLERANCE_PX);
+    let times: Vec<f32> = blobs.iter().map(|(t, _)| *t as f32).collect();
+    if let Some(sc) = &scales {
+        // Tolerance in pixels of radius, like position.
+        let extent: Vec<f32> = sc.iter().map(|s| s * (rx + ry) / 2.0).collect();
+        keep.extend(rdp_1d(&times, &extent, RDP_TOLERANCE_PX));
+    }
+    if let Some((al, _)) = &opacity {
+        let levels: Vec<f32> = al.iter().map(|a| a * 255.0).collect();
+        keep.extend(rdp_1d(&times, &levels, OPACITY_RDP_TOLERANCE));
+    }
     if !keep.contains(&0) {
         keep.insert(0, 0);
     }
@@ -395,7 +535,11 @@ fn emit_shape(
     keep.sort();
     keep.dedup();
 
-    if keep.len() >= 2 && !stationary {
+    // A stationary shape still animates if it grows or fades.  A rect
+    // scales about its top-left anchor, so a scaling rect needs position
+    // keyframes to stay centred.
+    let emit_pos = !stationary || (scales.is_some() && kind == ShapeKind::Rect);
+    if keep.len() >= 2 && (emit_pos || scales.is_some() || opacity.is_some()) {
         let easing = classify_easing(blobs, &keep);
 
         // v0.10: keyframe times are *absolute* clip time.  Through v0.9
@@ -406,10 +550,25 @@ fn emit_shape(
             .iter()
             .map(|&i| {
                 let (t, b) = blobs[i];
-                let (ax, ay) = anchor_xy(&b);
+                let s = scales.as_ref().map(|sc| sc[i]);
+                let mut transforms = Vec::with_capacity(3);
+                if emit_pos {
+                    let (ax, ay) = match (kind, s) {
+                        (ShapeKind::Rect, Some(s)) => (b.cx - rx * s, b.cy - ry * s),
+                        (_, _) if stationary => (base_cx, base_cy),
+                        _ => anchor_xy(&b),
+                    };
+                    transforms.push(Transform::Position(round_to_int(ax), round_to_int(ay)));
+                }
+                if let Some(s) = s {
+                    transforms.push(Transform::Scale((s * 1000.0).round() / 1000.0));
+                }
+                if let Some((al, _)) = &opacity {
+                    transforms.push(Transform::Opacity((al[i] * 100.0).round() / 100.0));
+                }
                 Keyframe {
                     time_ms: t,
-                    transforms: vec![Transform::Position(round_to_int(ax), round_to_int(ay))],
+                    transforms,
                 }
             })
             .collect();
@@ -420,7 +579,7 @@ fn emit_shape(
         // renderer hold its first on-canvas position from t=0.  The
         // same reasoning, mirrored, applies to a track that leaves
         // through an edge before the clip ends.
-        if let Some(f0) = frames.first() {
+        if let (true, Some(f0)) = (emit_pos, frames.first()) {
             let (w, h) = (f0.width as f32, f0.height as f32);
             let clip_end = frames.iter().map(|f| f.delay_ms).sum::<u32>();
             let off = |b: &Blob| -> Option<(f32, f32)> {

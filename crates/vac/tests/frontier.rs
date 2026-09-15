@@ -88,23 +88,83 @@ fn late_entering_objects_keep_their_timing() {
     );
 }
 
-/// **DEFECT — `scale()` and `opacity()` are never recovered.**
+/// **FIXED in v0.11 — `scale()` and `opacity()` are recovered.**
 ///
-/// The language has supported both since v0.1 and `vac-compiler`
-/// renders both, but the decompiler only ever emits
-/// `Transform::Position`. Across all 26 `.vac` files in this repository
-/// there are 1654 `position(` and zero of either other kind.
+/// Through v0.10 the decompiler emitted only `position()`. `fade.vac`
+/// came back fully opaque (residual 59.8) and `grow.vac` came back as ten
+/// fragments (ink IoU 0.644), because the static layer mistook the
+/// always-covered core of the growing disc for scenery.
 ///
-/// So a shape that grows, shrinks, or fades round-trips as a
-/// constant-size, fully-opaque shape. Real footage is full of both.
+/// The recovered channel values are checked against the source's own
+/// curve, sampled at each recovered keyframe time — not merely for
+/// existence, which a single spurious keyframe would satisfy.
 #[test]
-fn scale_and_opacity_are_never_emitted() {
-    for sample in [
-        "ball.vac",
-        "two_balls.vac",
-        "occlusion.vac",
-        "late_entry.vac",
-    ] {
+fn scale_and_opacity_are_recovered_along_the_source_curve() {
+    fn channel(doc: &Document, pick: fn(&Transform) -> Option<f32>) -> Vec<(u32, f32)> {
+        doc.scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .filter_map(|st| match st {
+                Statement::Animate(a) => Some(a),
+                _ => None,
+            })
+            .flat_map(|a| &a.keyframes)
+            .filter_map(|k| k.transforms.iter().find_map(pick).map(|v| (k.time_ms, v)))
+            .collect()
+    }
+    fn at(curve: &[(u32, f32)], t: u32) -> f32 {
+        let i = curve.iter().position(|&(kt, _)| kt >= t).unwrap_or(curve.len() - 1);
+        if i == 0 || curve[i].0 == t {
+            return curve[i].1;
+        }
+        let ((t0, v0), (t1, v1)) = (curve[i - 1], curve[i]);
+        v0 + (v1 - v0) * (t - t0) as f32 / (t1 - t0) as f32
+    }
+    let scale = |t: &Transform| match t {
+        Transform::Scale(s) => Some(*s),
+        _ => None,
+    };
+    let opacity = |t: &Transform| match t {
+        Transform::Opacity(o) => Some(*o),
+        _ => None,
+    };
+
+    // grow.vac: base radius differs between source (40) and recovered
+    // (median size), so compare absolute radius = base · scale.
+    let (source, recovered, fid) = hermetic("grow.vac");
+    println!("{}\n{fid}", vac::to_string(&recovered));
+    assert_eq!(shapes_of(&recovered), 1, "grow.vac should recover one shape");
+    let base = |d: &Document| {
+        d.scenes.iter().flat_map(|s| &s.statements).find_map(|st| match st {
+            Statement::Let { name, shape: vac::Shape::Ellipse { rx, .. } } if name != "bg" => Some(*rx),
+            _ => None,
+        })
+    };
+    let (src_r, got_r) = (base(&source).unwrap(), base(&recovered).unwrap());
+    let (src_c, got_c) = (channel(&source, scale), channel(&recovered, scale));
+    assert!(got_c.len() >= 3, "expected a scale curve, got {got_c:?}");
+    for &(t, s) in &got_c {
+        let want = src_r * at(&src_c, t);
+        let got = got_r * s;
+        assert!((got - want).abs() <= 3.0, "radius at {t}ms: got {got:.1}, source {want:.1}");
+    }
+    assert!(fid.ink_iou >= 0.95, "grow.vac ink IoU {:.4}", fid.ink_iou);
+
+    let (source, recovered, fid) = hermetic("fade.vac");
+    let (src_c, got_c) = (channel(&source, opacity), channel(&recovered, opacity));
+    assert!(got_c.len() >= 3, "expected an opacity curve, got {got_c:?}");
+    for &(t, o) in &got_c {
+        let want = at(&src_c, t);
+        assert!((o - want).abs() <= 0.05, "opacity at {t}ms: got {o}, source {want}");
+    }
+    assert!(fid.residual < 5.0, "fade.vac residual {:.2}", fid.residual);
+}
+
+/// A shape that neither grows nor fades must not sprout either channel:
+/// the round trip of every pre-v0.11 fixture stays position-only.
+#[test]
+fn constant_shapes_do_not_invent_scale_or_opacity() {
+    for sample in ["ball.vac", "two_balls.vac", "crossing.vac", "occlusion.vac", "late_entry.vac", "sliding_rect.vac"] {
         let (_, recovered, _) = hermetic(sample);
         for st in recovered.scenes.iter().flat_map(|s| &s.statements) {
             if let Statement::Animate(a) = st {
@@ -112,18 +172,22 @@ fn scale_and_opacity_are_never_emitted() {
                     for t in &kf.transforms {
                         assert!(
                             matches!(t, Transform::Position(_, _)),
-                            "{sample}: the decompiler emitted {t:?} — if scale/opacity \
-                             recovery has landed, remove this frontier test.\n\
-                             NOTE: `apply_animation` in vac-compiler consults only the two \
-                             bracketing keyframes and pulls each transform kind \
-                             independently, so a kind absent from both reverts to base \
-                             instead of holding. Fix that before emitting a second kind."
+                            "{sample}: invented {t:?} at {}ms",
+                            kf.time_ms
                         );
                     }
                 }
             }
         }
     }
+}
+
+fn shapes_of(doc: &Document) -> usize {
+    doc.scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .filter(|st| matches!(st, Statement::Let { name, .. } if name != "bg"))
+        .count()
 }
 
 /// **DEFECT — strokes are never recovered.**

@@ -63,27 +63,7 @@ diagnosis of the pendulum that v0.8 proved wrong, and once was enough.
 
 ---
 
-## 2. `scale()` and `opacity()` are never recovered
-
-**Status: open. Test: `scale_and_opacity_are_never_emitted`.**
-
-The language has had both since v0.1 and `vac-compiler` renders both. The
-decompiler emits only `Transform::Position`. Across all 26 `.vac` files in this
-repository there are **1654 `position(`, zero `scale(`, zero `opacity(`**.
-
-A shape that grows, shrinks, or fades round-trips as a constant-size, fully
-opaque shape. Real footage is full of both.
-
-**Blocked on a renderer bug that must be fixed first.** `apply_animation` in
-`crates/vac-compiler/src/render.rs` consults only the two bracketing keyframes
-and pulls each transform kind independently. If neither bracketing keyframe
-carries a `Scale`, the shape reverts to base scale 1.0 rather than holding the
-last value set. This is latent today precisely *because* only one transform
-kind is ever emitted; it becomes a live bug the moment a second one is.
-
----
-
-## 3. Strokes are never recovered
+## 2. Strokes are never recovered
 
 **Status: open. Test: `strokes_are_never_recovered`.**
 
@@ -93,7 +73,7 @@ shape comes back as a bare fill.
 
 ---
 
-## 4. Colour: the single-flat-background model
+## 3. Colour: the single-flat-background model
 
 **Status: open. Best-evidenced fidelity gap. Corpus rows: `testsrc2.mp4`,
 `mandelbrot.mp4`.**
@@ -122,7 +102,7 @@ pen — while leaving its eyes behind.
 
 ---
 
-## 5. Dotted and dashed strokes fragment
+## 4. Dotted and dashed strokes fragment
 
 **Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
 
@@ -154,6 +134,16 @@ always true; only one of them was measurable.
   corrected. `late_entry.vac` 0.394 → **0.9928**; `slide_in_card.mp4` 0.818 →
   **0.9918**, worst frame 0.000 → 0.879, residual 157.4 → 3.0.
 
+- **v0.11 — `scale()` and `opacity()` are recovered, and the renderer holds
+  transforms.** `apply_animation` now interpolates each transform kind
+  between the keyframes that carry it. The decompiler emits a scale channel
+  (sqrt of area vs median, aspect-guarded against merges) and an opacity
+  channel (projection onto the background→fill segment). The static layer no
+  longer claims the core of a compact growing shape. `grow.vac` 0.644 →
+  **0.970** (10 shapes → 1); `fade.vac` residual 59.8 → **0.01**. No corpus
+  row moved: nothing in the corpus scales or fades cleanly, so this is a
+  hermetic win only, stated as such.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -167,7 +157,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `real_bouncing_ball.gif` | 0.8758 | 0.8736 | 413.8 | 21.96 | 13.0% | 3 |
 | `testsrc2.mp4` | 0.8398 | 0.8387 | 15004.6 | 6.37 | 19.1% | 76 |
 | `mandelbrot.mp4` | 0.7235 | 0.6469 | 4497.5 | 11.60 | 32.4% | 46 |
-| `real_newtons_cradle.gif` | 0.5996 | 0.5947 | 731.3 | 19.49 | 57.0% | 186 |
+| `real_newtons_cradle.gif` | 0.5996 | 0.5949 | 727.6 | 19.51 | 57.0% | 186 |
 | `real_loader.gif` | 0.5012 | 0.4766 | 258.9 | 24.00 | 76.2% | 16 |
 | `real_pendulum.gif` | 0.1906 | 0.1045 | 2059.5 | 14.99 | 228.3% | 111 |
 | `real_double_pendulum.gif` | 0.0792 | 0.0476 | 7627.0 | 9.31 | 559.1% | 92 |

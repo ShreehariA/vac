@@ -137,53 +137,52 @@ fn apply_animation(base: &ShapeState, anim: Option<&Animation>, t_ms: u32) -> Sh
         return st;
     }
 
-    // Find bracketing keyframes for time t_ms; clamp at edges.
-    let (k0, k1, p) = bracket(&anim.keyframes, t_ms);
-    let eased = anim.easing.apply(p);
-
-    // Aggregate transforms: pull each transform-kind from k0 and k1
-    // independently, since k0 may set position+scale while k1 only sets
-    // position. If a transform is absent from one side, fall back to the
-    // other (so it acts as a "hold").
-    let pos0 = first_position(k0);
-    let pos1 = first_position(k1);
-    if let Some((x, y)) = lerp_pair(pos0, pos1, eased) {
+    // Each transform kind is its own channel.  A channel interpolates
+    // between the nearest keyframes that *carry that kind*, skipping
+    // keyframes that only set other kinds, and holds its last (or first)
+    // value outside them.  Through v0.10 the renderer looked only at the
+    // two keyframes bracketing `t`, so a kind absent from both reverted to
+    // its base value — harmless while the decompiler emitted only
+    // `position`, wrong the moment it emits a second kind.
+    if let Some((x, y)) = sample_channel(anim, t_ms, first_position, |a, b, p| {
+        (a.0 + (b.0 - a.0) * p, a.1 + (b.1 - a.1) * p)
+    }) {
         st.position = Some((x, y));
     }
-
-    let s0 = first_scale(k0);
-    let s1 = first_scale(k1);
-    if let Some(s) = lerp_scalar(s0, s1, eased) {
+    if let Some(s) = sample_channel(anim, t_ms, first_scale, |a, b, p| a + (b - a) * p) {
         st.scale = s;
     }
-
-    let o0 = first_opacity(k0);
-    let o1 = first_opacity(k1);
-    if let Some(o) = lerp_scalar(o0, o1, eased) {
+    if let Some(o) = sample_channel(anim, t_ms, first_opacity, |a, b, p| a + (b - a) * p) {
         st.opacity = o;
     }
-
     st
 }
 
-fn bracket(kfs: &[Keyframe], t: u32) -> (&Keyframe, &Keyframe, f32) {
-    if t <= kfs[0].time_ms {
-        return (&kfs[0], &kfs[0], 0.0);
-    }
-    let last = kfs.last().unwrap();
-    if t >= last.time_ms {
-        return (last, last, 0.0);
-    }
-    for pair in kfs.windows(2) {
-        let a = &pair[0];
-        let b = &pair[1];
-        if t >= a.time_ms && t <= b.time_ms {
-            let span = (b.time_ms - a.time_ms).max(1) as f32;
-            let p = (t - a.time_ms) as f32 / span;
-            return (a, b, p);
+fn sample_channel<T: Copy>(
+    anim: &Animation,
+    t: u32,
+    extract: fn(&Keyframe) -> Option<T>,
+    lerp: impl Fn(T, T, f32) -> T,
+) -> Option<T> {
+    let mut before: Option<(u32, T)> = None;
+    let mut after: Option<(u32, T)> = None;
+    for k in &anim.keyframes {
+        let Some(v) = extract(k) else { continue };
+        if k.time_ms <= t {
+            before = Some((k.time_ms, v));
+        } else if after.is_none() {
+            after = Some((k.time_ms, v));
         }
     }
-    (last, last, 0.0)
+    match (before, after) {
+        (Some((t0, a)), Some((t1, b))) => {
+            let span = (t1 - t0).max(1) as f32;
+            let p = anim.easing.apply((t - t0) as f32 / span);
+            Some(lerp(a, b, p))
+        }
+        (Some((_, v)), None) | (None, Some((_, v))) => Some(v),
+        (None, None) => None,
+    }
 }
 
 fn first_position(k: &Keyframe) -> Option<(f32, f32)> {
@@ -203,25 +202,6 @@ fn first_opacity(k: &Keyframe) -> Option<f32> {
         VTransform::Opacity(o) => Some(*o),
         _ => None,
     })
-}
-
-fn lerp_pair(
-    a: Option<(f32, f32)>,
-    b: Option<(f32, f32)>,
-    t: f32,
-) -> Option<(f32, f32)> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)),
-        (Some(v), None) | (None, Some(v)) => Some(v),
-        (None, None) => None,
-    }
-}
-fn lerp_scalar(a: Option<f32>, b: Option<f32>, t: f32) -> Option<f32> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a + (b - a) * t),
-        (Some(v), None) | (None, Some(v)) => Some(v),
-        (None, None) => None,
-    }
 }
 
 fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
@@ -329,4 +309,62 @@ fn unpremultiply(src: &[u8], w: u32, h: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vac_format::Easing;
+
+    fn kf(t: u32, tr: Vec<VTransform>) -> Keyframe {
+        Keyframe { time_ms: t, transforms: tr }
+    }
+
+    fn state_at(anim: &Animation, t: u32) -> ShapeState {
+        let base = ShapeState {
+            base: Shape::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+            fill: None,
+            stroke: None,
+            position: None,
+            scale: 1.0,
+            opacity: 1.0,
+        };
+        apply_animation(&base, Some(anim), t)
+    }
+
+    /// Scale set at 0 ms and 1000 ms, position-only keyframe between.
+    /// At 750 ms scale must be interpolating 2.0 → 4.0 (3.5), not
+    /// reverting to base 1.0 because the bracketing pair lacks it.
+    #[test]
+    fn a_transform_kind_absent_from_the_bracketing_keyframes_still_interpolates() {
+        let anim = Animation {
+            target: "s".into(),
+            easing: Easing::Linear,
+            keyframes: vec![
+                kf(0, vec![VTransform::Scale(2.0), VTransform::Position(0.0, 0.0)]),
+                kf(500, vec![VTransform::Position(10.0, 0.0)]),
+                kf(1000, vec![VTransform::Scale(4.0), VTransform::Position(20.0, 0.0)]),
+            ],
+        };
+        let st = state_at(&anim, 750);
+        assert!((st.scale - 3.5).abs() < 1e-4, "scale {}", st.scale);
+        assert_eq!(st.position, Some((15.0, 0.0)));
+    }
+
+    #[test]
+    fn a_kind_set_once_holds_after_its_last_keyframe() {
+        let anim = Animation {
+            target: "s".into(),
+            easing: Easing::Linear,
+            keyframes: vec![
+                kf(0, vec![VTransform::Opacity(0.25)]),
+                kf(500, vec![VTransform::Position(10.0, 0.0)]),
+                kf(1000, vec![VTransform::Position(20.0, 0.0)]),
+            ],
+        };
+        for t in [0, 400, 800, 2000] {
+            assert_eq!(state_at(&anim, t).opacity, 0.25, "t={t}");
+        }
+        assert_eq!(state_at(&anim, 0).position, Some((10.0, 0.0)));
+    }
 }
