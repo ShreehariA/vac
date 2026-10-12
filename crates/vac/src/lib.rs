@@ -558,6 +558,23 @@ pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verifi
     ))
 }
 
+/// Score a given document — hand-edited, or produced by another version —
+/// against a video, exactly as [`verify`] scores its own decompile. This
+/// is what makes the source *editable and measurable* at once: change a
+/// `.vac` by hand, and see what it did to the reconstruction.
+pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verification> {
+    let frames = load_video_frames(path)?;
+    let source_frames = frames.len();
+    let fidelity = measure(&frames, &doc)?;
+    Ok(summarise(
+        doc,
+        fidelity,
+        source_frames,
+        Segmentation::Auto,
+        Background::Auto,
+    ))
+}
+
 fn summarise(
     doc: Document,
     fidelity: Fidelity,

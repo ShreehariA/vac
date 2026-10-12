@@ -173,6 +173,11 @@ enum Cmd {
         /// left transparent, which are not scored.
         #[arg(long, value_name = "DIR")]
         dump: Option<PathBuf>,
+        /// Measure this `.vac` file against the video instead of
+        /// decompiling it — a hand-edited source, or one written by an
+        /// older version.
+        #[arg(long, value_name = "FILE", conflicts_with = "ab")]
+        vac: Option<PathBuf>,
     },
 }
 
@@ -208,12 +213,31 @@ fn main() -> Result<()> {
             background,
             quality,
             dump,
+            vac: given,
         } => {
             let knobs = Knobs {
                 segmentation: segmentation.into(),
                 background: background.into(),
                 quality,
             };
+            if let Some(file) = &given {
+                let doc = vac::read(file).with_context(|| format!("reading {}", file.display()))?;
+                let v = vac::verify_document(&input, doc.clone())
+                    .with_context(|| format!("verifying {} against {}", file.display(), input.display()))?;
+                if json {
+                    println!("{{");
+                    println!("  \"input\": {:?},", input.display().to_string());
+                    println!("  \"vac\": {:?},", file.display().to_string());
+                    println!("  \"result\": {}", json_body(&v));
+                    println!("}}");
+                } else {
+                    print_report(&input, &v);
+                }
+                return match dump {
+                    Some(dir) => dump_document(&input, &dir, &doc),
+                    None => Ok(()),
+                };
+            }
             run_verify(&input, json, ab, !no_static_layer, knobs)?;
             match dump {
                 Some(dir) => run_dump(&input, &dir, !no_static_layer, knobs),
@@ -466,6 +490,18 @@ fn run_dump(input: &Path, dir: &Path, static_layer: bool, knobs: Knobs) -> Resul
     let frames = vac::load_video_frames(input)
         .with_context(|| format!("loading {}", input.display()))?;
     let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })?;
+    dump_frames(input, dir, &frames, &doc)
+}
+
+fn dump_document(input: &Path, dir: &Path, doc: &vac::Document) -> Result<()> {
+    let frames = vac::load_video_frames(input)
+        .with_context(|| format!("loading {}", input.display()))?;
+    dump_frames(input, dir, &frames, doc)
+}
+
+fn dump_frames(input: &Path, dir: &Path, frames: &[vac::VideoFrame], doc: &vac::Document) -> Result<()> {
+    let frames = frames.to_vec();
+    let doc = doc.clone();
     let fid = vac::measure(&frames, &doc)?;
     let recon = vac::render_aligned(&frames, &doc)?;
     let bg = vac::ink_background(&frames);
