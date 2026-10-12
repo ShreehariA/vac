@@ -83,6 +83,21 @@ jobs:
           shapes=$(grep -c '^  let shape_' target/ci/two_balls.mp4.vac || true)
           test "$shapes" = "2"
 
+      # v1.0: VAC as a codec. The quality dial must trade bytes for
+      # fidelity, and rate control must deliver a reconstruction that
+      # meets the PSNR it was asked for — measured by `verify --vac`, the
+      # same tool that scores any hand-edited source.
+      - name: Codec dial and rate control (v1.0)
+        run: |
+          cargo run --release -q -p vac-cli -- decompile target/ci/two_balls.mp4 target/ci/two_balls.q0.vac --quality 0
+          cargo run --release -q -p vac-cli -- decompile target/ci/two_balls.mp4 target/ci/two_balls.q100.vac --quality 100
+          test -s target/ci/two_balls.q0.vac
+          test "$(wc -c < target/ci/two_balls.q0.vac)" -le "$(wc -c < target/ci/two_balls.q100.vac)"
+          cargo run --release -q -p vac-cli -- decompile target/ci/two_balls.mp4 target/ci/two_balls.target.vac --target-psnr 35
+          cargo run --release -q -p vac-cli -- verify target/ci/two_balls.mp4 --vac target/ci/two_balls.target.vac --json \
+            > target/ci/two_balls.target.json
+          python3 -c 'import json,sys; d=json.load(open("target/ci/two_balls.target.json"))["result"]; p=d["psnr_db"]; print("rate-controlled two_balls: %.2f dB, %d bytes" % (p, d["vac_bytes"])); sys.exit("missed the 35 dB target: %.2f" % p) if p < 35 else None'
+
       - name: Smoke-test the rect classifier (v0.4.1)
         run: |
           cargo run --release -p vac-cli -- compile   examples/sliding_rect.vac target/ci/sliding_rect.mp4
