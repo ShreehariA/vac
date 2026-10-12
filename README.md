@@ -1614,3 +1614,32 @@ so.
 
 The bouncing ball had drifted slightly below v0.12 over the earlier
 releases (0.876 → 0.869). It's now well above it. No corpus row regressed.
+
+## v1.3 — Colour animation
+
+VAC could move, scale, turn and fade a shape, but not recolour it, and
+motion graphics recolour constantly. v1.3 adds a `fill()` keyframe
+transform, interpolated in RGB per channel like everything else:
+
+```vac
+animate ball {
+  0ms    -> position(80, 100), fill(#e04040)
+  1500ms -> position(240, 100), fill(#4060e0)
+  3s     -> position(400, 100), fill(#40c060)
+}
+```
+
+The decompiler gives a track a colour channel when its interior colour strays
+more than 24 RGB units from its median, and an opacity fade doesn't already
+explain the change. One guard came straight from measurement. On the
+Mandelbrot zoom, a region's track jumped to the pink ring around it, and the
+first draft faithfully "animated" that jump: one frame's IoU fell from 0.40
+to 0.09 while the clip's mean moved 0.005, so the gate passed. A real colour
+animation changes colour, not shape, so a colour jump that coincides with an
+area jump is now treated as a tracking change. The corpus gate also checks
+worst-frame IoU now, so a collapse like that one fails the build.
+
+| | PSNR | residual |
+|---|---|---|
+| `color_shift.vac` (new) | 28.1 → **47.1 dB** | 101.7 → **1.27** |
+| `testsrc2.mp4` | 16.84 → 16.86 dB | 1347 → 1341 |

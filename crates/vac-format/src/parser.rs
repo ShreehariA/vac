@@ -864,6 +864,11 @@ impl Parser {
     fn parse_transform(&mut self) -> Result<Transform, ParseError> {
         let (kind, span) = self.expect_ident()?;
         self.expect(&Token::LParen)?;
+        if kind == "fill" {
+            let c = self.expect_color()?;
+            self.expect(&Token::RParen)?;
+            return Ok(Transform::Fill(c));
+        }
         let nums = self.parse_number_list()?;
         self.expect(&Token::RParen)?;
         match kind.as_str() {
@@ -905,7 +910,7 @@ impl Parser {
             }
             other => Err(ParseError::syntax(
                 span,
-                format!("unknown transform `{other}` (expected position/scale/opacity/rotate)"),
+                format!("unknown transform `{other}` (expected position/scale/opacity/rotate/fill)"),
             )),
         }
     }

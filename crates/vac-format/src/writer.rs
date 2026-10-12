@@ -171,6 +171,7 @@ fn fmt_transform(t: &Transform) -> String {
         Transform::Scale(s) => format!("scale({})", fmt_num(*s)),
         Transform::Opacity(o) => format!("opacity({})", fmt_num(*o)),
         Transform::Rotate(d) => format!("rotate({})", fmt_num(*d)),
+        Transform::Fill(c) => format!("fill({})", fmt_color(c)),
     }
 }
 

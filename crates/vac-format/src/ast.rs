@@ -227,6 +227,9 @@ pub enum Transform {
     /// a rect's or ellipse's centre, a path's centroid — independent of
     /// the `position` anchor, the way CSS `transform-origin: center` is.
     Rotate(f32),
+    /// A flat fill colour (v1.3), interpolated in RGB between keyframes
+    /// that carry one — colour animation.
+    Fill(Color),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

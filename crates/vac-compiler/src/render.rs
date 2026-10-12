@@ -179,7 +179,22 @@ fn apply_animation(base: &ShapeState, anim: Option<&Animation>, t_ms: u32) -> Sh
     if let Some(r) = sample_channel(anim, t_ms, first_rotation, |a, b, p| a + (b - a) * p) {
         st.rotation = r;
     }
+    if let Some(c) = sample_channel(anim, t_ms, first_fill, |a: Color, b: Color, p| {
+        let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * p).round().clamp(0.0, 255.0) as u8;
+        Color { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }
+    }) {
+        // A colour channel sets a flat fill, replacing any gradient.
+        st.fill = Some(c);
+        st.fill_gradient = None;
+    }
     st
+}
+
+fn first_fill(k: &Keyframe) -> Option<Color> {
+    k.transforms.iter().find_map(|t| match t {
+        VTransform::Fill(c) => Some(*c),
+        _ => None,
+    })
 }
 
 fn sample_channel<T: Copy>(

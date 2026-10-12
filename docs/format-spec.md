@@ -121,6 +121,7 @@ v0.1 transforms:
 | `scale(s)` | uniform | multiplies extent about the anchor |
 | `opacity(o)` | `[0, 1]` | multiplies fill/stroke alpha |
 | `rotate(deg)` | degrees, clockwise | turns the shape about its **centre** (rect/ellipse centre, path centroid), independent of the `position` anchor — added v0.14 |
+| `fill(#rrggbb)` | colour | sets a flat fill, interpolated in RGB between keyframes that carry one; replaces a gradient fill while it applies — added v1.3 |
 
 **Gradient fills (v1.2).** `fill` takes a colour, `none`, or a two-stop
 gradient in the shape's declared coordinates, so it moves, scales and turns

@@ -64,6 +64,12 @@ fn baseline_path() -> PathBuf {
 const IOU_TOL: f64 = 0.01;
 /// Per-channel MSE tolerance, as a fraction of the recorded value.
 const RESIDUAL_TOL_FRAC: f64 = 0.05;
+/// How far the single worst frame's ink IoU may fall. Looser than the
+/// mean's tolerance (one frame is noisier than ninety), but a collapse is
+/// exactly what a mean hides: in v1.3's first draft a mis-tracked colour
+/// channel dropped `mandelbrot.mp4`'s worst frame 0.40 → 0.09 while its
+/// mean moved 0.005 and passed.
+const WORST_IOU_TOL: f64 = 0.05;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Row {
@@ -261,6 +267,12 @@ fn corpus_fidelity_matches_the_committed_baseline() {
                 failures.push(format!(
                     "{name}: ink IoU regressed {:.4} → {:.4} (tolerance {IOU_TOL})",
                     base.ink_iou, row.ink_iou
+                ));
+            }
+            if row.worst_iou < base.worst_iou - WORST_IOU_TOL {
+                failures.push(format!(
+                    "{name}: worst-frame ink IoU collapsed {:.4} → {:.4} (tolerance {WORST_IOU_TOL})",
+                    base.worst_iou, row.worst_iou
                 ));
             }
             let ceiling = base.residual * (1.0 + RESIDUAL_TOL_FRAC) + 1.0;

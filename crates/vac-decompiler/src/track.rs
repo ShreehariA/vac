@@ -475,6 +475,14 @@ const GROUND_MIN_FRACTION: f32 = 0.02;
 /// ...and fill at least this much of its bounding box.
 const GROUND_MIN_FILL: f32 = 0.75;
 
+/// A track's interior colour must stray this far (RGB distance) from its
+/// median before it carries a `fill()` colour channel (v1.3).
+const COLOUR_MIN_DEV: f32 = 24.0;
+/// A sample-to-sample colour step larger than this (RGB distance)...
+const COLOUR_MAX_JUMP: f32 = 40.0;
+/// ...is only believed if the area changes by at most this factor.
+const COLOUR_JUMP_MAX_AREA_RATIO: f32 = 1.25;
+
 /// How close a bbox edge must sit to the canvas border to count as
 /// clipped by it.
 const CLIP_EDGE_PX: f32 = 1.5;
@@ -768,6 +776,61 @@ fn emit_shape(
     })();
     let color = opacity.as_ref().map_or(color, |(_, full)| *full);
 
+    // v1.3: the colour channel. A track whose interior colour moves away
+    // from its median by more than detector noise — and not along the
+    // background→fill axis, which opacity already explains — carries a
+    // `fill()` keyframe channel. A 3-sample median filter keeps a one-frame
+    // merge from reading as a colour change.
+    let colours: Option<Vec<Color>> = (|| {
+        if opacity.is_some() || track.samples.len() < 3 {
+            return None;
+        }
+        let raw: Vec<[f32; 3]> = track
+            .samples
+            .iter()
+            .map(|(_, b)| [b.color.r as f32, b.color.g as f32, b.color.b as f32])
+            .collect();
+        let filt: Vec<[f32; 3]> = (0..raw.len())
+            .map(|i| {
+                let lo = i.saturating_sub(1);
+                let hi = (i + 2).min(raw.len());
+                let mut out = [0.0f32; 3];
+                for (k, o) in out.iter_mut().enumerate() {
+                    let v: Vec<f32> = raw[lo..hi].iter().map(|c| c[k]).collect();
+                    *o = median_f32(&v);
+                }
+                out
+            })
+            .collect();
+        // A colour animation changes colour, not shape. A jump between
+        // consecutive samples that coincides with a jump in area is the
+        // tracker latching onto a different region — on the Mandelbrot
+        // zoom a mauve region's track jumped to the pink ring around it,
+        // and painting that "colour change" covered the set (worst-frame
+        // IoU 0.40 → 0.09). Such a track keeps its median colour.
+        for i in 1..filt.len() {
+            let step = ((filt[i][0] - filt[i - 1][0]).powi(2)
+                + (filt[i][1] - filt[i - 1][1]).powi(2)
+                + (filt[i][2] - filt[i - 1][2]).powi(2))
+            .sqrt();
+            let (a0, a1) = (track.samples[i - 1].1.area as f32, track.samples[i].1.area as f32);
+            let ratio = a0.max(a1) / a0.min(a1).max(1.0);
+            if step > COLOUR_MAX_JUMP && ratio > COLOUR_JUMP_MAX_AREA_RATIO {
+                return None;
+            }
+        }
+        let med: [f32; 3] = [0, 1, 2].map(|k| median_f32(&filt.iter().map(|c| c[k]).collect::<Vec<_>>()));
+        let dev = filt
+            .iter()
+            .map(|c| ((c[0] - med[0]).powi(2) + (c[1] - med[1]).powi(2) + (c[2] - med[2]).powi(2)).sqrt())
+            .fold(0.0f32, f32::max);
+        (dev >= COLOUR_MIN_DEV).then(|| {
+            filt.iter()
+                .map(|c| Color::rgb(c[0].round() as u8, c[1].round() as u8, c[2].round() as u8))
+                .collect()
+        })
+    })();
+
     // v0.14: the rotation channel, in degrees. Principal-axis angles are
     // only defined modulo 180°, so the series is unwrapped to the nearest
     // turn of its predecessor before anything reads it. Rect and ellipse
@@ -829,7 +892,7 @@ fn emit_shape(
     // for shapes whose look one frame can stand for: a rotating, scaling
     // or fading track would need its shading re-expressed per channel.
     let gradient: Option<vac_format::Gradient> = (|| {
-        if rotated || scales.is_some() || opacity.is_some() {
+        if rotated || scales.is_some() || opacity.is_some() || colours.is_some() {
             return None;
         }
         let rep = representative_sample(track);
@@ -898,6 +961,15 @@ fn emit_shape(
         let levels: Vec<f32> = al.iter().map(|a| a * 255.0).collect();
         keep.extend(rdp_1d(&times, &levels, tol.opacity_levels));
     }
+    if let Some(cols) = &colours {
+        for k in 0..3 {
+            let ch: Vec<f32> = cols
+                .iter()
+                .map(|c| [c.r, c.g, c.b][k] as f32)
+                .collect();
+            keep.extend(rdp_1d(&times, &ch, tol.opacity_levels));
+        }
+    }
     if let Some(rot) = &rotation {
         // Tolerance in pixels at the shape's tip, like position.
         let reach = rx.max(ry).max(1.0);
@@ -919,7 +991,11 @@ fn emit_shape(
     // keyframes to stay centred.
     let emit_pos = !stationary || (scales.is_some() && kind == ShapeKind::Rect);
     let has_channels = (keep.len() >= 2
-        && (emit_pos || scales.is_some() || opacity.is_some() || rotation.is_some()))
+        && (emit_pos
+            || scales.is_some()
+            || opacity.is_some()
+            || rotation.is_some()
+            || colours.is_some()))
         || (keep.len() == 1 && rotation.is_some());
 
     // Lifetime.  A track first seen after the clip starts, or last seen
@@ -1015,6 +1091,9 @@ fn emit_shape(
                 }
                 if let Some(rot) = &rotation {
                     transforms.push(Transform::Rotate((rot[i] * 10.0).round() / 10.0));
+                }
+                if let Some(cols) = &colours {
+                    transforms.push(Transform::Fill(cols[i]));
                 }
                 Keyframe {
                     time_ms: t,

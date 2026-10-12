@@ -170,6 +170,7 @@ fn assert_well_formed(sample: &str, doc: &Document) {
                                 Transform::Rotate(d) => {
                                     assert!(d.is_finite(), "{sample}: non-finite rotation")
                                 }
+                                Transform::Fill(_) => {}
                                 Transform::Opacity(o) => assert!(
                                     o.is_finite() && (0.0..=1.0).contains(o),
                                     "{sample}: opacity {o} outside [0,1]"

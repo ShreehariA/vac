@@ -185,6 +185,16 @@ always true; only one of them was measurable.
   IoU 0.869 → **0.885** (now above v0.12's 0.876). `shaded.vac` (new)
   residual 390 → **21**. No row regressed.
 
+- **v1.3 — colour animation.** A `fill(#rrggbb)` keyframe transform,
+  interpolated in RGB like any other channel. A track whose interior colour
+  strays more than 24 units from its median carries the channel, unless an
+  opacity fade already explains it. A colour jump that coincides with an area
+  jump is the tracker changing regions, not a colour animation. The first
+  draft painted one such jump on the Mandelbrot zoom and collapsed its worst
+  frame from 0.40 to 0.09 IoU, while the mean moved 0.005 and passed. The
+  corpus gate now checks worst-frame IoU too. `color_shift.vac` (new)
+  residual 101.7 → **1.27** (28.1 → 47.1 dB).
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with

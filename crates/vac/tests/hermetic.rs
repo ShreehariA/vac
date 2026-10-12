@@ -124,6 +124,7 @@ const IOU_TOL: f64 = 0.01;
 /// Recorded hermetic scores: (fixture, ink_iou, residual).
 const BASELINE: &[(&str, f64, f64)] = &[
     ("ball.vac", 0.9986, 0.04),
+    ("color_shift.vac", 0.9965, 1.27),
     ("crossing.vac", 0.9459, 1.87),
     ("diagonal.vac", 0.9914, 0.76),
     ("fade.vac", 1.0000, 0.01),

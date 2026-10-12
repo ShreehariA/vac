@@ -399,6 +399,67 @@ fn shaded_fills_are_recovered_as_gradients() {
     assert!(fid.residual < 40.0, "shaded.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.3 — colour animation.** VAC could move, scale, turn and
+/// fade a shape but not recolour it, so `color_shift.vac`'s ball (red →
+/// blue → green) and pulsing square came back as one average colour each
+/// (residual 101.7). Each recovered `fill()` keyframe is checked against
+/// the source's own colour curve at that time.
+#[test]
+fn colour_animation_is_recovered_along_the_source_curve() {
+    let (source, recovered, fid) = hermetic("color_shift.vac");
+    println!("{}\n{fid}", vac::to_string(&recovered));
+    fn curves(d: &Document) -> Vec<Vec<(u32, vac::Color)>> {
+        d.scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .filter_map(|st| match st {
+                Statement::Animate(a) => Some(
+                    a.keyframes
+                        .iter()
+                        .filter_map(|k| {
+                            k.transforms.iter().find_map(|t| match t {
+                                Transform::Fill(c) => Some((k.time_ms, *c)),
+                                _ => None,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .filter(|c: &Vec<(u32, vac::Color)>| !c.is_empty())
+            .collect()
+    }
+    fn at(c: &[(u32, vac::Color)], t: u32) -> [f32; 3] {
+        let rgb = |c: vac::Color| [c.r as f32, c.g as f32, c.b as f32];
+        let i = c.iter().position(|&(kt, _)| kt >= t).unwrap_or(c.len() - 1);
+        if i == 0 || c[i].0 <= t {
+            return rgb(c[i].1);
+        }
+        let ((t0, a), (t1, b)) = (c[i - 1], c[i]);
+        let p = (t - t0) as f32 / (t1 - t0) as f32;
+        let (a, b) = (rgb(a), rgb(b));
+        [a[0] + (b[0] - a[0]) * p, a[1] + (b[1] - a[1]) * p, a[2] + (b[2] - a[2]) * p]
+    }
+    let src = curves(&source);
+    let got = curves(&recovered);
+    assert_eq!(got.len(), 2, "both shapes should carry a colour channel");
+    for g in &got {
+        let err = src
+            .iter()
+            .map(|s| {
+                g.iter()
+                    .map(|&(t, c)| {
+                        let w = at(s, t);
+                        ((c.r as f32 - w[0]).powi(2) + (c.g as f32 - w[1]).powi(2) + (c.b as f32 - w[2]).powi(2)).sqrt()
+                    })
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(err <= 12.0, "recovered colours stray {err:.1} from the source curve: {g:?}");
+    }
+    assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
+}
+
 /// **DEFECT — strokes are never recovered.**
 ///
 /// `emit_shape` writes `stroke = none` unconditionally, and the renderer

@@ -1,0 +1,37 @@
+// Fixture (v1.3): colour animation.
+//
+// The ball changes colour as it travels; the square pulses between two
+// colours in place. Through v1.2 VAC had no way to say either, so both
+// came back as a single average colour.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #12141a
+
+  let ball = ellipse(80, 100, 30, 30)
+  ball.fill = #e04040
+  ball.stroke = none
+
+  animate ball {
+    0ms    -> position(80, 100), fill(#e04040)
+    1500ms -> position(240, 100), fill(#4060e0)
+    3s     -> position(400, 100), fill(#40c060)
+    easing: linear
+  }
+
+  let square = rect(200, 200, 80, 80)
+  square.fill = #f0c030
+  square.stroke = none
+
+  animate square {
+    0ms    -> fill(#f0c030)
+    1s     -> fill(#9040c0)
+    2s     -> fill(#f0c030)
+    3s     -> fill(#9040c0)
+    easing: linear
+  }
+}
