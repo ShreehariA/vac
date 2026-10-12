@@ -142,6 +142,9 @@ fn flatten_path(segs: &[PathSeg]) -> Vec<(f32, f32)> {
 pub enum Property {
     Fill,
     Stroke,
+    /// Stroke width in pixels (v1.4), in the shape's declared coordinates.
+    /// Unset, the renderer strokes at 2 px, as every version before did.
+    StrokeWidth,
 }
 
 impl Property {
@@ -149,6 +152,7 @@ impl Property {
         match self {
             Property::Fill => "fill",
             Property::Stroke => "stroke",
+            Property::StrokeWidth => "stroke_width",
         }
     }
 
@@ -156,6 +160,7 @@ impl Property {
         match s {
             "fill" => Some(Property::Fill),
             "stroke" => Some(Property::Stroke),
+            "stroke_width" => Some(Property::StrokeWidth),
             _ => None,
         }
     }
@@ -167,6 +172,8 @@ pub enum Value {
     /// A two-stop gradient fill (v1.2), in the shape's declared
     /// coordinates — it moves, scales and turns with the shape.
     Gradient(Gradient),
+    /// A plain number, e.g. `stroke_width = 3` (v1.4).
+    Number(f32),
     /// Explicit "no value", e.g. `stroke = none`.
     None,
 }

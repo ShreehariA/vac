@@ -56,26 +56,28 @@ fn the_quality_dial_trades_bytes_for_fidelity() {
     }
 }
 
-/// Asking for less fidelity than the default delivers must cost fewer
-/// bytes than the default, and still meet the target.
+/// Asking only for the fidelity quality 0 delivers must cost no more than
+/// quality 0 does — and, on a fixture where the default spends more, fewer
+/// bytes than the default. (A target "1.5 dB under the default" was the
+/// first version of this test; it depends on the curve having a point in
+/// that band, and after v1.4's sub-pixel positions `spin.vac`'s curve jumps
+/// straight from 28.2 dB to 34.4 dB.)
 #[test]
 fn rate_control_meets_a_reachable_target_with_fewer_bytes() {
     let frames = fixture_frames("spin.vac");
+    let (b0, _) = point(&frames, 0.0);
     let (b50, _) = point(&frames, 50.0);
-    let default_psnr = {
-        let doc = vac::decompile_frames(frames.clone(), &DecompileOptions::default()).unwrap();
+    assert!(b0 < b50, "fixture premise: quality 0 is cheaper ({b0} vs {b50})");
+    let q0_psnr = {
+        let opts = DecompileOptions { quality: 0.0, ..Default::default() };
+        let doc = vac::decompile_frames(frames.clone(), &opts).unwrap();
         vac::measure(&frames, &doc).unwrap().psnr_db
     };
-    let target = default_psnr - 1.5;
-    let rc = vac::decompile_to_target(frames.clone(), &DecompileOptions::default(), target).unwrap();
+    let rc = vac::decompile_to_target(frames.clone(), &DecompileOptions::default(), q0_psnr).unwrap();
     println!("{:?}", rc.probes);
-    assert!(rc.met, "target {target:.2} dB should be reachable");
-    assert!(rc.fidelity.psnr_db >= target);
-    assert!(
-        rc.vac_bytes < b50,
-        "a looser target must cost fewer bytes than the default: {} vs {b50}",
-        rc.vac_bytes
-    );
+    assert!(rc.met, "target {q0_psnr:.2} dB is reachable by construction");
+    assert!(rc.vac_bytes <= b0, "rate control spent {} bytes; quality 0 needs {b0}", rc.vac_bytes);
+    assert!(rc.vac_bytes < b50);
 }
 
 /// An unreachable target returns the most faithful probe, flagged.

@@ -134,6 +134,11 @@ panel.fill = gradient(linear, #203a6a at 40,85, #7fb0f0 at 440,85)
 
 Colours pad beyond both stops. Strokes take a colour or `none` only.
 
+**Stroke width (v1.4).** `shape.stroke_width = 3` sets the stroke width in
+pixels, in declared coordinates (it scales with the shape). The stroke is
+centred on the outline, half inside and half outside. Unset, strokes are
+2 px, as in every earlier version.
+
 v0.1 easings: `linear`, `ease-in`, `ease-out`, `ease-in-out`.
 
 **Each transform kind is its own channel (v0.11).** For transform kind `V`,

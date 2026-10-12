@@ -25,6 +25,8 @@ struct ShapeState {
     /// A gradient fill (v1.2); when set it takes the place of `fill`.
     fill_gradient: Option<Gradient>,
     stroke: Option<Color>,
+    /// Stroke width, pixels (v1.4; 2.0 when unset, as before).
+    stroke_width: f32,
     /// Absolute world position (anchor point) — overrides the shape's
     /// declared position when set by an `animate` block.
     position: Option<(f32, f32)>,
@@ -40,6 +42,7 @@ impl ShapeState {
             base,
             fill: Some(Color::rgb(0, 0, 0)),
             fill_gradient: None,
+            stroke_width: 2.0,
             stroke: None,
             position: None,
             scale: 1.0,
@@ -103,6 +106,18 @@ fn render_scene(doc: &Document, scene: &Scene) -> Result<Vec<RenderedFrame>, Com
                         )))
                     }
                     (Property::Stroke, Value::None) => st.stroke = None,
+                    (Property::StrokeWidth, Value::Number(n)) => st.stroke_width = n.max(0.0),
+                    (Property::StrokeWidth, other) => {
+                        return Err(CompileError::Render(format!(
+                            "`{target}.stroke_width` takes a number, got {other:?}"
+                        )))
+                    }
+                    (prop @ (Property::Fill | Property::Stroke), Value::Number(n)) => {
+                        return Err(CompileError::Render(format!(
+                            "`{target}.{}` takes a colour, got the number {n}",
+                            prop.as_str()
+                        )))
+                    }
                 }
             }
             Statement::Animate(a) => {
@@ -337,7 +352,7 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
         let a = (stroke.a as f32 * state.opacity.clamp(0.0, 1.0)) as u8;
         paint.set_color_rgba8(stroke.r, stroke.g, stroke.b, a);
         let stroke_settings = tiny_skia::Stroke {
-            width: 2.0,
+            width: state.stroke_width,
             ..Default::default()
         };
         pixmap.stroke_path(&path, &paint, &stroke_settings, transform, None);
@@ -414,6 +429,7 @@ mod tests {
             base: Shape::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
             fill: None,
             fill_gradient: None,
+            stroke_width: 2.0,
             stroke: None,
             position: None,
             scale: 1.0,

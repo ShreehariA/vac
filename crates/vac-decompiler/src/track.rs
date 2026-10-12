@@ -358,23 +358,29 @@ pub fn build_document(
             segmentation: seg,
         }];
         let plate_frames = [plate];
+        let as_track = |idx: usize, blob: &Blob| Track {
+            id: idx,
+            samples: vec![(0, *blob)],
+            frame_indices: vec![0],
+            last_seen_frame: 0,
+            active: false,
+        };
+        let scenery: Vec<Track> = blobs.iter().enumerate().map(|(i, b)| as_track(i, b)).collect();
+        let (inner_fill, absorbed) = pair_outlines(&scenery);
         let mut n = 0usize;
         for (idx, blob) in blobs.iter().enumerate() {
-            let scenery = Track {
-                id: idx,
-                samples: vec![(0, *blob)],
-                frame_indices: vec![0],
-                last_seen_frame: 0,
-                active: false,
-            };
+            if absorbed[idx] {
+                continue;
+            }
             let mut stmts = Vec::new();
             emit_shape(
                 &mut stmts,
                 &format!("static_{n}"),
-                &scenery,
+                &scenery[idx],
                 &plate_frames,
                 &plate_dets,
                 tol,
+                inner_fill[idx],
             );
             // Scenery is on screen for the whole clip.
             let removed = blob.area as f64
@@ -399,8 +405,12 @@ pub fn build_document(
             .then_with(|| a.samples[0].0.cmp(&b.samples[0].0))
     });
 
+    let (inner_fill, absorbed) = pair_outlines(&tracks);
     let mut n = 0usize;
-    for track in &tracks {
+    for (ti, track) in tracks.iter().enumerate() {
+        if absorbed[ti] {
+            continue;
+        }
         let mut stmts = Vec::new();
         emit_shape(
             &mut stmts,
@@ -409,6 +419,7 @@ pub fn build_document(
             frames,
             detections,
             tol,
+            inner_fill[ti],
         );
         let removed: f64 = track
             .samples
@@ -483,6 +494,22 @@ const COLOUR_MAX_JUMP: f32 = 40.0;
 /// ...is only believed if the area changes by at most this factor.
 const COLOUR_JUMP_MAX_AREA_RATIO: f32 = 1.25;
 
+/// A blob is an outline when its enclosed hole is at least this fraction of
+/// its filled area (v1.4).
+const RING_MIN_HOLE_FRACTION: f32 = 0.3;
+/// An outline and the fill it frames must be centred within this many
+/// pixels of each other...
+const PAIR_MAX_OFFSET_PX: f32 = 2.5;
+/// ...and the fill must cover at least this fraction of the outline's hole.
+const PAIR_MIN_HOLE_COVER: f32 = 0.6;
+
+/// Offset from a pixel index to that pixel's centre in continuous
+/// coordinates.
+const PIXEL_CENTRE: f32 = 0.5;
+
+/// Clearance beyond the canvas edge for a shape held off-canvas.
+const OFF_CANVAS_MARGIN_PX: f32 = 1.0;
+
 /// How close a bbox edge must sit to the canvas border to count as
 /// clipped by it.
 const CLIP_EDGE_PX: f32 = 1.5;
@@ -494,6 +521,7 @@ fn emit_shape(
     frames: &[VideoFrame],
     detections: &[Detection],
     tol: &Tolerances,
+    inner_fill: Option<Color>,
 ) {
     let name = name.to_string();
     // Majority-vote the shape kind across all samples of the track.
@@ -506,11 +534,37 @@ fn emit_shape(
     let rys: Vec<f32> = track.samples.iter().map(|(_, b)| b.ry).collect();
     let mut rx = round_to_int(median_f32(&rxs));
     let mut ry = round_to_int(median_f32(&rys));
+    // v1.4: outlines. A blob enclosing a large hole whose filled outline is
+    // a genuine rect or ellipse is that primitive *stroked*, not filled: an
+    // outlined box used to come back as a small filled ellipse. Its stroke
+    // width follows from the ring's area and outer size.
+    let ring_samples: Vec<&Blob> = track.samples.iter().map(|(_, b)| b).filter(|b| is_outline(b)).collect();
+    let ring_width: Option<f32> = (ring_samples.len() * 2 > track.samples.len()).then(|| {
+        let rect_votes = ring_samples
+            .iter()
+            .filter(|b| b.filled_iou_rect >= b.filled_iou_ellipse)
+            .count();
+        kind = if rect_votes * 2 >= ring_samples.len() {
+            ShapeKind::Rect
+        } else {
+            ShapeKind::Ellipse
+        };
+        let ts: Vec<f32> = ring_samples
+            .iter()
+            .map(|b| {
+                // Coverage-weighted area when the detector could read it.
+                let area = if b.soft_area > 0.0 { b.soft_area } else { b.area as f32 };
+                ring_thickness(b.rx, b.ry, area, kind)
+            })
+            .collect();
+        round_half(median_f32(&ts)).max(1.0)
+    });
     // v0.14: a rect/ellipse track is *rotated* when most of its samples
     // were fitted best by an oriented primitive. Its size is then measured
     // along its own axes from the second moments — the bbox of a turning
     // bar says nothing about the bar — and its angle becomes a channel.
-    let rotated = matches!(kind, ShapeKind::Rect | ShapeKind::Ellipse)
+    let rotated = ring_width.is_none()
+        && matches!(kind, ShapeKind::Rect | ShapeKind::Ellipse)
         && track.samples.iter().filter(|(_, b)| b.angle_deg != 0.0).count() * 2
             > track.samples.len();
     if rotated {
@@ -531,7 +585,7 @@ fn emit_shape(
     // moving shape ~1 px wide and grew `two_balls`' radius by a pixel per
     // round trip. Samples clipped by the canvas edge under-measure, so
     // they are left out when any unclipped sample exists.
-    if !rotated && matches!(kind, ShapeKind::Rect | ShapeKind::Ellipse) {
+    if ring_width.is_none() && !rotated && matches!(kind, ShapeKind::Rect | ShapeKind::Ellipse) {
         let frame_wh = frames.first().map(|f| (f.width as f32, f.height as f32));
         let inside = |b: &Blob| {
             frame_wh.is_none_or(|(w, h)| {
@@ -575,6 +629,23 @@ fn emit_shape(
             rx = round_tenth(median_f32(&xs)).max(0.5);
             ry = round_tenth(median_f32(&ys)).max(0.5);
         }
+    }
+    // An outline is drawn along its centreline: half the stroke inside,
+    // half outside, as the renderer strokes.
+    // The outer edge is read by coverage too, when the detector could: the
+    // thresholded bbox sits ~½ px outside a codec-blurred edge, which
+    // pushed `outlined_ui`'s card border half a pixel out.
+    if let Some(t) = ring_width {
+        let outer_x: Vec<f32> = ring_samples
+            .iter()
+            .map(|b| if b.soft_w > 0.0 { b.soft_w * 0.5 } else { b.rx })
+            .collect();
+        let outer_y: Vec<f32> = ring_samples
+            .iter()
+            .map(|b| if b.soft_h > 0.0 { b.soft_h * 0.5 } else { b.ry })
+            .collect();
+        rx = round_tenth(median_f32(&outer_x) - t * 0.5).max(0.5);
+        ry = round_tenth(median_f32(&outer_y) - t * 0.5).max(0.5);
     }
     let color = median_color(track.samples.iter().map(|(_, b)| b.color));
     let (first_t, first_b) = track.samples[0];
@@ -654,11 +725,18 @@ fn emit_shape(
         u.ry = u.ry.max(bry);
         u
     };
+    // Rect and ellipse anchors live in continuous coordinates: a blob's
+    // centroid is a mean of pixel *indices*, half a pixel short of the
+    // pixel centres it stands for (`PIXEL_CENTRE`). Whole-pixel rounding
+    // used to hide that by luck; at tenth-pixel precision it put every
+    // shape ½ px up and left. Paths are traced in index coordinates and
+    // stay consistent with themselves.
     let anchor_xy = |b: &Blob| -> (f32, f32) {
         let b = &unclip(b);
         match kind {
-            ShapeKind::Ellipse | ShapeKind::Path => (b.cx, b.cy),
-            ShapeKind::Rect => (b.cx - rx, b.cy - ry),
+            ShapeKind::Path => (b.cx, b.cy),
+            ShapeKind::Ellipse => (b.cx + PIXEL_CENTRE, b.cy + PIXEL_CENTRE),
+            ShapeKind::Rect => (b.cx + PIXEL_CENTRE - rx, b.cy + PIXEL_CENTRE - ry),
         }
     };
 
@@ -682,6 +760,7 @@ fn emit_shape(
     let scales: Option<Vec<f32>> = (|| {
         if kind == ShapeKind::Path
             || rotated
+            || ring_width.is_some()
             || track.samples.len() < 3
             || track.samples.iter().any(|(_, b)| touches_edge(b))
         {
@@ -735,7 +814,10 @@ fn emit_shape(
     // onto that segment.  If any sample sits off the segment the colour
     // is changing hue, not fading, and no opacity is claimed.
     let opacity: Option<(Vec<f32>, Color)> = (|| {
-        if track.samples.len() < 3 || track.frame_indices.len() != track.samples.len() {
+        if ring_width.is_some()
+            || track.samples.len() < 3
+            || track.frame_indices.len() != track.samples.len()
+        {
             return None;
         }
         let rgb = |c: Color| [c.r as f32, c.g as f32, c.b as f32];
@@ -782,7 +864,7 @@ fn emit_shape(
     // `fill()` keyframe channel. A 3-sample median filter keeps a one-frame
     // merge from reading as a colour change.
     let colours: Option<Vec<Color>> = (|| {
-        if opacity.is_some() || track.samples.len() < 3 {
+        if opacity.is_some() || ring_width.is_some() || track.samples.len() < 3 {
             return None;
         }
         let raw: Vec<[f32; 3]> = track
@@ -873,14 +955,14 @@ fn emit_shape(
 
     let shape = match kind {
         ShapeKind::Ellipse => Shape::Ellipse {
-            cx: round_to_int(base_cx),
-            cy: round_to_int(base_cy),
+            cx: round_pos(base_cx + PIXEL_CENTRE),
+            cy: round_pos(base_cy + PIXEL_CENTRE),
             rx,
             ry,
         },
         ShapeKind::Rect => Shape::Rect {
-            x: round_to_int(base_cx - rx),
-            y: round_to_int(base_cy - ry),
+            x: round_pos(base_cx + PIXEL_CENTRE - rx),
+            y: round_pos(base_cy + PIXEL_CENTRE - ry),
             w: 2.0 * rx,
             h: 2.0 * ry,
         },
@@ -892,7 +974,7 @@ fn emit_shape(
     // for shapes whose look one frame can stand for: a rotating, scaling
     // or fading track would need its shading re-expressed per channel.
     let gradient: Option<vac_format::Gradient> = (|| {
-        if rotated || scales.is_some() || opacity.is_some() || colours.is_some() {
+        if rotated || scales.is_some() || opacity.is_some() || colours.is_some() || ring_width.is_some() {
             return None;
         }
         let rep = representative_sample(track);
@@ -934,16 +1016,29 @@ fn emit_shape(
     statements.push(Statement::Assign {
         target: name.clone(),
         property: Property::Fill,
-        value: match gradient {
-            Some(g) => Value::Gradient(g),
-            None => Value::Color(color),
+        value: match (ring_width, gradient) {
+            // An outline paired with the fill it frames (v1.4) is one
+            // shape: the fill runs to the stroke's centreline, under it.
+            (Some(_), _) => inner_fill.map_or(Value::None, Value::Color),
+            (None, Some(g)) => Value::Gradient(g),
+            (None, None) => Value::Color(color),
         },
     });
     statements.push(Statement::Assign {
         target: name.clone(),
         property: Property::Stroke,
-        value: Value::None,
+        value: match ring_width {
+            Some(_) => Value::Color(color),
+            None => Value::None,
+        },
     });
+    if let Some(t) = ring_width {
+        statements.push(Statement::Assign {
+            target: name.clone(),
+            property: Property::StrokeWidth,
+            value: Value::Number(t),
+        });
+    }
 
     // Simplify the *unclipped* trajectory, so an edge-clipped entry is
     // not mistaken for a slow start.
@@ -1029,14 +1124,18 @@ fn emit_shape(
         } else {
             (rx, ry)
         };
+        // A full pixel of clearance: at sub-pixel precision a shape parked
+        // exactly at the edge leaves a half-covered column on screen, which
+        // the renderer anti-aliases into visible ink on frames the source
+        // shows empty (`late_entry.vac` frame 0: IoU 0).
         if b.cx - b.rx <= CLIP_EDGE_PX {
-            cx = -ox;
+            cx = -ox - OFF_CANVAS_MARGIN_PX;
         } else if b.cx + b.rx >= w - CLIP_EDGE_PX {
-            cx = w + ox;
+            cx = w + ox + OFF_CANVAS_MARGIN_PX;
         } else if b.cy - b.ry <= CLIP_EDGE_PX {
-            cy = -oy;
+            cy = -oy - OFF_CANVAS_MARGIN_PX;
         } else if b.cy + b.ry >= h - CLIP_EDGE_PX {
-            cy = h + oy;
+            cy = h + oy + OFF_CANVAS_MARGIN_PX;
         } else {
             return None;
         }
@@ -1047,7 +1146,7 @@ fn emit_shape(
             ry,
             ..*b
         });
-        Some((round_to_int(ax), round_to_int(ay)))
+        Some((round_pos(ax), round_pos(ay)))
     };
     let enter_via_edge = prev_frame.and(if emit_pos { off(&first_b) } else { None });
     let exit_via_edge = next_frame.and(if emit_pos { off(&last_b) } else { None });
@@ -1077,11 +1176,14 @@ fn emit_shape(
                 let mut transforms = Vec::with_capacity(3);
                 if emit_pos {
                     let (ax, ay) = match (kind, s) {
-                        (ShapeKind::Rect, Some(s)) => (b.cx - rx * s, b.cy - ry * s),
-                        (_, _) if stationary => (base_cx, base_cy),
+                        (ShapeKind::Rect, Some(s)) => {
+                            (b.cx + PIXEL_CENTRE - rx * s, b.cy + PIXEL_CENTRE - ry * s)
+                        }
+                        (ShapeKind::Path, _) if stationary => (base_cx, base_cy),
+                        (_, _) if stationary => (base_cx + PIXEL_CENTRE, base_cy + PIXEL_CENTRE),
                         _ => anchor_xy(&b),
                     };
-                    transforms.push(Transform::Position(round_to_int(ax), round_to_int(ay)));
+                    transforms.push(Transform::Position(round_pos(ax), round_pos(ay)));
                 }
                 if let Some(s) = s {
                     transforms.push(Transform::Scale((s * 1000.0).round() / 1000.0));
@@ -1191,6 +1293,83 @@ fn representative_sample(track: &Track) -> usize {
     let mut order: Vec<usize> = (0..track.samples.len()).collect();
     order.sort_by_key(|&i| track.samples[i].1.area);
     order[order.len() / 2]
+}
+
+/// A blob enclosing a large hole whose filled outline is a genuine rect or
+/// ellipse: an outline (v1.4).
+fn is_outline(b: &Blob) -> bool {
+    b.hole_area as f32 >= RING_MIN_HOLE_FRACTION * (b.area + b.hole_area) as f32
+        && b.filled_iou_rect.max(b.filled_iou_ellipse) >= crate::detect::PRIMITIVE_MIN_IOU
+}
+
+fn is_outline_track(t: &Track) -> bool {
+    t.samples.iter().filter(|(_, b)| is_outline(b)).count() * 2 > t.samples.len()
+}
+
+/// Pair each outline track with the fill track it frames — one that sits
+/// in its hole, centred on it, through most of both lifetimes — so the two
+/// are emitted as one shape with a fill and a stroke. Returns, per track,
+/// the fill colour an outline takes on, and whether a fill was absorbed.
+///
+/// A bordered card is drawn as a fill with a stroke over its edge, so the
+/// visible fill stops short of the stroke's inner edge. Emitted apart, an
+/// accurate (thinner) stroke left a dark gap between border and card on
+/// `outlined_ui.mp4`; emitted as one shape, the fill runs under the stroke.
+fn pair_outlines(tracks: &[Track]) -> (Vec<Option<Color>>, Vec<bool>) {
+    let mut inner: Vec<Option<Color>> = vec![None; tracks.len()];
+    let mut absorbed = vec![false; tracks.len()];
+    for (ri, r) in tracks.iter().enumerate() {
+        if absorbed[ri] || !is_outline_track(r) {
+            continue;
+        }
+        let by_frame: std::collections::HashMap<usize, &Blob> = r
+            .frame_indices
+            .iter()
+            .zip(&r.samples)
+            .map(|(&fi, (_, b))| (fi, b))
+            .collect();
+        for (fi_idx, f) in tracks.iter().enumerate() {
+            if fi_idx == ri || absorbed[fi_idx] || inner[fi_idx].is_some() || is_outline_track(f) {
+                continue;
+            }
+            let matched = f
+                .frame_indices
+                .iter()
+                .zip(&f.samples)
+                .filter(|(fi, (_, fb))| {
+                    by_frame.get(fi).is_some_and(|rb| {
+                        (rb.cx - fb.cx).abs() <= PAIR_MAX_OFFSET_PX
+                            && (rb.cy - fb.cy).abs() <= PAIR_MAX_OFFSET_PX
+                            && fb.rx <= rb.rx
+                            && fb.ry <= rb.ry
+                            && fb.area as f32 >= PAIR_MIN_HOLE_COVER * rb.hole_area as f32
+                    })
+                })
+                .count();
+            if matched * 5 >= f.samples.len() * 4 && matched * 2 >= r.samples.len() {
+                inner[ri] = Some(median_color(f.samples.iter().map(|(_, b)| b.color)));
+                absorbed[fi_idx] = true;
+                break;
+            }
+        }
+    }
+    (inner, absorbed)
+}
+
+/// Stroke thickness of an outline from its outer half-extents and ring
+/// area: a rect ring `W×H` of thickness `t` has area `2t(W+H) − 4t²`, an
+/// ellipse ring with semi-axes `a, b` has `π(t(a+b) − t²)`; solve for `t`.
+fn ring_thickness(rx: f32, ry: f32, area: f32, kind: ShapeKind) -> f32 {
+    match kind {
+        ShapeKind::Rect => {
+            let s = 2.0 * rx + 2.0 * ry;
+            ((s - (s * s - 4.0 * area).max(0.0).sqrt()) / 4.0).max(0.5)
+        }
+        _ => {
+            let s = rx + ry;
+            ((s - (s * s - 4.0 * area / std::f32::consts::PI).max(0.0).sqrt()) / 2.0).max(0.5)
+        }
+    }
 }
 
 /// Round to a tenth of a pixel: coverage sizing measures sub-pixel extents,
@@ -1611,6 +1790,13 @@ fn median_color(it: impl Iterator<Item = Color>) -> Color {
     Color::rgb(rs[rs.len() / 2], gs[gs.len() / 2], bs[bs.len() / 2])
 }
 
+/// Positions are written to a tenth of a pixel (v1.4). Whole pixels
+/// misplaced a 3 px border's half-pixel centreline by ½ px on every frame,
+/// a large squared error along a high-contrast edge.
+fn round_pos(x: f32) -> f32 {
+    (x * 10.0).round() / 10.0
+}
+
 fn round_to_int(x: f32) -> f32 {
     x.round()
 }
@@ -1696,7 +1882,11 @@ mod tests {
             soft_var_y: 144.0,
             soft_w: 48.0,
             soft_h: 48.0,
+            soft_area: 1800.0,
             fit_iou: 0.97,
+            hole_area: 0,
+            filled_iou_rect: 0.785,
+            filled_iou_ellipse: 0.97,
         }
     }
 
@@ -1947,7 +2137,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[], &Tolerances::default());
+        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[], &Tolerances::default(), None);
 
         assert!(
             !statements
@@ -1983,7 +2173,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[], &Tolerances::default());
+        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[], &Tolerances::default(), None);
 
         assert!(
             statements

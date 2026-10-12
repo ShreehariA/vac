@@ -460,35 +460,65 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
-/// **DEFECT — strokes are never recovered.**
+/// **FIXED in v1.4 — outlines come back as strokes.**
 ///
-/// `emit_shape` writes `stroke = none` unconditionally, and the renderer
-/// hard-codes stroke width at 2.0 with no way to express it in source.
-/// A stroked shape comes back as a bare fill.
+/// Through v1.3 the decompiler wrote `stroke = none` for everything: an
+/// outlined box came back as a small filled ellipse, and a card's border
+/// was lost. A blob enclosing a large hole whose filled outline is a
+/// genuine rect or ellipse is now that primitive *stroked*, at its
+/// centreline, with its width solved from its coverage-weighted area; and
+/// an outline that frames a fill moving with it becomes one shape with
+/// both.
 #[test]
-fn strokes_are_never_recovered() {
-    for sample in ["ball.vac", "triangle.vac"] {
-        let (_, recovered, _) = hermetic(sample);
-        let strokes: Vec<_> = recovered
-            .scenes
-            .iter()
-            .flat_map(|s| &s.statements)
-            .filter_map(|st| match st {
-                Statement::Assign {
-                    property: vac::Property::Stroke,
-                    value,
-                    ..
-                } => Some(value.clone()),
+fn outlines_are_recovered_as_strokes() {
+    let (_, recovered, fid) = hermetic("outlined.vac");
+    println!("{}\n{fid}", vac::to_string(&recovered));
+    // (fill, stroke, stroke_width, shape) per declared shape.
+    let mut shapes: Vec<(Option<vac::Value>, Option<vac::Value>, Option<f32>, vac::Shape)> = Vec::new();
+    let stmts: Vec<&Statement> = recovered.scenes.iter().flat_map(|s| &s.statements).collect();
+    for st in &stmts {
+        if let Statement::Let { name, shape } = st {
+            if name == "bg" {
+                continue;
+            }
+            let prop = |p: vac::Property| {
+                stmts.iter().find_map(|s| match s {
+                    Statement::Assign { target, property, value } if target == name && *property == p => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                })
+            };
+            let width = match prop(vac::Property::StrokeWidth) {
+                Some(vac::Value::Number(n)) => Some(n),
                 _ => None,
-            })
-            .collect();
-        assert!(
-            !strokes.is_empty(),
-            "{sample}: expected stroke assignments to exist at all"
-        );
-        assert!(
-            strokes.iter().all(|v| matches!(v, vac::Value::None)),
-            "{sample}: a stroke was recovered — remove this frontier test"
-        );
+            };
+            shapes.push((prop(vac::Property::Fill), prop(vac::Property::Stroke), width, shape.clone()));
+        }
     }
+    assert_eq!(shapes.len(), 3, "frame, ring, and the card fused with its border");
+    let colour = |v: &Option<vac::Value>| match v {
+        Some(vac::Value::Color(c)) => Some((c.r, c.g, c.b)),
+        _ => None,
+    };
+    let near = |a: u8, b: u8| (a as i32 - b as i32).abs() <= 6;
+    let rgb_near = |c: Option<(u8, u8, u8)>, t: (u8, u8, u8)| c.is_some_and(|c| near(c.0, t.0) && near(c.1, t.1) && near(c.2, t.2));
+    // The moving frame: an unfilled 160x90 rect stroked 4 px #50d0ff.
+    let frame = shapes.iter().find(|s| rgb_near(colour(&s.1), (0x50, 0xd0, 0xff))).expect("the frame");
+    assert!(matches!(frame.0, Some(vac::Value::None)), "frame should be unfilled");
+    assert!((frame.2.unwrap() - 4.0).abs() <= 0.5, "frame stroke width {:?}", frame.2);
+    if let vac::Shape::Rect { w, h, .. } = frame.3 {
+        assert!((w - 160.0).abs() <= 1.0 && (h - 90.0).abs() <= 1.0, "frame {w}x{h}");
+    } else {
+        panic!("frame should be a rect: {:?}", frame.3);
+    }
+    // The ring: an unfilled r=50 ellipse stroked 3 px.
+    let ring = shapes.iter().find(|s| rgb_near(colour(&s.1), (0xf0, 0xc0, 0x40))).expect("the ring");
+    assert!((ring.2.unwrap() - 3.0).abs() <= 0.5, "ring stroke width {:?}", ring.2);
+    assert!(matches!(ring.3, vac::Shape::Ellipse { rx, ry, .. } if (rx - 50.0).abs() <= 1.0 && (ry - 50.0).abs() <= 1.0));
+    // The card and its border: ONE shape, filled #e04848, stroked #f8f8f8.
+    let card = shapes.iter().find(|s| rgb_near(colour(&s.1), (0xf8, 0xf8, 0xf8))).expect("the bordered card");
+    assert!(rgb_near(colour(&card.0), (0xe0, 0x48, 0x48)), "card fill {:?}", card.0);
+    assert!((card.2.unwrap() - 4.0).abs() <= 0.5, "border width {:?}", card.2);
+    assert!(fid.ink_iou > 0.97, "outlined.vac ink IoU {:.4}", fid.ink_iou);
 }

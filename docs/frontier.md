@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v1.2, default quality 50) and is
+table re-measured 2026-10-12 at v1.4, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -30,17 +30,7 @@ scores the reverse.
 
 ---
 
-## 1. Strokes are never recovered
-
-**Status: open. Test: `strokes_are_never_recovered`.**
-
-`emit_shape` writes `stroke = none` unconditionally, and the renderer
-hard-codes stroke width at 2.0 with no way to express it in source. A stroked
-shape comes back as a bare fill.
-
----
-
-## 2. Gradients beyond two stops, and textures
+## 1. Gradients beyond two stops, and textures
 
 **Status: partly fixed in v1.2. Corpus rows: `mandelbrot.mp4`,
 `real_newtons_cradle.gif`.**
@@ -62,7 +52,7 @@ escape hatch for what no vector primitive can say, chosen by measurement.
 
 ---
 
-## 3. Dotted and dashed strokes fragment
+## 2. Dotted and dashed strokes fragment
 
 **Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
 
@@ -195,6 +185,26 @@ always true; only one of them was measurable.
   corpus gate now checks worst-frame IoU too. `color_shift.vac` (new)
   residual 101.7 → **1.27** (28.1 → 47.1 dB).
 
+- **v1.4 — outlines become strokes, and positions became exact.**
+  `stroke_width` joins the language. A blob enclosing a large hole whose
+  filled outline is a genuine rect or ellipse is emitted as that primitive,
+  unfilled and stroked along its centreline. Its width is solved from
+  coverage-weighted ring area and outer size, and an outline framing a fill
+  that moves with it becomes one shape with both. On a new corpus clip with
+  outlines drawn by ffmpeg, `outlined_ui.mp4`, IoU went 0.696 → **0.984**
+  and residual 854 → **28.7**.
+  - Chasing that clip's last error turned up a bug older than any of this:
+    blob centroids are means of pixel *indices*, half a pixel short of pixel
+    centres. Whole-pixel rounding had been hiding it by luck. Anchors now use
+    continuous coordinates and positions are written to 0.1 px. Six fixtures
+    are now within 0.001 of perfect (`sliding_rect` and `late_entry`
+    1.0000 / 0.00), `vac_control` went 38.5 → **46.6 dB**, and `testsrc2`
+    1341 → **1215**.
+  - The first cut at sub-pixel positions parked off-canvas shapes exactly at
+    the edge, leaving a half-covered column on screen. The worst-frame gate
+    added in v1.3 caught it on `slide_in_card` (0.88 → 0.00), and shapes now
+    park a full pixel clear.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -202,16 +212,17 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
-| `slide_in_card.mp4` | 0.9918 | 0.8792 | 3.0 | 43.42 | 0.3% | 2 |
-| `testsrc2.mp4` | 0.9871 | 0.9771 | 1347.2 | 16.84 | 1.2% | 202 |
+| `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
+| `testsrc2.mp4` | 0.9857 | 0.9757 | 1214.8 | 17.29 | 1.3% | 202 |
+| `outlined_ui.mp4` | 0.9839 | 0.9689 | 28.8 | 33.54 | 1.1% | 4 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
-| `vac_control.mp4` | 0.9620 | 0.9493 | 3.0 | 43.35 | 0.5% | 3 |
-| `real_bouncing_ball.gif` | 0.8852 | 0.8830 | 203.7 | 25.04 | 11.8% | 3 |
-| `mandelbrot.mp4` | 0.7639 | 0.3962 | 4165.4 | 11.93 | 13.7% | 43 |
-| `real_loader.gif` | 0.6998 | 0.6706 | 240.7 | 24.32 | 10.3% | 16 |
-| `real_newtons_cradle.gif` | 0.6418 | 0.6369 | 525.0 | 20.93 | 46.9% | 202 |
-| `real_double_pendulum.gif` | 0.4347 | 0.2947 | 766.5 | 19.29 | 39.4% | 379 |
-| `real_pendulum.gif` | 0.4297 | 0.3267 | 645.8 | 20.03 | 11.8% | 48 |
+| `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
+| `real_bouncing_ball.gif` | 0.8978 | 0.8958 | 164.3 | 25.97 | 11.2% | 3 |
+| `mandelbrot.mp4` | 0.7639 | 0.3961 | 4163.2 | 11.94 | 13.7% | 43 |
+| `real_loader.gif` | 0.7318 | 0.7115 | 173.2 | 25.75 | 9.8% | 16 |
+| `real_newtons_cradle.gif` | 0.6416 | 0.6367 | 520.2 | 20.97 | 47.0% | 202 |
+| `real_double_pendulum.gif` | 0.4370 | 0.2980 | 759.6 | 19.32 | 39.2% | 379 |
+| `real_pendulum.gif` | 0.4353 | 0.3286 | 634.6 | 20.11 | 11.6% | 48 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread

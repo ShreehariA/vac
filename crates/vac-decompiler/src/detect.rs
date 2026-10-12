@@ -120,8 +120,21 @@ pub struct Blob {
     /// variance — unaffected by notches in it. 0 when sizing declined.
     pub soft_w: f32,
     pub soft_h: f32,
+    /// Coverage-weighted area — `Σ α` over the blob and the background
+    /// pixels touching it (v1.4). What an outline's stroke width is
+    /// solved from: thresholded area counts every edge pixel above ~17%
+    /// coverage as whole, and read a 4 px stroke as 4.5. 0 when declined.
+    pub soft_area: f32,
     /// IoU of the fitted primitive against the blob's pixels.
     pub fit_iou: f32,
+    /// Pixels enclosed by the blob but not part of it (v1.4): background
+    /// that cannot reach the bbox border without crossing the blob. A
+    /// large hole makes the blob an *outline*.
+    pub hole_area: u32,
+    /// IoU of the bbox rect and of the inscribed ellipse against the blob
+    /// with its holes filled in — the shape an outline traces.
+    pub filled_iou_rect: f32,
+    pub filled_iou_ellipse: f32,
 }
 
 impl Blob {
@@ -161,7 +174,7 @@ pub(crate) const MIN_BLOB_AREA: u32 = 9;
 
 /// A rect or ellipse must overlap a blob's pixels at least this well
 /// (IoU) to stand for it; below, the outline is traced as a path.
-const PRIMITIVE_MIN_IOU: f32 = 0.88;
+pub(crate) const PRIMITIVE_MIN_IOU: f32 = 0.88;
 
 /// Below this elongation (`sqrt(var_major / var_minor)`) a blob has no
 /// meaningful orientation and is never fitted with a rotated primitive.
@@ -639,6 +652,13 @@ pub(crate) fn detect_blobs_masked(
         });
     }
 
+    // Fifth pass (v1.4): holes, and how the filled outline fits.
+    let rings: Vec<(u32, f32, f32)> = acc
+        .iter()
+        .enumerate()
+        .map(|(bi, a)| if a.area == 0 { (0, 0.0, 0.0) } else { ring_stats(&labels, w, kept_labels[bi], a) })
+        .collect();
+
     // Fourth pass (v1.1): coverage-weighted size.
     let soft: Vec<SoftSize> = acc
         .iter()
@@ -654,8 +674,9 @@ pub(crate) fn detect_blobs_masked(
     acc.into_iter()
         .zip(oriented)
         .zip(soft)
-        .filter(|((a, _), _)| a.area > 0)
-        .map(|((a, of), soft)| {
+        .zip(rings)
+        .filter(|(((a, _), _), _)| a.area > 0)
+        .map(|(((a, of), soft), (hole_area, filled_iou_rect, filled_iou_ellipse))| {
             let bbox_w = (a.max_x - a.min_x + 1) as f32;
             let bbox_h = (a.max_y - a.min_y + 1) as f32;
             let rx = bbox_w * 0.5;
@@ -753,7 +774,11 @@ pub(crate) fn detect_blobs_masked(
                 soft_var_y: soft.var_y,
                 soft_w: soft.w,
                 soft_h: soft.h,
+                soft_area: soft.area,
                 fit_iou: best,
+                hole_area,
+                filled_iou_rect,
+                filled_iou_ellipse,
             }
         })
         .collect()
@@ -894,9 +919,10 @@ pub fn interior_pixels(
                 continue;
             }
             let p = i * 4;
+            // Continuous coordinates: the centre of pixel (x, y).
             out.push((
-                x as f32,
-                y as f32,
+                x as f32 + 0.5,
+                y as f32 + 0.5,
                 [frame.pixels[p] as f32, frame.pixels[p + 1] as f32, frame.pixels[p + 2] as f32],
             ));
         }
@@ -947,6 +973,79 @@ fn trace_component(
     pac_decompiler::contour::trace_outer_contour(labels, frame.width, frame.height, &region)
 }
 
+/// Holes of one blob and the fit of its filled outline: `(hole area,
+/// bbox-rect IoU, inscribed-ellipse IoU)` of the blob with holes filled.
+fn ring_stats(labels: &[u32], w: usize, l: u32, a: &BlobAcc) -> (u32, f32, f32) {
+    let (x0, y0) = (a.min_x as usize, a.min_y as usize);
+    let (bw, bh) = ((a.max_x - a.min_x + 1) as usize, (a.max_y - a.min_y + 1) as usize);
+    let at = |x: usize, y: usize| labels[(y0 + y) * w + x0 + x] == l;
+    // Flood the non-blob pixels reachable from the bbox border.
+    let mut outside = vec![false; bw * bh];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for x in 0..bw {
+        for y in [0, bh - 1] {
+            if !at(x, y) && !outside[y * bw + x] {
+                outside[y * bw + x] = true;
+                stack.push((x, y));
+            }
+        }
+    }
+    for y in 0..bh {
+        for x in [0, bw - 1] {
+            if !at(x, y) && !outside[y * bw + x] {
+                outside[y * bw + x] = true;
+                stack.push((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = stack.pop() {
+        let mut go = |nx: usize, ny: usize| {
+            if !at(nx, ny) && !outside[ny * bw + nx] {
+                outside[ny * bw + nx] = true;
+                stack.push((nx, ny));
+            }
+        };
+        if x > 0 {
+            go(x - 1, y);
+        }
+        if x + 1 < bw {
+            go(x + 1, y);
+        }
+        if y > 0 {
+            go(x, y - 1);
+        }
+        if y + 1 < bh {
+            go(x, y + 1);
+        }
+    }
+    let (ecx, ecy, erx, ery) = (bw as f64 * 0.5, bh as f64 * 0.5, bw as f64 * 0.5, bh as f64 * 0.5);
+    let (mut holes, mut filled, mut ell_total, mut ell_hit) = (0u32, 0u32, 0u32, 0u32);
+    for y in 0..bh {
+        for x in 0..bw {
+            let is_filled = at(x, y) || !outside[y * bw + x];
+            if !at(x, y) && !outside[y * bw + x] {
+                holes += 1;
+            }
+            let ex = (x as f64 + 0.5 - ecx) / erx;
+            let ey = (y as f64 + 0.5 - ecy) / ery;
+            let inside = ex * ex + ey * ey <= 1.0;
+            if inside {
+                ell_total += 1;
+            }
+            if is_filled {
+                filled += 1;
+                if inside {
+                    ell_hit += 1;
+                }
+            }
+        }
+    }
+    let iou_rect = filled as f32 / (bw * bh) as f32;
+    let union = filled + ell_total - ell_hit;
+    let iou_ell = if union == 0 { 0.0 } else { ell_hit as f32 / union as f32 };
+    (holes, iou_rect, iou_ell)
+}
+
 /// Coverage-weighted position variances `(var_x, var_y)` of one blob.
 ///
 /// Coverage α of a pixel is the projection of `pixel − bg` onto
@@ -961,6 +1060,7 @@ struct SoftSize {
     var_y: f32,
     w: f32,
     h: f32,
+    area: f32,
 }
 
 fn soft_size(
@@ -1159,6 +1259,7 @@ fn soft_size(
         var_y: ((syy / sw) - my * my).max(0.0) as f32,
         w: edge(&col_cov, bx0, bx1, x0).max(0.0) as f32,
         h: edge(&row_cov, by0, by1, y0).max(0.0) as f32,
+        area: sw as f32,
     }
 }
 

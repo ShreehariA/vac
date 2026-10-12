@@ -1643,3 +1643,49 @@ worst-frame IoU now, so a collapse like that one fails the build.
 |---|---|---|
 | `color_shift.vac` (new) | 28.1 → **47.1 dB** | 101.7 → **1.27** |
 | `testsrc2.mp4` | 16.84 → 16.86 dB | 1347 → 1341 |
+
+## v1.4 — Strokes, and exact positions
+
+**Strokes.** Until v1.4 the decompiler wrote `stroke = none` for everything,
+and the renderer always stroked at 2 px. Now:
+
+```vac
+let card = rect(301.5, 221.5, 147, 67)
+card.fill = #ff5050
+card.stroke = #ffffff
+card.stroke_width = 3
+```
+
+- A blob that encloses a large hole, and whose *filled* outline is a genuine
+  rect or ellipse, is that primitive stroked: unfilled, drawn along the
+  ring's centreline. Its width is solved from the ring's coverage-weighted
+  area and outer size. The thresholded area counted every edge pixel above
+  about 17% coverage as whole, and read a 4 px stroke as 4.5.
+- An outline that frames a fill moving with it is emitted as **one** shape
+  with both. Emitted apart, an accurate stroke left a dark gap where the
+  card's fill ran under its border.
+- New corpus clip `outlined_ui.mp4` has outlines and a bordered card drawn
+  by ffmpeg `drawbox`, not by VAC's own renderer. IoU 0.696 → **0.984**,
+  residual 854 → **28.7**.
+
+**Exact positions.** Chasing that clip's last error turned up a bug older
+than v0.2. A blob's centroid is the mean of its pixel *indices*, half a
+pixel short of the pixel centres they stand for. Whole-pixel rounding had
+hidden that by luck: a rect edge at 39.5 rounded to the correct 40. Anchors
+now use continuous coordinates, and positions are written to a tenth of a
+pixel.
+
+| | ink IoU | residual |
+|---|---|---|
+| `two_balls.vac` | 0.989 → **0.9997** | 1.79 → **0.02** |
+| `late_entry.vac` | 0.994 → **1.0000** | 0.85 → **0.00** |
+| `two_tone.vac` | 0.992 → **0.9999** | 68 → **0.58** |
+| `vac_control.mp4` | 0.962 → 0.971 | 3.0 → **1.43** (46.6 dB) |
+| `real_loader.gif` | 0.700 → **0.732** | 241 → **173** |
+| `testsrc2.mp4` | 0.987 → 0.986 | 1341 → **1215** |
+
+The first cut of sub-pixel positions parked shapes waiting off-canvas
+exactly at the edge, which left half a pixel showing. The worst-frame gate
+added in v1.3 caught it at once: `slide_in_card`'s worst frame fell to 0.00.
+Shapes now park a full pixel clear, and that worst frame is the best it has
+been (0.88 → 0.93).

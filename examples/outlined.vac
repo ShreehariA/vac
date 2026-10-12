@@ -1,0 +1,40 @@
+// Fixture (v1.4): outlines.
+//
+// An outlined box slides across; an outlined ring and a filled card with
+// a contrasting border sit still. Through v1.3 an outline — a blob with a
+// large background hole — came back as a small filled ellipse, and a
+// border was lost into the card it framed.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #14161c
+
+  let frame = rect(40, 40, 160, 90)
+  frame.fill = none
+  frame.stroke = #50d0ff
+  frame.stroke_width = 4
+
+  animate frame {
+    0ms -> position(40, 40)
+    3s  -> position(280, 40)
+    easing: linear
+  }
+
+  let ring = ellipse(120, 230, 50, 50)
+  ring.fill = none
+  ring.stroke = #f0c040
+  ring.stroke_width = 3
+
+  let card = rect(300, 190, 120, 80)
+  card.fill = #e04848
+  card.stroke = none
+
+  let border = rect(300, 190, 120, 80)
+  border.fill = none
+  border.stroke = #f8f8f8
+  border.stroke_width = 4
+}

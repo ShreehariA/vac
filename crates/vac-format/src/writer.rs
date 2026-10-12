@@ -161,6 +161,7 @@ fn fmt_value(v: &Value) -> String {
             fmt_color(c1),
             fmt_num(*radius)
         ),
+        Value::Number(n) => fmt_num(*n),
         Value::None => "none".to_string(),
     }
 }

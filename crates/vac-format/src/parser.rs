@@ -706,7 +706,7 @@ impl Parser {
         let property = Property::from_str(&prop_name).ok_or_else(|| {
             ParseError::syntax(
                 span,
-                format!("unknown property `{prop_name}` (expected fill or stroke)"),
+                format!("unknown property `{prop_name}` (expected fill, stroke or stroke_width)"),
             )
         })?;
         let value = self.parse_value()?;
@@ -728,13 +728,17 @@ impl Parser {
                 self.bump();
                 Ok(Value::None)
             }
+            Token::Number(n) => {
+                self.bump();
+                Ok(Value::Number(n))
+            }
             Token::Ident(ref name) if name == "gradient" => {
                 self.bump();
                 Ok(Value::Gradient(self.parse_gradient_args(s.span)?))
             }
             other => Err(ParseError::syntax(
                 s.span,
-                format!("expected color, gradient(...) or `none`, got {other:?}"),
+                format!("expected color, gradient(...), number or `none`, got {other:?}"),
             )),
         }
     }
