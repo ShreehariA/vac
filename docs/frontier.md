@@ -112,22 +112,7 @@ computes for its Hu invariants (`θ = ½·atan2(2μ₁₁, μ₂₀ − μ₀₂
 
 ---
 
-## 5. The ink metric is blind on transparent canvases
-
-**Status: open (metric). Corpus row: `real_loader.gif`.**
-
-`modal_background` votes among *opaque* pixels only. On a clip whose canvas
-is mostly transparent, the vote is won by a foreground colour (the spinner's
-tick grey), so "ink" means only the few pixels that differ from the ticks.
-`real_loader`'s IoU of 0.50 is measuring its three highlighted ticks, not the
-twelve. Found in v0.13 when the measured search preferred a reconstruction
-that had lost nine ticks. The decompiler side is fixed (a transparent border
-now means a white background); the metric fix is a ruler change and lands on
-its own with a before/after table.
-
----
-
-## 6. Dotted and dashed strokes fragment
+## 5. Dotted and dashed strokes fragment
 
 **Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
 
@@ -190,6 +175,17 @@ always true; only one of them was measurable.
   `real_newtons_cradle.gif` residual 706 → 543, `two_tone.vac` residual
   6676 → **83**. No row regressed.
 
+- **v0.13 (metric) — the ink metric on transparent canvases.** A *ruler*
+  change, recorded separately from every decompiler change.
+  `modal_background` now lets transparency vote as a colour; when it wins,
+  ink is measured against white, the colour a viewer composites onto. Before,
+  the vote went to the most common *opaque* colour, the `real_loader`
+  spinner's tick grey, so its IoU measured three highlighted ticks out of
+  twelve. Exactly one corpus row moved, `real_loader.gif`: IoU 0.501 → 0.698,
+  spurious 76% → 23%, residual unchanged at 258.7 (residual never uses the
+  reference colour). The reconstruction did not change at all. Only the
+  ruler did, and it now measures what it claims to.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -204,7 +200,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `real_bouncing_ball.gif` | 0.8684 | 0.8663 | 420.1 | 21.90 | 14.0% | 3 |
 | `mandelbrot.mp4` | 0.7650 | 0.3963 | 4186.4 | 11.91 | 14.0% | 43 |
 | `real_newtons_cradle.gif` | 0.6413 | 0.6354 | 542.7 | 20.79 | 46.9% | 202 |
-| `real_loader.gif` | 0.5012 | 0.4766 | 258.7 | 24.00 | 76.2% | 16 |
+| `real_loader.gif` | 0.6980 | 0.6655 | 258.7 | 24.00 | 23.0% | 16 |
 | `real_double_pendulum.gif` | 0.4099 | 0.2894 | 1199.5 | 17.34 | 56.5% | 378 |
 | `real_pendulum.gif` | 0.3760 | 0.2207 | 871.7 | 18.73 | 44.8% | 111 |
 

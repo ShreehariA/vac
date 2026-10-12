@@ -381,11 +381,13 @@ pub fn compare_frame(
 /// deterministic regardless of hash iteration order.
 pub fn modal_background(frames: &[FrameRef]) -> Rgb {
     let mut hist: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let mut transparent: u64 = 0;
     for f in frames {
         let n = f.pixel_count().min(f.rgba.len() / 4);
         for i in 0..n {
             let px = &f.rgba[i * 4..i * 4 + 4];
             if px[3] < MIN_OPAQUE_ALPHA {
+                transparent += 1;
                 continue;
             }
             let key = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
@@ -398,8 +400,16 @@ pub fn modal_background(frames: &[FrameRef]) -> Rgb {
             Some((bk, bv)) if bv > v || (bv == v && bk <= k) => Some((bk, bv)),
             _ => Some((k, v)),
         });
+    // Transparency is a colour too, and votes like one (v0.13). When it
+    // wins, the canvas *is* transparent and the reference is the colour a
+    // viewer composites it onto, white. Before, transparent pixels were
+    // simply skipped, so on a mostly transparent clip the vote went to the
+    // dominant *foreground* colour — on `real_loader` the tick grey — and
+    // "ink" came to mean only the pixels that differed from the ticks.
     match best {
+        Some((_, v)) if transparent >= v => Rgb::new(255, 255, 255),
         Some((k, _)) => Rgb::new((k >> 16) as u8, (k >> 8) as u8, k as u8),
+        None if transparent > 0 => Rgb::new(255, 255, 255),
         None => Rgb::new(0, 0, 0),
     }
 }
@@ -1024,5 +1034,28 @@ mod tests {
     #[test]
     fn empty_reconstruction_aligns_to_nothing() {
         assert_eq!(align(&[0, 33], 0, 30), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_mostly_transparent_canvas_measures_ink_against_white() {
+        // 10 opaque light-grey "tick" pixels on a 100-pixel transparent
+        // canvas. The ticks are the most common *opaque* colour, but the
+        // canvas is transparency; ink must be measured against white.
+        let mut px = vec![0u8; 100 * 4];
+        for i in 0..10 {
+            px[i * 4..i * 4 + 4].copy_from_slice(&[230, 230, 230, 255]);
+        }
+        let f = FrameRef::new(10, 10, &px);
+        assert_eq!(modal_background(&[f]), Rgb::new(255, 255, 255));
+    }
+
+    #[test]
+    fn an_opaque_majority_still_wins_over_transparency() {
+        let mut px = vec![0u8; 100 * 4];
+        for i in 0..60 {
+            px[i * 4..i * 4 + 4].copy_from_slice(&[20, 20, 30, 255]);
+        }
+        let f = FrameRef::new(10, 10, &px);
+        assert_eq!(modal_background(&[f]), Rgb::new(20, 20, 30));
     }
 }
