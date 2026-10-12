@@ -98,6 +98,21 @@ jobs:
             > target/ci/two_balls.target.json
           python3 -c 'import json,sys; d=json.load(open("target/ci/two_balls.target.json"))["result"]; p=d["psnr_db"]; print("rate-controlled two_balls: %.2f dB, %d bytes" % (p, d["vac_bytes"])); sys.exit("missed the 35 dB target: %.2f" % p) if p < 35 else None'
 
+      # v1.6 / v1.7: scenery no vector can describe takes a raster plate,
+      # and every shape left in the output has to have earned its place —
+      # GIF palette flicker over the texture must not come back as shapes.
+      - name: Raster plate and shape audit (v1.6, v1.7)
+        run: |
+          cargo run --release -q -p vac-cli -- compile   examples/textured.vac  target/ci/textured.gif
+          cargo run --release -q -p vac-cli -- decompile target/ci/textured.gif target/ci/textured.gif.vac
+          test "$(grep -c '= image(' target/ci/textured.gif.vac)" = "1"
+          shapes=$(grep -c '^  let shape_' target/ci/textured.gif.vac || true)
+          echo "textured.gif: $shapes moving shape(s) over the plate"
+          test "$shapes" -le 2
+          cargo run --release -q -p vac-cli -- verify target/ci/textured.gif --vac target/ci/textured.gif.vac --json \
+            > target/ci/textured.fidelity.json
+          python3 -c 'import json,sys; d=json.load(open("target/ci/textured.fidelity.json"))["result"]; p=d["psnr_db"]; print("textured.gif: %.2f dB" % p); sys.exit("raster plate below 28 dB: %.2f" % p) if p < 28 else None'
+
       - name: Smoke-test the rect classifier (v0.4.1)
         run: |
           cargo run --release -p vac-cli -- compile   examples/sliding_rect.vac target/ci/sliding_rect.mp4

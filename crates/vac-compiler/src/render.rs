@@ -103,67 +103,7 @@ fn render_scene(
     let w = doc.canvas.width;
     let h = doc.canvas.height;
     let fps = doc.canvas.fps.max(1);
-
-    // Pre-collect declarations so an `animate` block can reference a shape
-    // declared either before or after it (declaration order is preserved
-    // for draw order, but animate lookup is name-based).
-    let mut declared: Vec<String> = Vec::new();
-    let mut shapes: HashMap<String, ShapeState> = HashMap::new();
-    let mut animations: HashMap<String, Animation> = HashMap::new();
-
-    for stmt in &scene.statements {
-        match stmt {
-            Statement::Let { name, shape } => {
-                declared.push(name.clone());
-                shapes.insert(name.clone(), ShapeState::new(shape.clone()));
-            }
-            Statement::Assign {
-                target,
-                property,
-                value,
-            } => {
-                let st = shapes.get_mut(target).ok_or_else(|| {
-                    CompileError::Render(format!("assign to undeclared shape `{target}`"))
-                })?;
-                match (property, value) {
-                    (Property::Fill, Value::Color(c)) => {
-                        st.fill = Some(*c);
-                        st.fill_gradient = None;
-                    }
-                    (Property::Fill, Value::Gradient(g)) => {
-                        st.fill = None;
-                        st.fill_gradient = Some(*g);
-                    }
-                    (Property::Fill, Value::None) => {
-                        st.fill = None;
-                        st.fill_gradient = None;
-                    }
-                    (Property::Stroke, Value::Color(c)) => st.stroke = Some(*c),
-                    (Property::Stroke, Value::Gradient(_)) => {
-                        return Err(CompileError::Render(format!(
-                            "`{target}.stroke`: gradient strokes are not supported"
-                        )))
-                    }
-                    (Property::Stroke, Value::None) => st.stroke = None,
-                    (Property::StrokeWidth, Value::Number(n)) => st.stroke_width = n.max(0.0),
-                    (Property::StrokeWidth, other) => {
-                        return Err(CompileError::Render(format!(
-                            "`{target}.stroke_width` takes a number, got {other:?}"
-                        )))
-                    }
-                    (prop @ (Property::Fill | Property::Stroke), Value::Number(n)) => {
-                        return Err(CompileError::Render(format!(
-                            "`{target}.{}` takes a colour, got the number {n}",
-                            prop.as_str()
-                        )))
-                    }
-                }
-            }
-            Statement::Animate(a) => {
-                animations.insert(a.target.clone(), a.clone());
-            }
-        }
-    }
+    let rig = SceneRig::build(scene)?;
 
     // Number of frames — one for the first instant and one for each
     // tick after that, ending at `duration_ms`.  An animation that runs
@@ -172,10 +112,186 @@ fn render_scene(
 
     for i in 0..frame_count {
         let t_ms = ((i as u64 * 1000) / fps as u64) as u32;
-        let frame = render_frame_at(w, h, &declared, &shapes, &animations, t_ms)?;
+        let frame = render_frame_at(w, h, &rig.declared, &rig.shapes, &rig.animations, t_ms)?;
         each(frame)?;
     }
     Ok(())
+}
+
+/// One scene's declarations, resolved once: every shape's base state with
+/// its assignments applied, and its animation.
+struct SceneRig {
+    /// Shape names in declaration (= draw) order.
+    declared: Vec<String>,
+    shapes: HashMap<String, ShapeState>,
+    animations: HashMap<String, Animation>,
+}
+
+impl SceneRig {
+    fn build(scene: &Scene) -> Result<Self, CompileError> {
+        // Pre-collect declarations so an `animate` block can reference a
+        // shape declared either before or after it (declaration order is
+        // preserved for draw order, but animate lookup is name-based).
+        let mut declared: Vec<String> = Vec::new();
+        let mut shapes: HashMap<String, ShapeState> = HashMap::new();
+        let mut animations: HashMap<String, Animation> = HashMap::new();
+
+        for stmt in &scene.statements {
+            match stmt {
+                Statement::Let { name, shape } => {
+                    declared.push(name.clone());
+                    shapes.insert(name.clone(), ShapeState::new(shape.clone()));
+                }
+                Statement::Assign {
+                    target,
+                    property,
+                    value,
+                } => {
+                    let st = shapes.get_mut(target).ok_or_else(|| {
+                        CompileError::Render(format!("assign to undeclared shape `{target}`"))
+                    })?;
+                    match (property, value) {
+                        (Property::Fill, Value::Color(c)) => {
+                            st.fill = Some(*c);
+                            st.fill_gradient = None;
+                        }
+                        (Property::Fill, Value::Gradient(g)) => {
+                            st.fill = None;
+                            st.fill_gradient = Some(*g);
+                        }
+                        (Property::Fill, Value::None) => {
+                            st.fill = None;
+                            st.fill_gradient = None;
+                        }
+                        (Property::Stroke, Value::Color(c)) => st.stroke = Some(*c),
+                        (Property::Stroke, Value::Gradient(_)) => {
+                            return Err(CompileError::Render(format!(
+                                "`{target}.stroke`: gradient strokes are not supported"
+                            )))
+                        }
+                        (Property::Stroke, Value::None) => st.stroke = None,
+                        (Property::StrokeWidth, Value::Number(n)) => st.stroke_width = n.max(0.0),
+                        (Property::StrokeWidth, other) => {
+                            return Err(CompileError::Render(format!(
+                                "`{target}.stroke_width` takes a number, got {other:?}"
+                            )))
+                        }
+                        (prop @ (Property::Fill | Property::Stroke), Value::Number(n)) => {
+                            return Err(CompileError::Render(format!(
+                                "`{target}.{}` takes a colour, got the number {n}",
+                                prop.as_str()
+                            )))
+                        }
+                    }
+                }
+                Statement::Animate(a) => {
+                    animations.insert(a.target.clone(), a.clone());
+                }
+            }
+        }
+        Ok(SceneRig {
+            declared,
+            shapes,
+            animations,
+        })
+    }
+
+    /// Shape `k` as it stands at `t_ms`.
+    fn live(&self, k: usize, t_ms: u32) -> ShapeState {
+        let name = &self.declared[k];
+        let state = self.shapes.get(name).expect("declared shape exists");
+        apply_animation(state, self.animations.get(name), t_ms)
+    }
+}
+
+/// A document resolved once for repeated, partial rendering (v1.7).
+///
+/// The shape audit asks, for every shape, what each frame would look like
+/// without it — but only inside the shape's own footprint. Re-rendering
+/// whole frames for that would cost one clip render per shape. A `Rig`
+/// resolves the declarations once, reports where each shape paints in each
+/// frame, and renders just a rectangle, drawing only the shapes the caller
+/// admits, in the same order, offset by a whole-pixel translation.
+///
+/// The whole-canvas region is the frame, exactly. A smaller region matches
+/// its crop of the frame except along a curve that crosses the region's
+/// edge: tiny-skia chops curves at the clip and flattens the pieces
+/// differently, moving a few anti-aliased pixels (by up to ~40 levels on
+/// the fixtures). A shape compared against its own absence in one region
+/// sees the same chopping on both sides, which is all the audit relies on.
+pub struct Rig {
+    width: u32,
+    height: u32,
+    scenes: Vec<SceneRig>,
+    /// Global frame index → (scene, time within it), exactly as
+    /// [`render_document_each`] numbers and times frames.
+    timeline: Vec<(usize, u32)>,
+}
+
+impl Rig {
+    pub fn new(doc: &Document) -> Result<Self, CompileError> {
+        let fps = doc.canvas.fps.max(1) as u64;
+        let mut scenes = Vec::with_capacity(doc.scenes.len());
+        let mut timeline = Vec::new();
+        for (si, scene) in doc.scenes.iter().enumerate() {
+            scenes.push(SceneRig::build(scene)?);
+            let n = ((scene.duration_ms as u64 * fps) / 1000).max(1);
+            timeline.extend((0..n).map(|k| (si, ((k * 1000) / fps) as u32)));
+        }
+        Ok(Rig {
+            width: doc.canvas.width,
+            height: doc.canvas.height,
+            scenes,
+            timeline,
+        })
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.timeline.len()
+    }
+
+    /// The shapes of frame `i`'s scene, in draw order. Shape indices in
+    /// [`Rig::bounds`] and [`Rig::render_region`] index this list.
+    pub fn shapes(&self, i: usize) -> &[String] {
+        &self.scenes[self.timeline[i].0].declared
+    }
+
+    /// The pixels shape `k` can touch in frame `i`, as `[x0, y0, x1, y1)`
+    /// clipped to the canvas — a conservative box (anti-aliasing and the
+    /// stroke included). `None` when it paints nothing there: fully
+    /// transparent, unpainted, or off the canvas.
+    pub fn bounds(&self, i: usize, k: usize) -> Option<[u32; 4]> {
+        let (si, t) = self.timeline[i];
+        let st = self.scenes[si].live(k, t);
+        let r = paint_bounds(&st)?;
+        let clamp = |v: f32, hi: u32| (v.max(0.0) as u32).min(hi);
+        let b = [
+            clamp(r.left().floor() - 1.0, self.width),
+            clamp(r.top().floor() - 1.0, self.height),
+            clamp(r.right().ceil() + 1.0, self.width),
+            clamp(r.bottom().ceil() + 1.0, self.height),
+        ];
+        (b[0] < b[2] && b[1] < b[3]).then_some(b)
+    }
+
+    /// Render the rectangle `[x0, y0, x1, y1)` of frame `i`, drawing only
+    /// the shapes `draw(k)` admits, as non-premultiplied RGBA8 rows of
+    /// `x1 - x0` pixels.
+    pub fn render_region(&self, i: usize, rect: [u32; 4], mut draw: impl FnMut(usize) -> bool) -> Vec<u8> {
+        let (si, t) = self.timeline[i];
+        let scene = &self.scenes[si];
+        let (w, h) = (rect[2].saturating_sub(rect[0]), rect[3].saturating_sub(rect[1]));
+        let Some(mut pixmap) = Pixmap::new(w.max(1), h.max(1)) else {
+            return Vec::new();
+        };
+        let origin = Transform::from_translate(-(rect[0] as f32), -(rect[1] as f32));
+        for k in 0..scene.declared.len() {
+            if draw(k) {
+                draw_shape(&mut pixmap, &scene.live(k, t), origin);
+            }
+        }
+        unpremultiply(pixmap.data(), w.max(1), h.max(1))
+    }
 }
 
 fn render_frame_at(
@@ -192,7 +308,7 @@ fn render_frame_at(
     for name in declared {
         let state = shapes.get(name).expect("declared shape exists");
         let live = apply_animation(state, animations.get(name), t_ms);
-        draw_shape(&mut pixmap, &live);
+        draw_shape(&mut pixmap, &live, Transform::identity());
     }
 
     Ok(RenderedFrame {
@@ -319,28 +435,28 @@ fn decode_image(src: &str) -> Option<Pixmap> {
     Pixmap::from_vec(px, tiny_skia::IntSize::from_wh(w, h)?)
 }
 
-fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
-    if let Shape::Image { x, y, w, h, .. } = &state.base {
-        let Some(img) = &state.image else { return };
-        // Image pixels → its declared box, then the same chain every shape
-        // takes: rotate about the centre, anchor at the top-left, scale,
-        // move to `position`.
-        let scale = state.scale.max(0.0);
-        let pos = state.position.unwrap_or((*x, *y));
-        let to_box = Transform::from_scale(*w / img.width() as f32, *h / img.height() as f32)
-            .post_translate(*x, *y);
-        let shape = Transform::from_rotate_at(state.rotation, *x + *w * 0.5, *y + *h * 0.5)
-            .post_translate(-*x, -*y)
-            .post_scale(scale, scale)
-            .post_translate(pos.0, pos.1);
-        let paint = tiny_skia::PixmapPaint {
-            opacity: state.opacity.clamp(0.0, 1.0),
-            blend_mode: tiny_skia::BlendMode::SourceOver,
-            quality: tiny_skia::FilterQuality::Bilinear,
-        };
-        pixmap.draw_pixmap(0, 0, img.as_ref().as_ref(), &paint, to_box.post_concat(shape), None);
-        return;
-    }
+/// Where an `image()` shape's pixels land: image pixels → its declared
+/// box, then the chain every shape takes — rotate about the centre, anchor
+/// at the top-left, scale, move to `position`.
+fn image_transform(state: &ShapeState, img: &Pixmap) -> Option<Transform> {
+    let Shape::Image { x, y, w, h, .. } = &state.base else {
+        return None;
+    };
+    let scale = state.scale.max(0.0);
+    let pos = state.position.unwrap_or((*x, *y));
+    let to_box = Transform::from_scale(*w / img.width() as f32, *h / img.height() as f32)
+        .post_translate(*x, *y);
+    let shape = Transform::from_rotate_at(state.rotation, *x + *w * 0.5, *y + *h * 0.5)
+        .post_translate(-*x, -*y)
+        .post_scale(scale, scale)
+        .post_translate(pos.0, pos.1);
+    Some(to_box.post_concat(shape))
+}
+
+/// A vector shape's outline in its declared coordinates, and the world
+/// transform that places it: (rotate about the shape's centre) (translate
+/// the anchor to the origin) (scale) (translate to position).
+fn placed_path(state: &ShapeState) -> Option<(tiny_skia::Path, Transform)> {
     let (path, anchor, centre) = match &state.base {
         Shape::Rect { x, y, w, h } => {
             let pb = PathBuilder::from_rect(
@@ -352,11 +468,9 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
         Shape::Ellipse { cx, cy, rx, ry } => {
             (build_ellipse_path(*cx, *cy, *rx, *ry), (*cx, *cy), (*cx, *cy))
         }
-        Shape::Image { .. } => unreachable!("drawn above"),
+        Shape::Image { .. } => return None,
         Shape::Path(segs) => {
-            let Some(path) = build_path(segs) else {
-                return;
-            };
+            let path = build_path(segs)?;
             // Anchor at the outline's shoelace centroid — this is the
             // point `position(x, y)` keyframes move, matching the
             // measured blob centroid the decompiler emits.
@@ -364,15 +478,63 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
             (path, a, a)
         }
     };
-
-    // World transform: (rotate about the shape's centre) (translate the
-    // anchor to the origin) (scale) (translate to position).
     let scale = state.scale.max(0.0);
     let pos = state.position.unwrap_or(anchor);
     let transform = Transform::from_rotate_at(state.rotation, centre.0, centre.1)
         .post_translate(-anchor.0, -anchor.1)
         .post_scale(scale, scale)
         .post_translate(pos.0, pos.1);
+    Some((path, transform))
+}
+
+/// The world-space box a shape paints into, before anti-aliasing; `None`
+/// when it paints nothing.
+fn paint_bounds(state: &ShapeState) -> Option<tiny_skia::Rect> {
+    if state.opacity <= 0.0 {
+        return None;
+    }
+    if let Some(img) = &state.image {
+        let ts = image_transform(state, img)?;
+        let r = tiny_skia::Rect::from_xywh(0.0, 0.0, img.width() as f32, img.height() as f32)?;
+        return PathBuilder::from_rect(r).transform(ts).map(|p| p.bounds());
+    }
+    if matches!(state.base, Shape::Image { .. }) {
+        return None;
+    }
+    let filled = state.fill_gradient.is_some() || state.fill.is_some_and(|c| c.a > 0);
+    let stroked = state.stroke.is_some_and(|c| c.a > 0) && state.stroke_width > 0.0;
+    if !filled && !stroked {
+        return None;
+    }
+    let (path, ts) = placed_path(state)?;
+    let b = path.transform(ts)?.bounds();
+    // A stroke is centred on the outline and, like the path, scaled.
+    let out = if stroked {
+        state.stroke_width * 0.5 * state.scale.max(0.0)
+    } else {
+        0.0
+    };
+    tiny_skia::Rect::from_ltrb(b.left() - out, b.top() - out, b.right() + out, b.bottom() + out)
+}
+
+/// Draw one shape. `origin` is applied after the shape's own transform:
+/// identity for a full frame, a whole-pixel translation for a region.
+fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState, origin: Transform) {
+    if matches!(state.base, Shape::Image { .. }) {
+        let Some(img) = &state.image else { return };
+        let Some(ts) = image_transform(state, img) else { return };
+        let paint = tiny_skia::PixmapPaint {
+            opacity: state.opacity.clamp(0.0, 1.0),
+            blend_mode: tiny_skia::BlendMode::SourceOver,
+            quality: tiny_skia::FilterQuality::Bilinear,
+        };
+        pixmap.draw_pixmap(0, 0, img.as_ref().as_ref(), &paint, ts.post_concat(origin), None);
+        return;
+    }
+    let Some((path, transform)) = placed_path(state) else {
+        return;
+    };
+    let transform = transform.post_concat(origin);
 
     let opacity = state.opacity.clamp(0.0, 1.0);
     if let Some(g) = &state.fill_gradient {
@@ -599,6 +761,60 @@ mod tests {
         // At 100 ms it has moved 50 px right: x=10 is now uncovered.
         let (r, b) = px(&frames[1], 10);
         assert!(r < 20 && b < 20, "moved image should leave x=10 black: {r},{b}");
+    }
+
+    /// The two promises the shape audit (v1.7) rests on, over every
+    /// fixture that exercises a different drawing path — rects, ellipses,
+    /// stroked paths, gradients, rotation, scale, opacity and an image:
+    /// a region renders exactly as that crop of the full frame does, and
+    /// leaving a shape out changes no pixel outside its reported bounds.
+    #[test]
+    fn a_region_renders_as_its_crop_and_a_shape_stays_inside_its_bounds() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/");
+        for name in ["spin.vac", "shaded.vac", "outlined.vac", "textured.vac", "grow.vac", "fade.vac", "color_shift.vac"] {
+            let src = std::fs::read_to_string(format!("{root}{name}")).unwrap();
+            let doc = vac_format::parse(&src).unwrap();
+            let full = render_document(&doc).unwrap();
+            let rig = Rig::new(&doc).unwrap();
+            assert_eq!(rig.frame_count(), full.len(), "{name}");
+            let (w, h) = (doc.canvas.width, doc.canvas.height);
+            let crop = |f: &RenderedFrame, r: [u32; 4]| -> Vec<u8> {
+                let mut out = Vec::new();
+                for y in r[1]..r[3] {
+                    let a = ((y * w + r[0]) * 4) as usize;
+                    out.extend_from_slice(&f.rgba[a..a + ((r[2] - r[0]) * 4) as usize]);
+                }
+                out
+            };
+            for i in (0..full.len()).step_by((full.len() / 5).max(1)) {
+                for r in [[0, 0, w, h], [w / 3, h / 4, w / 3 + 57, h / 4 + 41], [1, 2, w - 3, h - 1]] {
+                    let (a, b) = (rig.render_region(i, r, |_| true), crop(&full[i], r));
+                    if r == [0, 0, w, h] {
+                        assert!(a == b, "{name} frame {i}: the whole-canvas region must be the frame");
+                    }
+                    // Elsewhere a curve crossing the region's edge is chopped
+                    // there and flattened differently, which moves a few
+                    // anti-aliased pixels; content and offset must still agree.
+                    let mad = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y) as f64).sum::<f64>() / a.len() as f64;
+                    assert!(mad < 0.5, "{name} frame {i}: region {r:?} is off its crop by {mad:.2} levels on average");
+                }
+                let all = [0, 0, w, h];
+                let with = rig.render_region(i, all, |_| true);
+                for k in 0..rig.shapes(i).len() {
+                    let without = rig.render_region(i, all, |m| m != k);
+                    let b = rig.bounds(i, k);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let p = ((y * w + x) * 4) as usize;
+                            if with[p..p + 4] != without[p..p + 4] {
+                                let inside = b.is_some_and(|b| x >= b[0] && x < b[2] && y >= b[1] && y < b[3]);
+                                assert!(inside, "{name} frame {i}: `{}` changed ({x},{y}) outside its bounds {b:?}", rig.shapes(i)[k]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

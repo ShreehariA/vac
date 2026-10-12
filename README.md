@@ -6,6 +6,78 @@
 
 ---
 
+## Where VAC is today (v1.7)
+
+VAC decompiles a video into `.vac` source: shapes, fills, strokes and
+keyframed motion. It compiles that source back to video and measures, in
+pixels, how much of the original survived. Everything below runs today.
+Every number comes from `vac verify` or `benches/`.
+
+```sh
+cargo build --release
+vac compile   examples/color_shift.vac  out.mp4   # source → video
+vac decompile out.mp4  recovered.vac              # video → source
+vac verify    out.mp4                             # how much survived, in numbers
+vac verify    out.mp4  --dump frames/             # source | reconstruction | ink map PNGs
+vac verify    out.mp4  --vac edited.vac           # score any .vac, e.g. one you edited
+vac decompile out.mp4  small.vac --quality 0      # the rate–distortion dial, 0–100
+vac decompile out.mp4  good.vac  --target-psnr 40 # smallest source that reaches 40 dB
+```
+
+This is what VAC writes for `examples/color_shift.vac` after a round trip
+through video. A ball moving while it changes colour, and a square pulsing
+between two colours:
+
+```vac
+let shape_1 = ellipse(80, 100, 30, 30)
+shape_1.fill = #446099
+
+animate shape_1 {
+  0ms    -> position(80, 100), fill(#e04144)
+  1500ms -> position(240, 100), fill(#4060dd)
+  2966ms -> position(396.3, 100), fill(#40be66)
+  easing: linear
+}
+```
+
+**What it recovers:** rects, ellipses and traced paths, by measured fit;
+position, scale, rotation, opacity and colour over time; linear and radial
+gradient fills; strokes with their width; objects entering, leaving,
+appearing and disappearing. Where vectors measurably fail, the static
+scenery becomes one embedded `image()` with the moving shapes still written
+as code on top.
+
+**How it decides:** by measurement, not classification. Every ambiguous
+choice is tried several ways: segmentation, background rule, raster versus
+vector plate. Each candidate is re-rendered and scored against the source,
+and the one that reconstructs best wins. Then every shape in the winner is
+measured against its own absence, and a shape the reconstruction is no
+better with is taken out.
+
+**How well**, against the corpus in `examples/wild/` (default quality):
+
+| clip | what it is | PSNR | ink IoU |
+|---|---|---|---|
+| `vac_control.mp4` | VAC's own output, two moving balls | 46.6 dB | 0.971 |
+| `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
+| `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 40.9 dB | 0.988 |
+| `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 39.5 dB | 0.976 |
+| `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.5 dB | 0.984 |
+| `real_newtons_cradle.gif` | Wikimedia photograph | 29.4 dB | 0.919 |
+| `real_loader.gif` | Wikimedia 32 px spinner | 25.7 dB | 0.732 |
+| `real_pendulum.gif` | Wikimedia diagram | 22.6 dB | 0.622 |
+| `testsrc2.mp4` | ffmpeg test card with noise | 22.2 dB | 0.995 |
+| `real_double_pendulum.gif` | Wikimedia diagram with trails | 20.6 dB | 0.498 |
+| `mandelbrot.mp4` | ffmpeg fractal zoom | 12.0 dB | 0.766 |
+
+What it still gets wrong is listed, measured, in `docs/frontier.md`. The
+rate–distortion curves are in `docs/rate-distortion.md`. The sections after
+this one are the project's original vision and its version-by-version log.
+The example in "The MVP" below was the target, written before the code.
+The output above is what VAC actually produces.
+
+---
+
 ## The Insight
 
 Code-to-video already exists. Remotion, Manim, Motion Canvas — they all let you write code that outputs video. That space is crowded.
@@ -1762,3 +1834,45 @@ patches had cost more bytes than the JPEG does. Flat content never takes a
 plate (motion graphics, the outlines clip, every flat fixture), and neither
 does `shaded.vac`, whose gradients are already 39.5 dB as code. The
 Mandelbrot zoom has no static scene to keep, so it stays vector.
+
+## v1.7 — Every shape earns its place
+
+Through v1.6 a shape stayed in the output once its track cleared the
+tracker's gates. Nothing checked that drawing it actually helped. v1.0's
+pruning only *estimated* a shape's worth (its area times its contrast against
+one flat background), which says nothing over a raster plate or a gradient.
+
+v1.7 measures it:
+
+1. Each shape is taken out of the reconstruction in turn, topmost first.
+2. Only the rectangle it touches is re-rendered without it, using a new
+   renderer entry point, `Rig`, that renders a region and draws only the
+   shapes that reach it.
+3. The full measurement already holds every frame's raw tallies (squared
+   error, ink intersection, ink union), so the clip's score without the
+   shape follows *exactly* from those few small renders.
+4. The shape stays only if the clip reconstructs better with it, in the same
+   currency the measured search picks candidates by.
+5. The result is re-measured in full and kept only if it measures at least
+   as well.
+
+The shapes it found were mostly worse than nothing: dashed-line fragments
+painted where the source had gaps, GIF palette flicker tracked over a raster
+plate, test-card noise squares in the wrong colour.
+
+| clip | v1.6 | v1.7 |
+|---|---|---|
+| `real_double_pendulum.gif` | 19.70 dB, 454 shapes, 192 KB, 24.6% spurious ink | **20.64 dB**, 419 shapes, **166 KB**, **9.7%** |
+| `real_pendulum.gif` | 22.18 dB, 41 shapes, 58 KB, 12.2% spurious | **22.60 dB**, 27 shapes, **49 KB**, **6.6%** |
+| `testsrc2.mp4` | 22.17 dB, 110 shapes, 94 KB | **22.24 dB**, 64 shapes, **55 KB** |
+| `mandelbrot.mp4` | 11.94 dB, 43 shapes, 21 KB | 11.95 dB, 33 shapes, **17 KB** |
+
+Nothing on the corpus got worse in the selection rule's currency. One clip
+trades: `real_pendulum`'s ink IoU dips 0.626 → 0.622 while its residual falls
+9%. A second pass was measured to remove nothing more, so there is one.
+
+`vac::audit(frames, doc)` runs the audit on any document, including an older
+version's output or a hand-edited source. `--no-audit` turns it off, to
+measure what it changed. The test injects a stray blob and an exact duplicate
+of a real ball into a perfect reconstruction. The audit must remove exactly
+those two and leave the rest untouched.

@@ -66,6 +66,11 @@ pub struct Options {
     /// How the static scene is written (v1.6): as vector shapes, or as one
     /// raster `image()` with the moving shapes drawn on top of it.
     pub plate: Plate,
+    /// Measure every emitted shape against its own absence and drop the
+    /// ones the reconstruction is no better with (v1.7). Like
+    /// [`Plate::Auto`], it needs a renderer, so the `vac` facade runs it;
+    /// the decompiler on its own ignores it.
+    pub audit: bool,
 }
 
 /// How the static scene is written (v1.6).
@@ -91,6 +96,7 @@ impl Default for Options {
             background: Background::Auto,
             quality: track::DEFAULT_QUALITY,
             plate: Plate::Auto,
+            audit: true,
         }
     }
 }

@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v1.6, default quality 50) and is
+table re-measured 2026-10-12 at v1.7, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -46,7 +46,8 @@ of the fractal itself.
 
 ## 2. Dotted and dashed strokes fragment
 
-**Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
+**Status: open, much reduced. Corpus rows: `real_pendulum.gif`,
+`real_double_pendulum.gif`.**
 
 A dotted stroke rasterises into dozens of interchangeable ~4 px blobs and the
 matcher links dot *k* to dot *k+3*. Diagnosed in v0.8 (correcting v0.7, which
@@ -54,10 +55,17 @@ had blamed static dashes blinking under a sweeping arm).
 
 | | ink IoU | worst | residual | spurious |
 |---|---|---|---|---|
-| `real_pendulum.gif` | 0.158 | 0.101 | 2122.7 | **230.1%** |
-| `real_double_pendulum.gif` | 0.071 | 0.039 | 8425.9 | **616.6%** |
+| `real_pendulum.gif`, v0.9 | 0.158 | 0.101 | 2122.7 | **230.1%** |
+| `real_pendulum.gif`, v1.7 | 0.622 | 0.518 | 357.5 | 6.6% |
+| `real_double_pendulum.gif`, v0.9 | 0.071 | 0.039 | 8425.9 | **616.6%** |
+| `real_double_pendulum.gif`, v1.7 | 0.498 | 0.355 | 560.5 | 9.7% |
 
-The double pendulum paints **more than six times** the ink its source had.
+At v0.9 the double pendulum painted **more than six times** the ink its
+source had. The v1.7 audit takes out every fragment that made the picture
+worse, so what is left of this row is a *description* problem: the dashed
+traces still come back as hundreds of short-lived fragments (419 shapes on
+the double pendulum), each of which measurably helps, and none of which is
+the dashed line the source drew.
 
 This row is worth dwelling on, because v0.8 recorded the double pendulum as its
 headline win: 45 → 19 animate blocks, 1159 → 186 keyframes, 54 KB → 25 KB. All
@@ -225,6 +233,20 @@ always true; only one of them was measurable.
   20.1 → **22.2 dB** (IoU 0.44 → **0.63**). Flat content never takes a plate.
   `shaded.vac`'s gradients, already 39.5 dB as code, stay code.
 
+- **v1.7 — every shape earns its place, measured.** Through v1.6 a shape
+  stayed in the output once its track cleared the tracker's gates; nothing
+  checked that drawing it helped. Each shape is now taken out of the
+  reconstruction in turn, topmost first, and only the rectangle it touches is
+  re-rendered without it. The full measurement already holds every frame's
+  raw tallies, so the clip's score without the shape follows exactly. It
+  stays only if the clip reconstructs better with it, in the selection rule's
+  currency. On the corpus the shapes it removed were worse than nothing:
+  `real_double_pendulum` 19.70 → **20.64 dB** with spurious ink 24.6% →
+  **9.7%** and 192 → **166 KB**; `real_pendulum` 22.18 → **22.60 dB**,
+  58 → **49 KB**; `testsrc2` 94 → **55 KB** (46 of 110 shapes out) at
+  22.17 → 22.24 dB. One trade: `real_pendulum`'s ink IoU dips 0.626 → 0.622
+  while its residual falls 9%.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -232,22 +254,22 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
-| `testsrc2.mp4` | 0.9951 | 0.9858 | 394.3 | 22.17 | 0.4% | 110 |
+| `testsrc2.mp4` | 0.9951 | 0.9858 | 387.9 | 22.24 | 0.4% | 64 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
 | `real_bouncing_ball.gif` | 0.9883 | 0.9845 | 5.3 | 40.86 | 0.8% | 2 |
 | `outlined_ui.mp4` | 0.9839 | 0.9689 | 28.8 | 33.54 | 1.1% | 4 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `real_newtons_cradle.gif` | 0.9190 | 0.9017 | 75.4 | 29.36 | 5.7% | 48 |
-| `mandelbrot.mp4` | 0.7639 | 0.3961 | 4163.2 | 11.94 | 13.7% | 43 |
+| `real_newtons_cradle.gif` | 0.9190 | 0.9017 | 75.3 | 29.36 | 5.7% | 47 |
+| `mandelbrot.mp4` | 0.7658 | 0.3961 | 4148.6 | 11.95 | 12.8% | 33 |
 | `real_loader.gif` | 0.7318 | 0.7115 | 173.2 | 25.75 | 9.8% | 16 |
-| `real_pendulum.gif` | 0.6256 | 0.5270 | 393.5 | 22.18 | 12.2% | 41 |
-| `real_double_pendulum.gif` | 0.4918 | 0.3389 | 697.2 | 19.70 | 24.6% | 454 |
+| `real_pendulum.gif` | 0.6215 | 0.5180 | 357.5 | 22.60 | 6.6% | 27 |
+| `real_double_pendulum.gif` | 0.4979 | 0.3552 | 560.5 | 20.64 | 9.7% | 419 |
 
-The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
-flat-shaded content of exactly the kind the detector was built for. The spread
-between those and the bottom of the table is the honest statement of where VAC
-currently stands.
+Flat-shaded content of exactly the kind the detector was built for, meaning
+VAC's own output and ffmpeg `drawbox` rectangles, reconstructs at 33–47 dB. The
+spread between that and the bottom of the table is the honest statement of
+where VAC currently stands.
 
 ---
 

@@ -460,6 +460,47 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.7 — every shape earns its place.**
+///
+/// Through v1.6 a shape stayed in the output once its track cleared the
+/// tracker's gates; nothing checked that drawing it helped. On the corpus,
+/// 35 of the double pendulum's 454 shapes and 46 of `testsrc2`'s 110 made
+/// the reconstruction *worse*. The audit takes each shape out in turn and
+/// keeps it only if the clip reconstructs better with it.
+///
+/// Here the source document is its own perfect reconstruction, with two
+/// shapes injected: a wrong one (a blob where the source has nothing) and
+/// an exact duplicate of a real ball drawn over it (which changes no
+/// pixel). Both must go, and nothing else.
+#[test]
+fn a_shape_the_reconstruction_is_no_better_with_is_taken_out() {
+    let source = vac::read(examples_dir().join("two_balls.vac")).expect("read fixture");
+    let frames = vac::rendered_to_video_frames(&vac::render(&source).expect("render"), source.canvas.fps);
+    let mut doc = source.clone();
+    let extra = vac::parse(
+        "canvas 640x360 @30fps\nscene main {\n  duration 3s\n  \
+         let stray = ellipse(320, 180, 15, 9)\n  stray.fill = #3a8f4c\n  stray.stroke = none\n  \
+         let red_again = ellipse(60, 100, 22, 22)\n  red_again.fill = #e94560\n  red_again.stroke = none\n  \
+         animate red_again {\n    0ms -> position(60, 100)\n    1500ms -> position(560, 100)\n    3s -> position(60, 100)\n    easing: linear\n  }\n}\n",
+    )
+    .expect("parse the injected shapes");
+    doc.scenes[0].statements.extend(extra.scenes[0].statements.clone());
+
+    let audited = vac::audit(&frames, doc).expect("audit");
+    let mut removed = audited.removed.clone();
+    removed.sort();
+    assert_eq!(removed, ["red_again", "stray"], "exactly the two injected shapes must go");
+    assert_eq!(audited.document, source, "everything else must be left as it was");
+    assert!(audited.fidelity.residual == 0.0, "the audited document is the perfect reconstruction again");
+
+    // And on a real decompile, nothing the audit keeps is worse than before.
+    let (_, recovered, fid) = hermetic("two_balls.vac");
+    let again = vac::audit(&vac::rendered_to_video_frames(&vac::render(&source).unwrap(), source.canvas.fps), recovered.clone())
+        .expect("audit a decompile");
+    assert!(again.removed.is_empty(), "an audited decompile has nothing left to take out: {:?}", again.removed);
+    assert!(again.fidelity.residual <= fid.residual);
+}
+
 /// **FIXED in v1.6 — scenery no vector primitive can describe.**
 ///
 /// `textured.vac`'s background is a smooth, detailed texture. Vectors

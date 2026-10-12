@@ -233,6 +233,8 @@ struct Chosen {
     plate: Plate,
     /// The chosen candidate's fidelity, when `Auto` had to measure it.
     fidelity: Option<Fidelity>,
+    /// Shapes the audit (v1.7) measured and took out.
+    audited_out: usize,
 }
 
 /// Every `Auto` knob is resolved here, because this is the layer that
@@ -242,6 +244,24 @@ struct Chosen {
 /// rate–distortion mode decision against the frames it is encoding. No
 /// content classifier decides; the reconstruction does.
 fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
+    let chosen = choose(frames, opts)?;
+    if !opts.audit {
+        return Ok(chosen);
+    }
+    let fidelity = match chosen.fidelity {
+        Some(f) => f,
+        None => measure(frames, &chosen.document)?,
+    };
+    let a = audit_measured(frames, chosen.document, fidelity)?;
+    Ok(Chosen {
+        document: a.document,
+        fidelity: Some(a.fidelity),
+        audited_out: a.removed.len(),
+        ..chosen
+    })
+}
+
+fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let segs: &[Segmentation] = match opts.segmentation {
         Segmentation::Auto => &[Segmentation::Components, Segmentation::Regions, Segmentation::Edges],
         Segmentation::Components => &[Segmentation::Components],
@@ -265,6 +285,7 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
             background: bgs[0],
             plate: opts.plate,
             fidelity: None,
+            audited_out: 0,
         });
     }
     // The static layer and its stripping depend only on the background
@@ -317,6 +338,7 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
                 background,
                 plate: Plate::Vector,
                 fidelity: Some(fid),
+                audited_out: 0,
             });
         }
     }
@@ -358,10 +380,206 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
             background: best.background,
             plate: Plate::Raster,
             fidelity: Some(fid),
+            audited_out: 0,
         }
     } else {
         best
     })
+}
+
+/// What the shape audit (v1.7) did to a document.
+#[derive(Debug, Clone)]
+pub struct Audit {
+    /// The document with every shape the reconstruction is no better with
+    /// taken out, and the remaining `shape_<n>`, `static_<n>` and
+    /// `ground_<n>` renumbered without gaps.
+    pub document: Document,
+    /// Its measured fidelity.
+    pub fidelity: Fidelity,
+    /// The names, as they were in the input, of the shapes taken out.
+    pub removed: Vec<String>,
+}
+
+/// Every shape earns its place, measured (v1.7).
+///
+/// The tracker emits a shape for every track that clears its gates, and
+/// v1.0's pruning only *estimated* what a shape is worth — its area times
+/// its contrast against one flat background, which says nothing over a
+/// raster plate or a gradient. Here each shape is taken out of the
+/// reconstruction in turn, topmost first, and only its own footprint is
+/// re-rendered without it ([`vac_compiler::render::Rig`]). The per-frame
+/// error and ink counts the full measurement already holds are updated by
+/// what changed there, so the clip's score without the shape is known
+/// exactly from a few small renders. The shape stays only if the clip
+/// reconstructs better *with* it, in the selection rule's own currency
+/// ([`improvement`]); a shape that changes nothing, or makes things worse,
+/// goes. The result is re-measured in full and kept only if it measures at
+/// least as well as what went in.
+///
+/// Works on any single-scene document — VAC's own output, an older
+/// version's, or a hand-edited source — and `decompile` runs it on every
+/// result unless [`DecompileOptions::audit`] is off.
+pub fn audit(original: &[VideoFrame], doc: Document) -> Result<Audit> {
+    let fid = measure(original, &doc)?;
+    audit_measured(original, doc, fid)
+}
+
+/// [`audit`] on a document whose fidelity is already measured.
+fn audit_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity) -> Result<Audit> {
+    let unchanged = |document: Document, fidelity: Fidelity| Audit {
+        document,
+        fidelity,
+        removed: Vec::new(),
+    };
+    if doc.scenes.len() != 1 || fid.frames.len() != frames.len() {
+        return Ok(unchanged(doc, fid));
+    }
+    let rig = vac_compiler::render::Rig::new(&doc)?;
+    let count = rig.frame_count();
+    let idx = aligned_indices(frames, count, doc.canvas.fps);
+    let mut wanted: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (j, &i) in idx.iter().enumerate() {
+        wanted[i].push(j);
+    }
+    let bg = ink_background(frames);
+    let opts = CompareOptions::default();
+    let names: Vec<String> = rig.shapes(0).to_vec();
+    let bounds: Vec<Vec<Option<[u32; 4]>>> =
+        (0..count).map(|i| (0..names.len()).map(|k| rig.bounds(i, k)).collect()).collect();
+    let overlaps = |a: [u32; 4], b: [u32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+
+    // Each source frame's raw tallies, exactly as `compare_frame` counted
+    // them, and the clip score they pool to.
+    let compared: Vec<f64> = fid.frames.iter().map(|f| f.compared_pixels as f64).collect();
+    let mut sse: Vec<f64> = fid.frames.iter().map(|f| f.residual * 3.0 * f.compared_pixels as f64).collect();
+    let mut inter: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px - f.missing_px) as i64).collect();
+    let mut union: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px + f.spurious_px) as i64).collect();
+    let frame_res = |sse: f64, c: f64| if c > 0.0 { sse / (3.0 * c) } else { 0.0 };
+    let frame_iou = |i: i64, u: i64| if u > 0 { i as f64 / u as f64 } else { 1.0 };
+    let mut res_sum: f64 = (0..frames.len()).map(|j| frame_res(sse[j], compared[j])).sum();
+    let mut iou_sum: f64 = (0..frames.len()).map(|j| frame_iou(inter[j], union[j])).sum();
+
+    // One pass, topmost first: a second pass was measured to take out
+    // nothing more on any corpus clip.
+    let mut removed = vec![false; names.len()];
+    for k in (0..names.len()).rev() {
+        if names[k] == "bg" || names[k] == "plate" {
+            continue;
+        }
+        // What taking shape `k` out changes, per source frame.
+        let mut deltas: Vec<(usize, f64, i64, i64)> = Vec::new();
+        for i in 0..count {
+            let Some(r) = bounds[i][k] else { continue };
+            if wanted[i].is_empty() {
+                continue;
+            }
+            let admit = |m: usize| !removed[m] && bounds[i][m].is_some_and(|b| overlaps(b, r));
+            let with = rig.render_region(i, r, admit);
+            let without = rig.render_region(i, r, |m| m != k && admit(m));
+            let rw = (r[2] - r[0]) as usize;
+            for &j in &wanted[i] {
+                let src = &frames[j];
+                let (mut ds, mut di, mut du) = (0i64, 0i64, 0i64);
+                for y in r[1]..r[3] {
+                    for x in r[0]..r[2] {
+                        let q = ((y - r[1]) as usize * rw + (x - r[0]) as usize) * 4;
+                        let (a, b) = (&with[q..q + 4], &without[q..q + 4]);
+                        if a == b {
+                            continue;
+                        }
+                        let p = ((y * src.width + x) * 4) as usize;
+                        let o = &src.pixels[p..p + 4];
+                        if o[3] < vac_metrics::MIN_OPAQUE_ALPHA {
+                            continue;
+                        }
+                        let sq = |c: &[u8]| -> i64 {
+                            (0..3).map(|n| (o[n] as i64 - c[n] as i64).pow(2)).sum()
+                        };
+                        ds += sq(b) - sq(a);
+                        let oi = is_ink(o, bg, &opts);
+                        let (ai, bi) = (is_ink(a, bg, &opts), is_ink(b, bg, &opts));
+                        di += (oi && bi) as i64 - (oi && ai) as i64;
+                        du += (oi || bi) as i64 - (oi || ai) as i64;
+                    }
+                }
+                if ds != 0 || di != 0 || du != 0 {
+                    deltas.push((j, ds as f64, di, du));
+                }
+            }
+        }
+        let (mut res_wo, mut iou_wo) = (res_sum, iou_sum);
+        for &(j, ds, di, du) in &deltas {
+            res_wo += frame_res(sse[j] + ds, compared[j]) - frame_res(sse[j], compared[j]);
+            iou_wo += frame_iou(inter[j] + di, union[j] + du) - frame_iou(inter[j], union[j]);
+        }
+        // How much better the clip is *with* shape `k` than without it.
+        let gain = (res_wo.max(1e-9) / res_sum.max(1e-9)).ln() + (iou_sum.max(1e-9) / iou_wo.max(1e-9)).ln();
+        if gain <= 0.0 {
+            removed[k] = true;
+            res_sum = res_wo;
+            iou_sum = iou_wo;
+            for (j, ds, di, du) in deltas {
+                sse[j] += ds;
+                inter[j] += di;
+                union[j] += du;
+            }
+        }
+    }
+
+    let out: std::collections::HashSet<&str> =
+        names.iter().zip(&removed).filter(|(_, &r)| r).map(|(n, _)| n.as_str()).collect();
+    if out.is_empty() {
+        return Ok(unchanged(doc, fid));
+    }
+    let mut pruned = doc.clone();
+    pruned.scenes[0].statements.retain(|st| match st {
+        Statement::Let { name, .. } => !out.contains(name.as_str()),
+        Statement::Assign { target, .. } => !out.contains(target.as_str()),
+        Statement::Animate(a) => !out.contains(a.target.as_str()),
+    });
+    renumber(&mut pruned);
+    let pfid = measure(frames, &pruned)?;
+    if reconstructs_better(&fid, &pfid) {
+        return Ok(unchanged(doc, fid));
+    }
+    let removed = names.iter().zip(&removed).filter(|(_, &r)| r).map(|(n, _)| n.clone()).collect();
+    Ok(Audit {
+        document: pruned,
+        fidelity: pfid,
+        removed,
+    })
+}
+
+/// Close the gaps the audit leaves in `shape_<n>`, `static_<n>` and
+/// `ground_<n>`, keeping each family in declaration order.
+fn renumber(doc: &mut Document) {
+    for scene in &mut doc.scenes {
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut next: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+        for st in &scene.statements {
+            if let Statement::Let { name, .. } = st {
+                for family in ["shape_", "static_", "ground_"] {
+                    if name.strip_prefix(family).is_some_and(|n| n.parse::<usize>().is_ok()) {
+                        let n = next.entry(family).or_insert(0);
+                        map.insert(name.clone(), format!("{family}{n}"));
+                        *n += 1;
+                    }
+                }
+            }
+        }
+        let rename = |s: &mut String| {
+            if let Some(n) = map.get(s.as_str()) {
+                *s = n.clone();
+            }
+        };
+        for st in &mut scene.statements {
+            match st {
+                Statement::Let { name, .. } => rename(name),
+                Statement::Assign { target, .. } => rename(target),
+                Statement::Animate(a) => rename(&mut a.target),
+            }
+        }
+    }
 }
 
 /// How much better a raster plate must reconstruct than the best vector
@@ -662,6 +880,9 @@ pub struct Verification {
     pub shapes: usize,
     pub animate_blocks: usize,
     pub keyframes: usize,
+    /// Shapes the decompiler emitted that the audit (v1.7) measured as not
+    /// improving the reconstruction, and took out. 0 for a given document.
+    pub audited_out: usize,
 }
 
 /// Decompile a video, re-render the result, and score it against the
@@ -681,6 +902,7 @@ pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verifi
         chosen.segmentation,
         chosen.background,
         chosen.plate,
+        chosen.audited_out,
     ))
 }
 
@@ -709,6 +931,7 @@ pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verific
         Segmentation::Auto,
         Background::Auto,
         plate,
+        0,
     ))
 }
 
@@ -719,6 +942,7 @@ fn summarise(
     segmentation: Segmentation,
     background: Background,
     plate: Plate,
+    audited_out: usize,
 ) -> Verification {
     let text = vac_format::write(&doc);
     let mut shapes = 0usize;
@@ -747,6 +971,7 @@ fn summarise(
         shapes,
         animate_blocks,
         keyframes,
+        audited_out,
     }
 }
 
