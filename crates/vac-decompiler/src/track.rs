@@ -40,7 +40,7 @@ use vac_format::{
     Statement, Transform, Value,
 };
 
-use crate::detect::{Blob, Detection, ShapeKind};
+use crate::detect::{Blob, Detection, Segmentation, ShapeKind};
 use crate::frames::{estimate_fps, VideoFrame};
 use crate::layer::StaticLayer;
 
@@ -220,6 +220,7 @@ pub fn build_document(
     frames: &[VideoFrame],
     detections: &[Detection],
     layer: Option<&StaticLayer>,
+    ground: Option<(&VideoFrame, Color)>,
     tol: &Tolerances,
 ) -> Document {
     let canvas = Canvas {
@@ -293,6 +294,53 @@ pub fn build_document(
     // static shape is a one-sample track, which routes it through
     // exactly the same classifier, outline tracer and honesty checks a
     // moving object gets, and drops out of the animate path for free.
+    // v1.1: ground. Large regions a few shades off the background — a
+    // plot area inside its margin — never reach the foreground threshold,
+    // so through v1.0 they were painted the background colour: on
+    // `real_double_pendulum` a 13-level error over 420 000 pixels. They are
+    // found in the raw temporal median, kept only when large and
+    // rect-shaped, and drawn first, behind everything else.
+    if let Some((raw, ground_bg)) = ground {
+        let gmask = crate::detect::ground_mask(raw, ground_bg);
+        let canvas_px = (canvas.width * canvas.height) as f32;
+        let mut ground: Vec<Blob> = crate::detect::detect_blobs_masked(
+            raw,
+            &gmask,
+            ground_bg,
+            Segmentation::Regions,
+            (canvas_px * GROUND_MIN_FRACTION) as u32,
+        )
+        .into_iter()
+        .filter(|b| b.fill_ratio >= GROUND_MIN_FILL)
+        .collect();
+        ground.sort_by(|a, b| b.area.cmp(&a.area).then_with(|| crate::detect::cmp_position(a, b)));
+        for (n, b) in ground.iter().enumerate() {
+            let name = format!("ground_{n}");
+            // The bbox is the rect: ground regions are flat panels whose
+            // holes are content drawn on top of them.
+            let (x0, y0) = ((b.cx - b.rx).round(), (b.cy - b.ry).round());
+            statements.push(Statement::Let {
+                name: name.clone(),
+                shape: Shape::Rect {
+                    x: x0,
+                    y: y0,
+                    w: (2.0 * b.rx).round(),
+                    h: (2.0 * b.ry).round(),
+                },
+            });
+            statements.push(Statement::Assign {
+                target: name.clone(),
+                property: Property::Fill,
+                value: Value::Color(b.color),
+            });
+            statements.push(Statement::Assign {
+                target: name,
+                property: Property::Stroke,
+                value: Value::None,
+            });
+        }
+    }
+
     if let Some(l) = layer {
         let plate = l.plate();
         let seg = detections.first().map(|d| d.segmentation).unwrap_or_default();
@@ -418,6 +466,15 @@ const ROT_MIN_STATIC_DEG: f32 = 1.5;
 const PATH_ROT_MIN_ELONGATION: f32 = 1.6;
 const PATH_ROT_MIN_RANGE_DEG: f32 = 8.0;
 
+/// Soft (coverage) sizing applies only to samples whose primitive fits at
+/// least this well — the same bar as being called a rect or ellipse at all.
+const SOFT_MIN_FIT_IOU: f32 = 0.88;
+
+/// A ground region must cover at least this fraction of the canvas...
+const GROUND_MIN_FRACTION: f32 = 0.02;
+/// ...and fill at least this much of its bounding box.
+const GROUND_MIN_FILL: f32 = 0.75;
+
 /// How close a bbox edge must sit to the canvas border to count as
 /// clipped by it.
 const CLIP_EDGE_PX: f32 = 1.5;
@@ -457,6 +514,59 @@ fn emit_shape(
         let minors: Vec<f32> = track.samples.iter().map(|(_, b)| half(b.var_minor)).collect();
         rx = round_half(median_f32(&majors)).max(0.5);
         ry = round_half(median_f32(&minors)).max(0.5);
+    }
+    // The bbox medians stay the reference for edge-clipping logic, which
+    // compares them with each sample's own bbox.
+    let (brx, bry) = (rx, ry);
+    // v1.1: an axis-aligned rect or ellipse is sized from coverage-weighted
+    // moments rather than the bbox of thresholded pixels, which reads a
+    // moving shape ~1 px wide and grew `two_balls`' radius by a pixel per
+    // round trip. Samples clipped by the canvas edge under-measure, so
+    // they are left out when any unclipped sample exists.
+    if !rotated && matches!(kind, ShapeKind::Rect | ShapeKind::Ellipse) {
+        let frame_wh = frames.first().map(|f| (f.width as f32, f.height as f32));
+        let inside = |b: &Blob| {
+            frame_wh.is_none_or(|(w, h)| {
+                b.cx - b.rx > CLIP_EDGE_PX
+                    && b.cy - b.ry > CLIP_EDGE_PX
+                    && b.cx + b.rx < w - CLIP_EDGE_PX
+                    && b.cy + b.ry < h - CLIP_EDGE_PX
+            })
+        };
+        let mut use_samples: Vec<&Blob> =
+            track.samples.iter().map(|(_, b)| b).filter(|b| inside(b)).collect();
+        if use_samples.is_empty() {
+            use_samples = track.samples.iter().map(|(_, b)| b).collect();
+        }
+        let half = |v: f32| match kind {
+            ShapeKind::Rect => crate::detect::soft_rect_half(v),
+            _ => crate::detect::soft_ellipse_semi(v),
+        };
+        // Only flat samples that genuinely are their primitive carry a
+        // soft size: the detector declines on shaded blobs, and a blob that
+        // fell back to an ellipse because nothing fitted (a diagonal loader
+        // tick) is no ellipse to size. Use it when most samples qualify.
+        // Rects use the coverage-corrected bbox, which a notch does not
+        // disturb; ellipses use the coverage-weighted variance, which is
+        // exact for an ellipse.
+        let sized: Vec<&&Blob> = use_samples
+            .iter()
+            .filter(|b| b.soft_w > 0.0 && b.soft_h > 0.0 && b.fit_iou >= SOFT_MIN_FIT_IOU)
+            .collect();
+        if sized.len() * 2 > use_samples.len() {
+            let (xs, ys): (Vec<f32>, Vec<f32>) = match kind {
+                ShapeKind::Rect => (
+                    sized.iter().map(|b| b.soft_w * 0.5).collect(),
+                    sized.iter().map(|b| b.soft_h * 0.5).collect(),
+                ),
+                _ => (
+                    sized.iter().map(|b| half(b.soft_var_x)).collect(),
+                    sized.iter().map(|b| half(b.soft_var_y)).collect(),
+                ),
+            };
+            rx = round_tenth(median_f32(&xs)).max(0.5);
+            ry = round_tenth(median_f32(&ys)).max(0.5);
+        }
     }
     let color = median_color(track.samples.iter().map(|(_, b)| b.color));
     let (first_t, first_b) = track.samples[0];
@@ -518,22 +628,22 @@ fn emit_shape(
             return *b;
         }
         let mut u = *b;
-        if b.rx < rx {
+        if b.rx < brx {
             if b.cx - b.rx <= CLIP_EDGE_PX {
-                u.cx = b.cx + b.rx - rx;
+                u.cx = b.cx + b.rx - brx;
             } else if b.cx + b.rx >= w - CLIP_EDGE_PX {
-                u.cx = b.cx - b.rx + rx;
+                u.cx = b.cx - b.rx + brx;
             }
         }
-        if b.ry < ry {
+        if b.ry < bry {
             if b.cy - b.ry <= CLIP_EDGE_PX {
-                u.cy = b.cy + b.ry - ry;
+                u.cy = b.cy + b.ry - bry;
             } else if b.cy + b.ry >= h - CLIP_EDGE_PX {
-                u.cy = b.cy - b.ry + ry;
+                u.cy = b.cy - b.ry + bry;
             }
         }
-        u.rx = u.rx.max(rx);
-        u.ry = u.ry.max(ry);
+        u.rx = u.rx.max(brx);
+        u.ry = u.ry.max(bry);
         u
     };
     let anchor_xy = |b: &Blob| -> (f32, f32) {
@@ -959,6 +1069,13 @@ fn representative_sample(track: &Track) -> usize {
     let mut order: Vec<usize> = (0..track.samples.len()).collect();
     order.sort_by_key(|&i| track.samples[i].1.area);
     order[order.len() / 2]
+}
+
+/// Round to a tenth of a pixel: coverage sizing measures sub-pixel extents,
+/// and a 1.3 px line declared 1 px (half-pixel rounding) lost the partial
+/// pixel its anti-aliasing really covers.
+fn round_tenth(v: f32) -> f32 {
+    (v * 10.0).round() / 10.0
 }
 
 /// Round to the nearest half pixel, so a rect's width `2·rx` can be odd.
@@ -1453,6 +1570,11 @@ mod tests {
             var_major: 144.0,
             var_minor: 144.0,
             angle_deg: 0.0,
+            soft_var_x: 144.0,
+            soft_var_y: 144.0,
+            soft_w: 48.0,
+            soft_h: 48.0,
+            fit_iou: 0.97,
         }
     }
 

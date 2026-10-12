@@ -202,6 +202,18 @@ impl StaticLayer {
     /// measured colour, everything else flattened to the background.
     /// Feeding this to the ordinary blob detector recovers the scene's
     /// shapes with exactly the same measurements a moving object gets.
+    /// The raw per-pixel temporal median, before the static mask is
+    /// applied — what the scene looks like with movers removed, including
+    /// the sub-threshold background structure `plate()` flattens away.
+    pub fn median_frame(&self) -> VideoFrame {
+        VideoFrame {
+            width: self.width,
+            height: self.height,
+            pixels: self.median.clone(),
+            delay_ms: self.delay_ms,
+        }
+    }
+
     pub fn plate(&self) -> VideoFrame {
         let mut pixels = self.median.clone();
         for i in 0..self.mask.len() {
@@ -413,6 +425,30 @@ fn plate_visible(frame: &[u8], median: &[u8], i: usize) -> bool {
 /// turn) strides across hundreds of megabytes per pixel and spends all
 /// its time in cache misses; banding keeps the working set to a few
 /// megabytes.
+/// The per-pixel temporal median of a clip as a frame — the scene with
+/// its movers removed — or `None` for clips too short to have one or with
+/// inconsistent frame sizes. The static layer builds on the same median;
+/// the ground pass (v1.1) needs it even when no static layer forms.
+pub fn median_frame(frames: &[VideoFrame]) -> Option<VideoFrame> {
+    if frames.len() < MIN_LAYER_FRAMES {
+        return None;
+    }
+    let (width, height) = (frames[0].width, frames[0].height);
+    if frames.iter().any(|f| f.width != width || f.height != height) {
+        return None;
+    }
+    let n = width as usize * height as usize;
+    if n == 0 {
+        return None;
+    }
+    Some(VideoFrame {
+        width,
+        height,
+        pixels: temporal_median(frames, n),
+        delay_ms: frames[0].delay_ms,
+    })
+}
+
 fn temporal_median(frames: &[VideoFrame], n: usize) -> Vec<u8> {
     let sampled: Vec<&VideoFrame> = if frames.len() <= MAX_PLATE_SAMPLES {
         frames.iter().collect()

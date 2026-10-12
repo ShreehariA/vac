@@ -329,6 +329,36 @@ fn rotation_is_recovered_along_the_source_curve() {
     }
 }
 
+/// **FIXED in v1.1 — ground: regions a few shades off the background.**
+///
+/// A region whose colour differs from the background by less than the
+/// foreground threshold was painted the background colour. On
+/// `real_double_pendulum` that was its whole plot area (a near-white panel
+/// in an off-white margin, 13 levels apart over 420 000 pixels); here it
+/// is `panel.vac`'s panel, 21 units off.
+#[test]
+fn a_panel_near_the_background_is_recovered() {
+    let (_, recovered, fid) = hermetic("panel.vac");
+    println!("{}\n{fid}", vac::to_string(&recovered));
+    let ground = recovered
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .find_map(|st| match st {
+            Statement::Let { name, shape: vac::Shape::Rect { x, y, w, h } } if name.starts_with("ground_") => {
+                Some((*x, *y, *w, *h))
+            }
+            _ => None,
+        })
+        .expect("the panel should come back as a ground rect");
+    let near = |a: f32, b: f32| (a - b).abs() <= 1.0;
+    assert!(
+        near(ground.0, 40.0) && near(ground.1, 40.0) && near(ground.2, 240.0) && near(ground.3, 180.0),
+        "ground rect {ground:?}, source (40, 40, 240, 180)"
+    );
+    assert!(fid.residual < 2.0, "panel.vac residual {:.2}", fid.residual);
+}
+
 /// **DEFECT — strokes are never recovered.**
 ///
 /// `emit_shape` writes `stroke = none` unconditionally, and the renderer

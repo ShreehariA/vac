@@ -104,6 +104,24 @@ pub struct Blob {
     /// Rotation of the fitted primitive in degrees: 0 when an axis-aligned
     /// rect or ellipse fitted best, `theta_deg` when an oriented one did.
     pub angle_deg: f32,
+    /// Coverage-weighted position variance along x and y (v1.1). Each
+    /// pixel counts by the fraction of it the shape covers — read back from
+    /// where its colour sits between the background and the fill — so an
+    /// anti-aliased edge contributes its true partial area. The bbox of
+    /// thresholded pixels reads a moving shape about a pixel too wide (both
+    /// edges straddle a pixel at most sub-pixel phases), which is what made
+    /// repeated round-trips grow every shape by a pixel per generation.
+    pub soft_var_x: f32,
+    pub soft_var_y: f32,
+    /// Coverage-corrected bbox width and height (v1.1): the thresholded
+    /// bbox, minus the uncovered part of its outermost columns and rows,
+    /// plus the covered part of the sub-threshold pixels just outside. Exact
+    /// for an anti-aliased rect at any sub-pixel phase, and — unlike a
+    /// variance — unaffected by notches in it. 0 when sizing declined.
+    pub soft_w: f32,
+    pub soft_h: f32,
+    /// IoU of the fitted primitive against the blob's pixels.
+    pub fit_iou: f32,
 }
 
 impl Blob {
@@ -161,6 +179,21 @@ const REGION_JOIN_SQ: u32 = 20 * 20 * 3;
 /// Squared RGB distance around the modal border bin that still counts
 /// toward the background mean.
 const BG_REFINE_SQ: u32 = 12 * 12 * 3;
+
+/// Soft sizing only applies to blobs whose interior colour spread (RMS per
+/// channel) is under this — flat fills. Shaded blobs keep the bbox.
+const SOFT_MAX_INTERIOR_STD: f64 = 10.0;
+/// ...measured over at least this many interior pixels.
+const SOFT_MIN_INTERIOR: u64 = 16;
+
+/// Below this squared fill-to-background contrast, coverage cannot be read
+/// from a pixel's colour and soft sizing falls back to whole pixels.
+const SOFT_MIN_CONTRAST_SQ: f64 = 60.0 * 60.0;
+
+/// Squared RGB distance from the background above which a pixel belongs
+/// to the ground band (v1.1): about 7 levels per channel, well above
+/// codec noise on a flat field.
+const GROUND_MIN_SQ: u32 = 7 * 7 * 3;
 
 /// Upper bound on fringe-absorption passes in `label_regions`.
 const ABSORB_MAX_PASSES: usize = 4;
@@ -405,11 +438,41 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<
 /// [`detect_blobs`] with an explicit minimum blob area — the one detector
 /// tolerance the quality dial (v1.0) scales.
 pub(crate) fn detect_blobs_with(f: &VideoFrame, bg: Color, seg: Segmentation, min_area: u32) -> Vec<Blob> {
+    let mask = foreground_mask(f, bg);
+    detect_blobs_masked(f, &mask, bg, seg, min_area)
+}
+
+/// Pixels whose colour is measurably off the background but too close to
+/// it to count as foreground (v1.1): the band between `GROUND_MIN_SQ` and
+/// the foreground threshold. A plot area a few shades lighter than its
+/// margin lives here — and was painted the margin's colour, a flat error
+/// across half the frame.
+pub(crate) fn ground_mask(f: &VideoFrame, bg: Color) -> Vec<bool> {
+    let n = (f.width * f.height) as usize;
+    (0..n)
+        .map(|i| {
+            let p = &f.pixels[i * 4..i * 4 + 4];
+            if p[3] < MIN_OPAQUE_ALPHA {
+                return false;
+            }
+            let d = |c: usize, b: u8| p[c] as i32 - b as i32;
+            let sq = (d(0, bg.r).pow(2) + d(1, bg.g).pow(2) + d(2, bg.b).pow(2)) as u32;
+            sq > GROUND_MIN_SQ && sq <= FG_THRESHOLD_SQ
+        })
+        .collect()
+}
+
+/// Blobs of a precomputed mask.
+pub(crate) fn detect_blobs_masked(
+    f: &VideoFrame,
+    mask: &[bool],
+    bg: Color,
+    seg: Segmentation,
+    min_area: u32,
+) -> Vec<Blob> {
     let w = f.width as usize;
     let h = f.height as usize;
-
-    let mask = foreground_mask(f, bg);
-    let labels = label(f, &mask, w, h, seg);
+    let labels = label(f, mask, w, h, seg);
 
     // Per-label area count.
     let mut counts = std::collections::HashMap::<u32, u32>::new();
@@ -576,10 +639,23 @@ pub(crate) fn detect_blobs_with(f: &VideoFrame, bg: Color, seg: Segmentation, mi
         });
     }
 
+    // Fourth pass (v1.1): coverage-weighted size.
+    let soft: Vec<SoftSize> = acc
+        .iter()
+        .enumerate()
+        .map(|(bi, a)| {
+            if a.area == 0 {
+                return SoftSize::default();
+            }
+            soft_size(f, &labels, w, h, kept_labels[bi], a, bg)
+        })
+        .collect();
+
     acc.into_iter()
         .zip(oriented)
-        .filter(|(a, _)| a.area > 0)
-        .map(|(a, of)| {
+        .zip(soft)
+        .filter(|((a, _), _)| a.area > 0)
+        .map(|((a, of), soft)| {
             let bbox_w = (a.max_x - a.min_x + 1) as f32;
             let bbox_h = (a.max_y - a.min_y + 1) as f32;
             let rx = bbox_w * 0.5;
@@ -673,6 +749,11 @@ pub(crate) fn detect_blobs_with(f: &VideoFrame, bg: Color, seg: Segmentation, mi
                 var_major,
                 var_minor,
                 angle_deg,
+                soft_var_x: soft.var_x,
+                soft_var_y: soft.var_y,
+                soft_w: soft.w,
+                soft_h: soft.h,
+                fit_iou: best,
             }
         })
         .collect()
@@ -776,6 +857,234 @@ pub fn extract_contour(
         label: target,
     };
     pac_decompiler::contour::trace_outer_contour(&labels, frame.width, frame.height, &region)
+}
+
+/// Coverage-weighted position variances `(var_x, var_y)` of one blob.
+///
+/// Coverage α of a pixel is the projection of `pixel − bg` onto
+/// `fill − bg`, clamped to [0, 1], where `fill` is the blob's interior
+/// colour. Pixels of the blob count with their α, and so do background
+/// pixels touching it: an edge pixel covered 15% falls under the
+/// foreground threshold but is still 15% shape. With too little contrast
+/// to read coverage, every blob pixel counts fully.
+#[derive(Debug, Clone, Copy, Default)]
+struct SoftSize {
+    var_x: f32,
+    var_y: f32,
+    w: f32,
+    h: f32,
+}
+
+fn soft_size(
+    f: &VideoFrame,
+    labels: &[u32],
+    w: usize,
+    h: usize,
+    l: u32,
+    a: &BlobAcc,
+    bg: Color,
+) -> SoftSize {
+    let fill = if a.int_count > 0 {
+        [
+            (a.int_r / a.int_count) as f64,
+            (a.int_g / a.int_count) as f64,
+            (a.int_b / a.int_count) as f64,
+        ]
+    } else {
+        let n = a.area.max(1) as f64;
+        [a.all_r as f64 / n, a.all_g as f64 / n, a.all_b as f64 / n]
+    };
+    let bgc = [bg.r as f64, bg.g as f64, bg.b as f64];
+    let v = [fill[0] - bgc[0], fill[1] - bgc[1], fill[2] - bgc[2]];
+    let vv = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    let readable = vv >= SOFT_MIN_CONTRAST_SQ;
+
+    // The coverage model assumes a flat fill with anti-aliased edges. A
+    // shaded or textured blob (a lit ball, a photograph) breaks it: its
+    // colour variation reads as partial coverage. Measure the blob's own
+    // interior spread and decline — returning zeros sends the caller back
+    // to the bbox — when it is not flat.
+    if a.int_count >= SOFT_MIN_INTERIOR {
+        let (mut sq, mut n) = (0.0f64, 0u64);
+        for y in a.min_y as usize..=a.max_y as usize {
+            for x in a.min_x as usize..=a.max_x as usize {
+                let i = y * w + x;
+                if labels[i] != l
+                    || x == 0
+                    || y == 0
+                    || x + 1 >= w
+                    || y + 1 >= h
+                    || labels[i - 1] != l
+                    || labels[i + 1] != l
+                    || labels[i - w] != l
+                    || labels[i + w] != l
+                {
+                    continue;
+                }
+                let p = i * 4;
+                for c in 0..3 {
+                    let d = f.pixels[p + c] as f64 - fill[c];
+                    sq += d * d;
+                }
+                n += 1;
+            }
+        }
+        if n > 0 && (sq / (3.0 * n as f64)).sqrt() > SOFT_MAX_INTERIOR_STD {
+            return SoftSize::default();
+        }
+    }
+
+    let x0 = (a.min_x as usize).saturating_sub(1);
+    let y0 = (a.min_y as usize).saturating_sub(1);
+    let x1 = (a.max_x as usize + 1).min(w - 1);
+    let y1 = (a.max_y as usize + 1).min(h - 1);
+    let (mut sw, mut sx, mut sy, mut sxx, mut syy) = (0.0f64, 0.0, 0.0, 0.0, 0.0);
+    // Per-column / per-row coverage sums for the edge-profile size.
+    let (bx0, bx1, by0, by1) = (a.min_x as usize, a.max_x as usize, a.min_y as usize, a.max_y as usize);
+    // Coverage samples of the four lines that matter on each axis: the
+    // outermost column/row of the bbox and the sub-threshold one outside it.
+    let mut col_cov: Vec<Vec<f64>> = vec![Vec::new(); x1 - x0 + 1];
+    let mut row_cov: Vec<Vec<f64>> = vec![Vec::new(); y1 - y0 + 1];
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let i = y * w + x;
+            let lab = labels[i];
+            let touching = lab == 0
+                && ((x > 0 && labels[i - 1] == l)
+                    || (x + 1 < w && labels[i + 1] == l)
+                    || (y > 0 && labels[i - w] == l)
+                    || (y + 1 < h && labels[i + w] == l));
+            if lab != l && !touching {
+                continue;
+            }
+            // An edge that blends into *transparency* is no blend of fill
+            // and background at all (the `real_loader` spinner): decline.
+            if f.pixels[i * 4 + 3] < MIN_OPAQUE_ALPHA {
+                return SoftSize::default();
+            }
+            let alpha = if !readable {
+                if lab == l { 1.0 } else { 0.0 }
+            } else {
+                // Coverage is read against the *local* fill — the most
+                // saturated blob pixel in the 3×3 neighbourhood — not the
+                // blob's mean. On a flat fill they agree; on a shaded ball
+                // the rim is darker than the mean, and reading it against
+                // the mean called solid rim pixels "partly covered" and
+                // shrank `real_bouncing_ball` (IoU 0.87 → 0.71).
+                let px = |j: usize| {
+                    [
+                        f.pixels[j * 4] as f64 - bgc[0],
+                        f.pixels[j * 4 + 1] as f64 - bgc[1],
+                        f.pixels[j * 4 + 2] as f64 - bgc[2],
+                    ]
+                };
+                let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                let u = px(i);
+                let mut local = v;
+                let mut best = -1.0f64;
+                for yy in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                    for xx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                        let j = yy * w + xx;
+                        if labels[j] != l {
+                            continue;
+                        }
+                        let q = px(j);
+                        let m = dot(q, q);
+                        if m > best {
+                            best = m;
+                            local = q;
+                        }
+                    }
+                }
+                let ll = dot(local, local);
+                if ll < SOFT_MIN_CONTRAST_SQ {
+                    if lab == l { 1.0 } else { 0.0 }
+                } else {
+                    (dot(u, local) / ll).clamp(0.0, 1.0)
+                }
+            };
+            // Edge profile: a pixel counts toward its column's coverage
+            // when the shape continues horizontally next to it (so the
+            // column's mean reads the edge, not the shape's curvature),
+            // and likewise for rows.
+            let horiz = (x > 0 && labels[i - 1] == l) || (x + 1 < w && labels[i + 1] == l);
+            let vert = (y > 0 && labels[i - w] == l) || (y + 1 < h && labels[i + w] == l);
+            let edge_col = x + 1 == bx0 || x == bx0 || x == bx1 || x == bx1 + 1;
+            let edge_row = y + 1 == by0 || y == by0 || y == by1 || y == by1 + 1;
+            if horiz && edge_col && (y >= by0 && y <= by1) {
+                col_cov[x - x0].push(alpha);
+            }
+            if vert && edge_row && (x >= bx0 && x <= bx1) {
+                row_cov[y - y0].push(alpha);
+            }
+            if alpha <= 0.0 {
+                continue;
+            }
+            let (xf, yf) = (x as f64, y as f64);
+            sw += alpha;
+            sx += alpha * xf;
+            sy += alpha * yf;
+            sxx += alpha * xf * xf;
+            syy += alpha * yf * yf;
+        }
+    }
+    if sw <= 0.0 {
+        return SoftSize::default();
+    }
+    let (mx, my) = (sx / sw, sy / sw);
+    // A straight anti-aliased edge has the same coverage all along it, so
+    // the median along the line reads it exactly — and, unlike a mean,
+    // ignores a rounded corner's missing pixels (a 3 px loader tick with
+    // clipped corners measured 2.71 px wide by its mean).
+    let median = |v: &[f64]| -> f64 {
+        if v.is_empty() {
+            return 0.0;
+        }
+        let mut s = v.to_vec();
+        s.sort_by(|a, b| a.total_cmp(b));
+        s[s.len() / 2]
+    };
+    // bbox span, minus what the outermost columns/rows leave uncovered,
+    // plus what the sub-threshold pixels just outside cover.
+    // The outermost line of an anti-aliased edge always reads above ~0.17
+    // (fainter pixels are not in the mask at all). A line whose median
+    // reads ~0 is a hard, pixel-art end — a one-pixel cap — and there the
+    // bbox already is the extent.
+    let inner = |v: &[f64]| {
+        let m = median(v);
+        if m < 0.1 {
+            1.0
+        } else {
+            m
+        }
+    };
+    let edge = |cov: &[Vec<f64>], lo: usize, hi: usize, origin: usize| -> f64 {
+        let span = (hi - lo + 1) as f64;
+        let inner_lo = inner(&cov[lo - origin]);
+        let inner_hi = inner(&cov[hi - origin]);
+        let outer_lo = if lo > origin { median(&cov[lo - origin - 1]) } else { 0.0 };
+        let outer_hi = if hi - origin + 1 < cov.len() { median(&cov[hi - origin + 1]) } else { 0.0 };
+        span - (1.0 - inner_lo) - (1.0 - inner_hi) + outer_lo + outer_hi
+    };
+    SoftSize {
+        var_x: ((sxx / sw) - mx * mx).max(0.0) as f32,
+        var_y: ((syy / sw) - my * my).max(0.0) as f32,
+        w: edge(&col_cov, bx0, bx1, x0).max(0.0) as f32,
+        h: edge(&row_cov, by0, by1, y0).max(0.0) as f32,
+    }
+}
+
+/// Half-width of the solid rect whose coverage-weighted pixel-centre
+/// variance is `var`: sampling at centres loses the 1/12 px² of spread
+/// inside each pixel, so `W² / 12 = var + 1/12`.
+pub fn soft_rect_half(var: f32) -> f32 {
+    (3.0 * var + 0.25).sqrt()
+}
+
+/// Semi-axis of the solid ellipse with coverage-weighted variance `var`
+/// (`a² / 4 = var + 1/12`).
+pub fn soft_ellipse_semi(var: f32) -> f32 {
+    2.0 * (var + 1.0 / 12.0).sqrt()
 }
 
 /// Principal-axis orientation (degrees, (-90, 90]) and the pixel-position
@@ -1616,5 +1925,86 @@ mod orientation_tests {
         assert_eq!(b.kind, ShapeKind::Ellipse);
         assert_eq!(b.angle_deg, 0.0);
         assert!(b.elongation() < 1.05);
+    }
+}
+
+#[cfg(test)]
+mod soft_size_tests {
+    //! v1.1: coverage-weighted sizing.
+    use super::*;
+
+    const BG: [f32; 3] = [20.0, 20.0, 28.0];
+    const FG: [f32; 3] = [230.0, 80.0, 80.0];
+
+    /// A frame where each pixel is `bg + cov(x, y)·(fg − bg)`.
+    fn covered(w: u32, h: u32, cov: impl Fn(f32, f32) -> f32) -> VideoFrame {
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let c = cov(x as f32, y as f32).clamp(0.0, 1.0);
+                for k in 0..3 {
+                    pixels.push((BG[k] + c * (FG[k] - BG[k])).round() as u8);
+                }
+                pixels.push(255);
+            }
+        }
+        VideoFrame { width: w, height: h, pixels, delay_ms: 33 }
+    }
+
+    /// Exact area coverage of pixel [x, x+1) by the interval [a, b).
+    fn overlap(x: f32, a: f32, b: f32) -> f32 {
+        ((x + 1.0).min(b) - x.max(a)).max(0.0)
+    }
+
+    #[test]
+    fn an_antialiased_rect_at_a_subpixel_offset_is_sized_exactly() {
+        for off in [0.0f32, 0.3, 0.5, 0.8] {
+            let (x0, x1, y0, y1) = (10.0 + off, 30.0 + off, 8.0, 22.0 + off);
+            let f = covered(48, 32, |x, y| overlap(x, x0, x1) * overlap(y, y0, y1));
+            let b = detect_blobs(&f, Color::rgb(20, 20, 28), Segmentation::Components)[0];
+            assert!((b.soft_w - 20.0).abs() < 0.1, "offset {off}: soft width {}", b.soft_w);
+            assert!((b.soft_h - (14.0 + off)).abs() < 0.1, "offset {off}: soft height {}", b.soft_h);
+            // The thresholded bbox is what used to be declared.
+            let bbox_w = 2.0 * b.rx;
+            assert!(bbox_w >= 20.0, "offset {off}: bbox {bbox_w}");
+        }
+    }
+
+    #[test]
+    fn a_shaded_blob_declines_coverage_sizing() {
+        // A radially shaded disc: its interior is not one flat colour, so
+        // colour cannot be read as coverage.
+        let f = {
+            let (w, h) = (64u32, 64u32);
+            let mut pixels = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let d = ((x as f32 - 32.0).powi(2) + (y as f32 - 32.0).powi(2)).sqrt();
+                    let c = if d <= 20.0 {
+                        let t = d / 20.0;
+                        [(240.0 - 140.0 * t) as u8, (240.0 - 140.0 * t) as u8, (240.0 - 140.0 * t) as u8]
+                    } else {
+                        [10, 10, 10]
+                    };
+                    pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+                }
+            }
+            VideoFrame { width: w, height: h, pixels, delay_ms: 33 }
+        };
+        let b = detect_blobs(&f, Color::rgb(10, 10, 10), Segmentation::Components)[0];
+        assert_eq!((b.soft_w, b.soft_h), (0.0, 0.0), "shaded disc must decline: {b:?}");
+    }
+
+    #[test]
+    fn a_hard_edged_cap_keeps_its_bbox_extent() {
+        // A 3×7 pixel-art tick with clipped corners, no anti-aliasing.
+        let f = covered(16, 16, |x, y| {
+            let (x, y) = (x as i32, y as i32);
+            let inside = (5..8).contains(&x) && (4..11).contains(&y);
+            let corner = (x == 5 || x == 7) && (y == 4 || y == 10);
+            if inside && !corner { 1.0 } else { 0.0 }
+        });
+        let b = detect_blobs(&f, Color::rgb(20, 20, 28), Segmentation::Components)[0];
+        assert!((b.soft_w - 3.0).abs() < 1e-3 && (b.soft_h - 7.0).abs() < 1e-3, "{} x {}", b.soft_w, b.soft_h);
     }
 }

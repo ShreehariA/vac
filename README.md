@@ -1523,3 +1523,54 @@ Two things that table says honestly:
 
 The distortion axis also still has the gaps listed in `docs/frontier.md`:
 gradients, strokes, and dotted strokes.
+
+## v1.1 — A fixed point, and the ground
+
+**Repeated round trips now reach a fixed point.** v0.9 found that feeding
+VAC its own output grew every moving shape by a pixel per generation:
+`two_balls` radius 22 → 27 over five generations. v0.9 recorded the cause as
+undiagnosed. The mechanism, now measured:
+
+- a shape moving at sub-pixel speed straddles a pixel on *both* edges in
+  most frames;
+- any pixel more than about 17% covered passes the foreground threshold;
+- so the thresholded bbox reads the shape about a pixel wide, and the
+  median rounds up.
+
+Axis-aligned rects and ellipses are now sized from **coverage**. Each pixel
+counts by the fraction of it the shape covers, read from where its colour
+sits between the background and the local fill.
+
+- **Rects** use the bbox corrected by the median coverage along each edge.
+  That's exact for an anti-aliased edge, and a notch or a rounded pixel-art
+  cap doesn't disturb it.
+- **Ellipses** use coverage-weighted variance.
+- **Blobs the model doesn't describe keep the bbox:** shaded ones (measured
+  by their own interior spread), transparent edges, low contrast, and poor
+  primitive fits. Each of these exclusions was added after the corpus
+  measured it failing: a shaded ball shrank, a pixel-art loader tick lost a
+  row, and a diagonal tick in the ellipse fallback lost width.
+
+Generation 1 now lands at the source's exact size and stays there. The
+property test that documented the drift is now
+`repeated_round_trips_reach_a_fixed_point`.
+
+**Ground.** A region a few shades off the background never clears the
+foreground threshold, so it was painted the background colour.
+`real_double_pendulum`'s plot area is near-white inside an off-white margin:
+a 13-level error over 420 000 pixels. Large rect-shaped regions in that band
+of the static median are now emitted first, as `ground_<n>`.
+
+| | ink IoU | residual |
+|---|---|---|
+| `two_balls.vac` | 0.952 → **0.989** | 8.75 → **1.79** |
+| `diagonal.vac` | 0.916 → **0.991** | 18.89 → **0.76** |
+| `sliding_rect.vac` | 0.983 → **0.999** | 7.05 → **0.45** |
+| `panel.vac` (new) | 0.980 | 40.9 → **0.44** |
+| `vac_control.mp4` | 0.960 → 0.962 | 9.1 → **3.0** (38.5 → 43.4 dB) |
+| `real_double_pendulum.gif` | 0.463 → 0.435 | 1034 → **766** |
+
+The double pendulum's IoU drop is a recorded trade-off. Its 1.3 px
+anti-aliased plot lines are now declared at their measured width instead of
+painting their light fringe solid dark. That fringe counted as ink, but in
+the wrong colour, and residual, which sees colour, improved 26%.

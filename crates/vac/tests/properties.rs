@@ -266,63 +266,56 @@ fn the_decompiler_does_not_invent_ink() {
 /// reaches a fixed point; an unstable one drifts a little further every
 /// generation until the result is unrecognisable.
 ///
-/// **This test documents a defect, it does not assert correctness.**
-/// Nobody had ever run this loop before v0.9, and it fails: shapes
-/// inflate monotonically and show no sign of converging. Measured on
-/// `two_balls.vac`, ink IoU against the original falls 0.9523 → 0.9149 →
-/// 0.8788 → 0.8459 over four generations, because each recovered ellipse
-/// comes back one pixel wider in `rx` than the one that drew it
-/// (22→23→24→25→26→27), while `ry` never moves. `sliding_rect.vac` is
-/// worse: its rect gains 2 px of width per generation (120→130 over five)
-/// with its height pinned at 60.
-///
-/// What is *not* yet established is the trigger. A fully static shape
-/// never drifts at all (the card in `static_and_moving.vac` is stable to
-/// the pixel across five generations) — but neither does the *moving*
-/// ellipse in that same fixture, even though it travels horizontally just
-/// like the two that do inflate. So "moves along an axis" is not the
-/// rule, and the real condition is still open. See `docs/frontier.md`.
-///
-/// The bound below is the currently measured behaviour. It exists to
-/// stop the drift getting *worse*, not to bless it.
+/// **Through v1.0 this drifted.** Each round trip grew `two_balls`'
+/// ellipses by a pixel of radius (22 → 27 over five generations) and
+/// `sliding_rect`'s width by two (120 → 130): a shape moving at sub-pixel
+/// speed straddles a pixel on both edges in most frames, the bbox of
+/// thresholded pixels reads it a pixel wide, and the median rounded up.
+/// v1.1 sizes axis-aligned primitives from coverage — each pixel counts by
+/// how much of it the shape covers — and the loop now reaches a fixed
+/// point at generation one, at the source's exact size.
 #[test]
-fn repeated_round_trips_do_not_drift_worse_than_the_recorded_defect() {
-    let sample = "two_balls.vac";
-    let (doc, gen1_frames) = frames_of(sample);
-    let opts = DecompileOptions::default();
-
-    /// Measured 2026-08-22: 0.9523 → 0.8459 over four generations.
-    /// A little headroom for platform rasteriser differences.
-    const WORST_KNOWN_GEN4_IOU: f64 = 0.83;
-
-    let mut current = doc;
-    let mut scores = Vec::new();
-    for generation in 1..=4 {
-        let rendered = vac::render(&current).unwrap();
-        let frames = vac::rendered_to_video_frames(&rendered, current.canvas.fps);
-        current = vac::decompile_frames(frames, &opts).unwrap();
-
-        // Always score against generation 1 — the original truth — not
-        // against the previous generation, or slow drift would hide.
-        let fid = vac::measure(&gen1_frames, &current).unwrap();
-        scores.push(fid.ink_iou);
-        println!(
-            "generation {generation}: ink IoU vs original = {:.4}",
-            fid.ink_iou
+fn repeated_round_trips_reach_a_fixed_point() {
+    fn dims(d: &Document) -> Vec<(f32, f32)> {
+        d.scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .filter_map(|st| match st {
+                Statement::Let { name, shape } if name != "bg" => Some(match shape {
+                    Shape::Rect { w, h, .. } => (*w, *h),
+                    Shape::Ellipse { rx, ry, .. } => (*rx, *ry),
+                    Shape::Path(p) => (p.len() as f32, 0.0),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+    for (sample, truth) in [("two_balls.vac", (22.0, 22.0)), ("sliding_rect.vac", (120.0, 60.0))] {
+        let (doc, gen1_frames) = frames_of(sample);
+        let opts = DecompileOptions::default();
+        let mut current = doc;
+        let mut seen: Vec<(Vec<(f32, f32)>, f64)> = Vec::new();
+        for _ in 1..=4 {
+            let rendered = vac::render(&current).unwrap();
+            let frames = vac::rendered_to_video_frames(&rendered, current.canvas.fps);
+            current = vac::decompile_frames(frames, &opts).unwrap();
+            // Always score against generation 1 — the original truth — so
+            // slow drift cannot hide behind small steps.
+            let fid = vac::measure(&gen1_frames, &current).unwrap();
+            seen.push((dims(&current), fid.ink_iou));
+        }
+        println!("{sample}: {seen:?}");
+        for (g, (d, _)) in seen.iter().enumerate() {
+            assert!(
+                d.iter().all(|&s| s == truth),
+                "{sample} generation {}: sizes {d:?}, source {truth:?}",
+                g + 1
+            );
+        }
+        let (first, last) = (seen[0].1, seen[3].1);
+        assert!(
+            last >= first - 0.005,
+            "{sample}: fidelity drifts across generations ({first:.4} → {last:.4})"
         );
     }
-
-    let last = *scores.last().unwrap();
-    assert!(
-        last >= WORST_KNOWN_GEN4_IOU,
-        "generational drift got worse than the recorded defect: gen-4 IoU {last:.4} \
-         is below the documented floor {WORST_KNOWN_GEN4_IOU:.4} ({scores:?})"
-    );
-
-    // The drift is monotone downward today. If it ever stops being
-    // monotone, something changed and the recorded numbers are stale.
-    assert!(
-        scores.windows(2).all(|w| w[1] <= w[0] + 1e-9),
-        "drift is no longer monotone — re-measure and update docs/frontier.md: {scores:?}"
-    );
 }

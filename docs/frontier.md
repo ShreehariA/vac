@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v1.0, default quality 50) and is
+table re-measured 2026-10-12 at v1.1, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -30,40 +30,7 @@ scores the reverse.
 
 ---
 
-## 1. Repeated round-trips inflate shapes without converging
-
-**Status: open. Test:
-`repeated_round_trips_do_not_drift_worse_than_the_recorded_defect`.**
-
-Feeding the pipeline its own output does not reach a fixed point. Measured on
-`two_balls.vac`, ink IoU against the original falls every generation:
-
-| generation | 1 | 2 | 3 | 4 |
-|---|---|---|---|---|
-| ink IoU vs original | 0.9523 | 0.9149 | 0.8788 | 0.8459 |
-
-Because each recovered ellipse comes back one pixel wider than the one that
-drew it, forever:
-
-```
-two_balls.vac    rx: 22 → 23 → 24 → 25 → 26 → 27     (ry pinned at 22)
-sliding_rect.vac  w: 120 → 122 → 124 → 126 → 128 → 130  (h pinned at 60)
-```
-
-Anyone using VAC iteratively — decompile, edit, recompile, decompile — watches
-their shapes swell.
-
-**What is not yet established is the trigger.** A fully static shape never
-drifts (the card in `static_and_moving.vac` is stable to the pixel across five
-generations). But neither does the *moving* ellipse in that same fixture, even
-though it travels horizontally exactly like the two that do inflate. So "moves
-along an axis" is not the rule, and the real condition is still open. It is
-recorded here undiagnosed rather than explained away — v0.7 shipped a confident
-diagnosis of the pendulum that v0.8 proved wrong, and once was enough.
-
----
-
-## 2. Strokes are never recovered
+## 1. Strokes are never recovered
 
 **Status: open. Test: `strokes_are_never_recovered`.**
 
@@ -73,7 +40,7 @@ shape comes back as a bare fill.
 
 ---
 
-## 3. Smooth gradients have no primitive
+## 2. Smooth gradients have no primitive
 
 **Status: open. Corpus rows: `mandelbrot.mp4`, `real_newtons_cradle.gif`.**
 
@@ -95,7 +62,7 @@ escape hatch is the fallback for what no vector primitive can say.
 
 ---
 
-## 4. Dotted and dashed strokes fragment
+## 3. Dotted and dashed strokes fragment
 
 **Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
 
@@ -181,6 +148,31 @@ always true; only one of them was measurable.
   (residual 872 → 657); `real_double_pendulum.gif` 0.410 → **0.457**. No
   row regressed.
 
+- **v1.1 — sizes measured from coverage; repeated round trips reach a fixed
+  point; ground.** A shape moving at sub-pixel speed straddles a pixel on
+  both edges in most frames, so the bbox of thresholded pixels read it about
+  a pixel wide. The median rounded up, and every round trip grew it
+  (`two_balls` radius 22 → 27 over five generations, `sliding_rect` 120 →
+  130). Axis-aligned rects and ellipses are now sized from coverage, with
+  each pixel counted by how much of it the shape covers, read from its
+  colour. Rects use a coverage-corrected bbox, unaffected by notches.
+  Ellipses use coverage-weighted variance. Shaded blobs, transparent edges,
+  low contrast, and blobs that fit their primitive poorly all keep the bbox.
+  Generation 1 lands at the source's exact size and stays there.
+  Separately, regions a few shades off the background are found in the
+  static plate's "ground" band and drawn first. Through v1.0 they were
+  painted the background colour.
+  - Fixtures: `two_balls` 0.952 → **0.989**, `diagonal` 0.916 → **0.991**,
+    `crossing` 0.911 → 0.946, `sliding_rect` 0.983 → 0.999, `panel.vac`
+    (new) residual 40.9 → **0.44**.
+  - Corpus: `vac_control` residual 9.1 → **3.0**, `real_double_pendulum`
+    residual 1034 → **766**.
+  - **One recorded trade-off:** `real_double_pendulum` ink IoU 0.463 →
+    0.435. Its 1.3 px anti-aliased plot-frame lines are now declared at
+    their measured width, so they no longer paint their light fringe solid
+    dark. That fringe was counted as "ink" but painted the wrong colour.
+    Residual is the measure that sees colour, and it improved 26%.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -189,15 +181,15 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
 | `slide_in_card.mp4` | 0.9918 | 0.8792 | 3.0 | 43.42 | 0.3% | 2 |
-| `testsrc2.mp4` | 0.9871 | 0.9771 | 1349.7 | 16.83 | 1.2% | 202 |
+| `testsrc2.mp4` | 0.9871 | 0.9771 | 1347.6 | 16.84 | 1.2% | 202 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
-| `vac_control.mp4` | 0.9596 | 0.9449 | 9.1 | 38.54 | 2.9% | 3 |
+| `vac_control.mp4` | 0.9620 | 0.9493 | 3.0 | 43.35 | 0.5% | 3 |
 | `real_bouncing_ball.gif` | 0.8686 | 0.8662 | 419.9 | 21.90 | 14.0% | 3 |
 | `mandelbrot.mp4` | 0.7640 | 0.3963 | 4166.1 | 11.93 | 13.7% | 43 |
-| `real_loader.gif` | 0.6908 | 0.6577 | 228.3 | 24.55 | 13.4% | 16 |
-| `real_newtons_cradle.gif` | 0.6419 | 0.6369 | 525.4 | 20.93 | 46.9% | 202 |
-| `real_double_pendulum.gif` | 0.4630 | 0.3193 | 1033.8 | 17.99 | 47.0% | 378 |
-| `real_pendulum.gif` | 0.4309 | 0.3273 | 646.1 | 20.03 | 11.9% | 48 |
+| `real_loader.gif` | 0.6998 | 0.6706 | 240.7 | 24.32 | 10.3% | 16 |
+| `real_newtons_cradle.gif` | 0.6419 | 0.6369 | 525.3 | 20.93 | 46.9% | 202 |
+| `real_double_pendulum.gif` | 0.4347 | 0.2947 | 766.5 | 19.29 | 39.4% | 379 |
+| `real_pendulum.gif` | 0.4298 | 0.3268 | 646.4 | 20.03 | 11.8% | 48 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread

@@ -124,20 +124,21 @@ const IOU_TOL: f64 = 0.01;
 /// Recorded hermetic scores: (fixture, ink_iou, residual).
 const BASELINE: &[(&str, f64, f64)] = &[
     ("ball.vac", 0.9986, 0.04),
-    ("crossing.vac", 0.9106, 3.94),
-    ("diagonal.vac", 0.9158, 18.89),
+    ("crossing.vac", 0.9459, 1.87),
+    ("diagonal.vac", 0.9914, 0.76),
     ("fade.vac", 1.0000, 0.01),
     ("grow.vac", 0.9699, 18.61),
     ("late_entry.vac", 0.9938, 0.85),
     ("occlusion.vac", 0.9997, 0.04),
+    ("panel.vac", 0.9801, 0.44),
     ("pop_in.vac", 0.9884, 2.41),
-    ("round_trip_two.vac", 0.9515, 10.20),
-    ("sliding_rect.vac", 0.9833, 7.05),
+    ("round_trip_two.vac", 0.9741, 4.41),
+    ("sliding_rect.vac", 0.9986, 0.45),
     ("spin.vac", 0.9170, 39.98),
     ("static_and_moving.vac", 0.9975, 1.02),
     ("triangle.vac", 0.9748, 18.75),
-    ("two_balls.vac", 0.9523, 8.75),
-    ("two_tone.vac", 0.9909, 83.45),
+    ("two_balls.vac", 0.9893, 1.79),
+    ("two_tone.vac", 0.9916, 68.12),
 ];
 
 fn baseline_for(sample: &str) -> (f64, f64) {

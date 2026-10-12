@@ -133,11 +133,31 @@ pub fn decompile_frames(
     } else {
         None
     };
+    // The ground pass reads the raw temporal median, which the static
+    // layer already holds when it formed; otherwise it is measured here,
+    // before any stripping.
+    let ground = if opts.static_layer {
+        match &scene {
+            Some(l) => Some((l.median_frame(), l.bg)),
+            None => layer::median_frame(&frames).map(|m| {
+                let bg = detect::background_of(&m, opts.background);
+                (m, bg)
+            }),
+        }
+    } else {
+        None
+    };
     if let Some(l) = &scene {
         l.strip(&mut frames);
     }
     let tol = track::Tolerances::from_quality(opts.quality);
     let detections =
         detect::detect_all(&frames, opts.segmentation, opts.background, tol.min_blob_area);
-    Ok(track::build_document(&frames, &detections, scene.as_ref(), &tol))
+    Ok(track::build_document(
+        &frames,
+        &detections,
+        scene.as_ref(),
+        ground.as_ref().map(|(m, bg)| (m, *bg)),
+        &tol,
+    ))
 }

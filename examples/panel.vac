@@ -1,0 +1,29 @@
+// Fixture (v1.1): a panel a few shades off the background.
+//
+// The panel differs from the background by ~21 RGB units — under the
+// foreground threshold (~42), so through v1.0 it was painted the
+// background colour: a flat error over a fifth of the frame. v1.1 finds
+// it in the static plate's "ground" band and draws it first.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 2s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #202020
+
+  let panel = rect(40, 40, 240, 180)
+  panel.fill = #2c2c2c
+  panel.stroke = none
+
+  let dot = ellipse(80, 260, 16, 16)
+  dot.fill = #e05050
+  dot.stroke = none
+
+  animate dot {
+    0ms -> position(80, 260)
+    2s  -> position(400, 260)
+    easing: linear
+  }
+}
