@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v0.14) and is
+table re-measured 2026-10-12 at v1.0, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -189,15 +189,15 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
 | `slide_in_card.mp4` | 0.9918 | 0.8792 | 3.0 | 43.42 | 0.3% | 2 |
-| `testsrc2.mp4` | 0.9871 | 0.9771 | 1349.2 | 16.83 | 1.2% | 202 |
+| `testsrc2.mp4` | 0.9871 | 0.9771 | 1349.7 | 16.83 | 1.2% | 202 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9596 | 0.9449 | 9.1 | 38.54 | 2.9% | 3 |
-| `real_bouncing_ball.gif` | 0.8684 | 0.8663 | 420.1 | 21.90 | 14.0% | 3 |
-| `mandelbrot.mp4` | 0.7650 | 0.3962 | 4186.4 | 11.91 | 14.0% | 43 |
+| `real_bouncing_ball.gif` | 0.8686 | 0.8662 | 419.9 | 21.90 | 14.0% | 3 |
+| `mandelbrot.mp4` | 0.7640 | 0.3963 | 4166.1 | 11.93 | 13.7% | 43 |
 | `real_loader.gif` | 0.6908 | 0.6577 | 228.3 | 24.55 | 13.4% | 16 |
-| `real_newtons_cradle.gif` | 0.6419 | 0.6369 | 528.9 | 20.90 | 46.9% | 202 |
-| `real_double_pendulum.gif` | 0.4569 | 0.3202 | 1055.9 | 17.89 | 48.5% | 378 |
-| `real_pendulum.gif` | 0.4195 | 0.3272 | 656.7 | 19.96 | 11.4% | 48 |
+| `real_newtons_cradle.gif` | 0.6419 | 0.6369 | 525.4 | 20.93 | 46.9% | 202 |
+| `real_double_pendulum.gif` | 0.4630 | 0.3193 | 1033.8 | 17.99 | 47.0% | 378 |
+| `real_pendulum.gif` | 0.4309 | 0.3273 | 646.1 | 20.03 | 11.9% | 48 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread
