@@ -53,14 +53,46 @@ impl ShapeState {
 }
 
 pub fn render_document(doc: &Document) -> Result<Vec<RenderedFrame>, CompileError> {
-    let mut all = Vec::new();
-    for scene in &doc.scenes {
-        all.extend(render_scene(doc, scene)?);
-    }
+    let mut all = Vec::with_capacity(frame_count(doc));
+    render_document_each(doc, |_, f| {
+        all.push(f);
+        Ok(())
+    })?;
     Ok(all)
 }
 
-fn render_scene(doc: &Document, scene: &Scene) -> Result<Vec<RenderedFrame>, CompileError> {
+/// How many frames [`render_document`] produces, without rendering them.
+pub fn frame_count(doc: &Document) -> usize {
+    let fps = doc.canvas.fps.max(1) as u64;
+    doc.scenes
+        .iter()
+        .map(|s| ((s.duration_ms as u64 * fps) / 1000).max(1) as usize)
+        .sum()
+}
+
+/// Render frame by frame, handing each to `each(index, frame)` instead of
+/// keeping them: a caller that only needs to look at each frame once (the
+/// fidelity metric) never holds the whole clip in memory.
+pub fn render_document_each(
+    doc: &Document,
+    mut each: impl FnMut(usize, RenderedFrame) -> Result<(), CompileError>,
+) -> Result<(), CompileError> {
+    let mut index = 0usize;
+    for scene in &doc.scenes {
+        render_scene(doc, scene, &mut |f| {
+            each(index, f)?;
+            index += 1;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn render_scene(
+    doc: &Document,
+    scene: &Scene,
+    each: &mut dyn FnMut(RenderedFrame) -> Result<(), CompileError>,
+) -> Result<(), CompileError> {
     let w = doc.canvas.width;
     let h = doc.canvas.height;
     let fps = doc.canvas.fps.max(1);
@@ -131,13 +163,12 @@ fn render_scene(doc: &Document, scene: &Scene) -> Result<Vec<RenderedFrame>, Com
     // 3000ms at 30fps therefore renders 90 frames (t=0..3000, step=33.3ms).
     let frame_count = ((scene.duration_ms as u64 * fps as u64) / 1000).max(1) as u32;
 
-    let mut out = Vec::with_capacity(frame_count as usize);
     for i in 0..frame_count {
         let t_ms = ((i as u64 * 1000) / fps as u64) as u32;
         let frame = render_frame_at(w, h, &declared, &shapes, &animations, t_ms)?;
-        out.push(frame);
+        each(frame)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 fn render_frame_at(

@@ -123,25 +123,48 @@ pub fn decompile_mp4_with(input: &Path, opts: &Options) -> Result<Document, Deco
 /// here isolates *the decompiler's own error* from GIF palette
 /// quantisation and H.264 lossiness.  See `vac::measure`.
 pub fn decompile_frames(
-    mut frames: Vec<frames::VideoFrame>,
+    frames: Vec<frames::VideoFrame>,
     opts: &Options,
 ) -> Result<Document, DecompileError> {
+    let prepared = prepare(frames, opts.static_layer, opts.background)?;
+    Ok(finish(&prepared, opts.segmentation, opts.quality))
+}
+
+/// The background-dependent half of a decompile: the static layer, the
+/// frames with it stripped out, and the raw temporal median the ground
+/// pass reads. Every segmentation candidate of the measured search that
+/// shares a background rule can share one `Prepared` — read-only — instead
+/// of each cloning and stripping the whole clip (on the 220-frame double
+/// pendulum, ~400 MB per candidate).
+pub struct Prepared {
+    frames: Vec<frames::VideoFrame>,
+    scene: Option<layer::StaticLayer>,
+    ground: Option<(frames::VideoFrame, vac_format::Color)>,
+    background: Background,
+}
+
+/// Measure and strip the static layer, and take the ground median.
+pub fn prepare(
+    mut frames: Vec<frames::VideoFrame>,
+    static_layer: bool,
+    background: Background,
+) -> Result<Prepared, DecompileError> {
     if frames.is_empty() {
         return Err(DecompileError::Other("no frames in input".into()));
     }
-    let scene = if opts.static_layer {
-        layer::StaticLayer::measure(&frames, opts.background)
+    let scene = if static_layer {
+        layer::StaticLayer::measure(&frames, background)
     } else {
         None
     };
     // The ground pass reads the raw temporal median, which the static
     // layer already holds when it formed; otherwise it is measured here,
     // before any stripping.
-    let ground = if opts.static_layer {
+    let ground = if static_layer {
         match &scene {
             Some(l) => Some((l.median_frame(), l.bg)),
             None => layer::median_frame(&frames).map(|m| {
-                let bg = detect::background_of(&m, opts.background);
+                let bg = detect::background_of(&m, background);
                 (m, bg)
             }),
         }
@@ -151,14 +174,28 @@ pub fn decompile_frames(
     if let Some(l) = &scene {
         l.strip(&mut frames);
     }
-    let tol = track::Tolerances::from_quality(opts.quality);
-    let detections =
-        detect::detect_all(&frames, opts.segmentation, opts.background, tol.min_blob_area);
-    Ok(track::build_document(
-        &frames,
+    Ok(Prepared {
+        frames,
+        scene,
+        ground,
+        background,
+    })
+}
+
+/// Detect, track and emit, on frames already prepared.
+pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32) -> Document {
+    let tol = track::Tolerances::from_quality(quality);
+    let detections = detect::detect_all(
+        &prepared.frames,
+        segmentation,
+        prepared.background,
+        tol.min_blob_area,
+    );
+    track::build_document(
+        &prepared.frames,
         &detections,
-        scene.as_ref(),
-        ground.as_ref().map(|(m, bg)| (m, *bg)),
+        prepared.scene.as_ref(),
+        prepared.ground.as_ref().map(|(m, bg)| (m, *bg)),
         &tol,
-    ))
+    )
 }

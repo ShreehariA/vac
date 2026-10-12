@@ -484,7 +484,17 @@ pub fn compare(
             opts,
         ));
     }
+    aggregate(frames)
+}
 
+/// Pool per-frame scores into a clip [`Fidelity`] — what [`compare`] does
+/// after scoring each pair, exposed so a caller that renders and scores
+/// one frame at a time (`vac::measure`, which never holds the whole
+/// reconstruction in memory) aggregates identically.
+pub fn aggregate(frames: Vec<FrameScore>) -> Result<Fidelity, MetricError> {
+    if frames.is_empty() {
+        return Err(MetricError::Empty);
+    }
     let n = frames.len() as f64;
     let residual = frames.iter().map(|f| f.residual).sum::<f64>() / n;
     let ink_iou = frames.iter().map(|f| f.ink_iou).sum::<f64>() / n;

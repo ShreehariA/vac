@@ -59,6 +59,7 @@ enum SegArg {
     Auto,
     Components,
     Regions,
+    Edges,
 }
 
 impl From<SegArg> for vac::Segmentation {
@@ -67,6 +68,7 @@ impl From<SegArg> for vac::Segmentation {
             SegArg::Auto => vac::Segmentation::Auto,
             SegArg::Components => vac::Segmentation::Components,
             SegArg::Regions => vac::Segmentation::Regions,
+            SegArg::Edges => vac::Segmentation::Edges,
         }
     }
 }

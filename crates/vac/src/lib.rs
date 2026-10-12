@@ -219,7 +219,7 @@ pub fn decompile_frames(
     frames: Vec<VideoFrame>,
     opts: &DecompileOptions,
 ) -> Result<Document> {
-    Ok(decompile_chosen(frames, opts)?.document)
+    Ok(decompile_chosen(&frames, opts)?.document)
 }
 
 /// The outcome of a decompile, with what measurement decided.
@@ -239,11 +239,12 @@ struct Chosen {
 /// reconstructs best is kept — the way a video encoder makes a
 /// rate–distortion mode decision against the frames it is encoding. No
 /// content classifier decides; the reconstruction does.
-fn decompile_chosen(frames: Vec<VideoFrame>, opts: &DecompileOptions) -> Result<Chosen> {
+fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let segs: &[Segmentation] = match opts.segmentation {
-        Segmentation::Auto => &[Segmentation::Components, Segmentation::Regions],
+        Segmentation::Auto => &[Segmentation::Components, Segmentation::Regions, Segmentation::Edges],
         Segmentation::Components => &[Segmentation::Components],
         Segmentation::Regions => &[Segmentation::Regions],
+        Segmentation::Edges => &[Segmentation::Edges],
     };
     let bgs: &[Background] = match opts.background {
         Background::Auto => &[Background::Corners, Background::Border],
@@ -257,34 +258,62 @@ fn decompile_chosen(frames: Vec<VideoFrame>, opts: &DecompileOptions) -> Result<
             ..*opts
         };
         return Ok(Chosen {
-            document: vac_decompiler::decompile_frames(frames, &cand_opts)?,
+            document: vac_decompiler::decompile_frames(frames.to_vec(), &cand_opts)?,
             segmentation: segs[0],
             background: bgs[0],
             fidelity: None,
         });
     }
-    let mut best: Option<Chosen> = None;
+    // The static layer and its stripping depend only on the background
+    // rule, so each background is prepared once and its segmentation
+    // candidates share it read-only, running concurrently (at most
+    // `MAX_CONCURRENT_CANDIDATES` at once). The winner is then picked in a
+    // fixed candidate order, so the result is the same as a sequential
+    // search.
+    let width = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_CONCURRENT_CANDIDATES);
+    let mut combos: Vec<(Background, Segmentation)> = Vec::new();
+    let mut results: Vec<Result<(Document, Fidelity)>> = Vec::new();
     for &background in bgs {
-        for &segmentation in segs {
-            let cand_opts = DecompileOptions {
+        let prepared = vac_decompiler::prepare(frames.to_vec(), opts.static_layer, background)?;
+        for chunk in segs.chunks(width) {
+            let chunk_results: Vec<Result<(Document, Fidelity)>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|&segmentation| {
+                        let prepared = &prepared;
+                        scope.spawn(move || -> Result<(Document, Fidelity)> {
+                            let doc = vac_decompiler::finish(prepared, segmentation, opts.quality);
+                            let fid = measure(frames, &doc)?;
+                            Ok((doc, fid))
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("candidate thread panicked"))
+                    .collect()
+            });
+            combos.extend(chunk.iter().map(|&s| (background, s)));
+            results.extend(chunk_results);
+        }
+    }
+    let mut best: Option<Chosen> = None;
+    for ((background, segmentation), result) in combos.into_iter().zip(results) {
+        let (doc, fid) = result?;
+        let wins = match &best {
+            None => true,
+            Some(b) => reconstructs_better(&fid, b.fidelity.as_ref().expect("measured")),
+        };
+        if wins {
+            best = Some(Chosen {
+                document: doc,
                 segmentation,
                 background,
-                ..*opts
-            };
-            let doc = vac_decompiler::decompile_frames(frames.clone(), &cand_opts)?;
-            let fid = measure(&frames, &doc)?;
-            let wins = match &best {
-                None => true,
-                Some(b) => reconstructs_better(&fid, b.fidelity.as_ref().expect("measured")),
-            };
-            if wins {
-                best = Some(Chosen {
-                    document: doc,
-                    segmentation,
-                    background,
-                    fidelity: Some(fid),
-                });
-            }
+                fidelity: Some(fid),
+            });
         }
     }
     Ok(best.expect("at least one candidate"))
@@ -328,7 +357,7 @@ pub fn decompile_to_target(
             return Ok(());
         }
         let o = DecompileOptions { quality: q, ..*opts };
-        let chosen = decompile_chosen(frames.clone(), &o)?;
+        let chosen = decompile_chosen(&frames, &o)?;
         let fid = match chosen.fidelity {
             Some(f) => f,
             None => measure(&frames, &chosen.document)?,
@@ -395,6 +424,9 @@ pub fn decompile_to_target(
     })
 }
 
+/// How many measured-search candidates may decompile at once.
+const MAX_CONCURRENT_CANDIDATES: usize = 3;
+
 /// Whether reconstruction `b` beats `a`.
 ///
 /// A candidate at least as good on both residual and ink IoU (and
@@ -458,30 +490,55 @@ pub fn measure_with(
     doc: &Document,
     opts: &CompareOptions,
 ) -> Result<Fidelity> {
-    let rendered = render(doc)?;
-    let idx = aligned_indices(original, rendered.len(), doc.canvas.fps);
-
-    let src: Vec<vac_metrics::FrameRef> = original
-        .iter()
-        .map(|f| vac_metrics::FrameRef::new(f.width, f.height, &f.pixels))
-        .collect();
-    let recon: Vec<vac_metrics::FrameRef> = idx
-        .iter()
-        .map(|&i| {
-            let r = &rendered[i];
-            vac_metrics::FrameRef::new(r.width, r.height, &r.rgba)
-        })
-        .collect();
+    if original.is_empty() {
+        return Err(MetricError::Empty.into());
+    }
+    let count = vac_compiler::render::frame_count(doc);
+    let idx = aligned_indices(original, count, doc.canvas.fps);
     // The ink reference is measured from the source frames themselves,
     // by `vac-metrics`, and deliberately *not* by calling the
     // decompiler's own `estimate_background`. If the metric shared the
     // pipeline's background rule, tuning that rule would silently move
     // every committed baseline and "the decompiler improved" would be
     // indistinguishable from "the ruler moved".
+    let src: Vec<vac_metrics::FrameRef> = original
+        .iter()
+        .map(|f| vac_metrics::FrameRef::new(f.width, f.height, &f.pixels))
+        .collect();
     let bg = vac_metrics::modal_background(&src);
-    let backgrounds: Vec<Rgb> = vec![bg; src.len()];
-
-    Ok(vac_metrics::compare(&src, &recon, &backgrounds, opts)?)
+    // Which source frames each rendered frame stands for. Rendering
+    // streams frame by frame and each rendered frame is scored against
+    // its source frames and dropped — the reconstruction is never held
+    // whole (on the 220-frame double pendulum that was ~400 MB per
+    // candidate of the measured search).
+    let mut wanted: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (j, &i) in idx.iter().enumerate() {
+        wanted[i].push(j);
+    }
+    let mut scores: Vec<Option<vac_metrics::FrameScore>> = vec![None; original.len()];
+    let mut mismatch: Option<MetricError> = None;
+    vac_compiler::render::render_document_each(doc, |i, r| {
+        for &j in &wanted[i] {
+            let o = &src[j];
+            if o.width != r.width || o.height != r.height {
+                mismatch.get_or_insert(MetricError::DimensionMismatch {
+                    frame: j,
+                    original: (o.width, o.height),
+                    reconstructed: (r.width, r.height),
+                });
+                continue;
+            }
+            let rf = vac_metrics::FrameRef::new(r.width, r.height, &r.rgba);
+            scores[j] = Some(vac_metrics::compare_frame(o, &rf, bg, opts));
+        }
+        Ok(())
+    })?;
+    if let Some(e) = mismatch {
+        return Err(e.into());
+    }
+    let frames: Vec<vac_metrics::FrameScore> =
+        scores.into_iter().map(|s| s.expect("every source frame is aligned")).collect();
+    Ok(vac_metrics::aggregate(frames)?)
 }
 
 fn aligned_indices(original: &[VideoFrame], rendered: usize, fps: u32) -> Vec<usize> {
@@ -544,7 +601,7 @@ pub struct Verification {
 pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verification> {
     let frames = load_video_frames(path)?;
     let source_frames = frames.len();
-    let chosen = decompile_chosen(frames.clone(), opts)?;
+    let chosen = decompile_chosen(&frames, opts)?;
     let fidelity = match chosen.fidelity {
         Some(f) => f,
         None => measure(&frames, &chosen.document)?,

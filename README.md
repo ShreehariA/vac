@@ -1689,3 +1689,37 @@ exactly at the edge, which left half a pixel showing. The worst-frame gate
 added in v1.3 caught it at once: `slide_in_card`'s worst frame fell to 0.00.
 Shapes now park a full pixel clear, and that worst frame is the best it has
 been (0.88 → 0.93).
+
+## v1.5 — A third way to see, and a leaner search
+
+`Segmentation::Regions` grows a region by colour similarity between
+neighbours. That chains across any transition gradual enough. On the
+pendulum, the grey bob and the green force arrow drawn across it fused into
+one tall blob of mixed colour.
+
+`Segmentation::Edges` measures edge strength as the colour change across a
+two-pixel span. A pixel on a strong edge may join only other edge pixels,
+never a flat region, so a thin line keeps its own identity. A thin region is
+absorbed into a solid one only if it *wraps* it, meaning their shared border
+is at least 40% of the thin region's area. An anti-aliased fringe wraps its
+shape; a line drawn across a shape doesn't.
+
+It isn't a replacement. It's the third candidate in the measured search, and
+it wins where it should:
+
+| clip | chosen | ink IoU | residual |
+|---|---|---|---|
+| `real_double_pendulum.gif` | edges + border | 0.437 → **0.492** | 760 → **697** |
+| `real_newtons_cradle.gif` | edges + corners | 0.642 → 0.640 | 520 → **455** |
+
+It loses on the clip it was written for. The pendulum's bob is still cut in
+two by the rod and arrow drawn over it, which is an occlusion problem rather
+than a segmentation one, and the search correctly keeps `regions` there.
+
+**The search got cheaper as it got wider.** The static layer depends only on
+the background rule, so decompiling now splits into `prepare` (layer, strip,
+ground median), done once per background, and `finish` (detect, track,
+emit), which each segmentation candidate runs concurrently on the shared,
+read-only frames. Measurement renders frame by frame instead of holding the
+whole reconstruction. On the 220-frame double pendulum, peak memory went
+2.2 GB → **1.0 GB**, and the corpus run went 90 s → 26 s.

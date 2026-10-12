@@ -11,6 +11,7 @@ fn main() {
     let fi: usize = args.next().map(|s| s.parse().unwrap()).unwrap_or(0);
     let seg = match args.next().as_deref() {
         Some("components") => Segmentation::Components,
+        Some("edges") => Segmentation::Edges,
         _ => Segmentation::Regions,
     };
     let p = std::path::Path::new(&path);

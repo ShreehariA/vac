@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v1.4, default quality 50) and is
+table re-measured 2026-10-12 at v1.5, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -205,6 +205,22 @@ always true; only one of them was measurable.
     added in v1.3 caught it on `slide_in_card` (0.88 → 0.00), and shapes now
     park a full pixel clear.
 
+- **v1.5 — a third segmentation, and a leaner search.** Colour-similarity
+  region growing chains across a gradual anti-aliased transition. On
+  `real_pendulum` the grey bob and the green arrow drawn over it fused into
+  one mixed-colour blob. `Segmentation::Edges` lets a pixel on a strong edge
+  join only other edge pixels, and absorbs a thin region only when it wraps
+  a solid one (shared border ≥ 40% of its area), not when it merely crosses
+  it. It is a third candidate in the measured search, not a fixed rule. It
+  wins on `real_double_pendulum` (IoU 0.437 → **0.492**, invented ink 39% →
+  25%) and `real_newtons_cradle` (residual 520 → **455**). It loses on the
+  pendulum it was written for: the bob is still cut in two by the rod and
+  arrow drawn across it, which is an occlusion problem rather than a
+  segmentation one. The search now prepares the static layer once per
+  background rule and runs candidates concurrently on shared frames. Peak
+  memory on the double pendulum went 2.2 GB → **1.0 GB**, and the corpus run
+  90 s → 26 s.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -220,8 +236,8 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `real_bouncing_ball.gif` | 0.8978 | 0.8958 | 164.3 | 25.97 | 11.2% | 3 |
 | `mandelbrot.mp4` | 0.7639 | 0.3961 | 4163.2 | 11.94 | 13.7% | 43 |
 | `real_loader.gif` | 0.7318 | 0.7115 | 173.2 | 25.75 | 9.8% | 16 |
-| `real_newtons_cradle.gif` | 0.6416 | 0.6367 | 520.2 | 20.97 | 47.0% | 202 |
-| `real_double_pendulum.gif` | 0.4370 | 0.2980 | 759.6 | 19.32 | 39.2% | 379 |
+| `real_newtons_cradle.gif` | 0.6400 | 0.6345 | 455.3 | 21.55 | 45.4% | 232 |
+| `real_double_pendulum.gif` | 0.4918 | 0.3389 | 697.2 | 19.70 | 24.6% | 454 |
 | `real_pendulum.gif` | 0.4353 | 0.3286 | 634.6 | 20.11 | 11.6% | 48 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —

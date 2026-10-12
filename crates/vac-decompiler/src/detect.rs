@@ -40,18 +40,168 @@ pub enum Segmentation {
     /// absorbed. Separates the bars of a test card; on smooth-gradient
     /// content (a Mandelbrot zoom) it shatters the picture instead.
     Regions,
+    /// v1.5: regions whose growth stops at edges. A pixel on a strong edge
+    /// (colour change across a two-pixel span) joins only other edge
+    /// pixels, so an anti-aliased transition can no longer chain two
+    /// different objects together — on `real_pendulum` the grey bob and
+    /// the green arrow drawn across it fused into one mixed-colour blob.
+    /// Edge fringes are then absorbed only where they wrap a region.
+    Edges,
     /// Decide by measurement. The decompiler has no renderer, so on its
     /// own this behaves as `Components`; the `vac` facade, which does,
-    /// decompiles both ways, re-renders each, and keeps the one that
-    /// reconstructs the source better.
+    /// decompiles each way, re-renders each, and keeps the one that
+    /// reconstructs the source best.
     Auto,
 }
 
 fn label(f: &VideoFrame, mask: &[bool], w: usize, h: usize, seg: Segmentation) -> Vec<u32> {
     match seg {
         Segmentation::Regions => label_regions(f, mask, w, h),
+        Segmentation::Edges => label_edge_regions(f, mask, w, h),
         Segmentation::Components | Segmentation::Auto => label_components_4(mask, w, h),
     }
+}
+
+/// Edge-gated region labelling (`Segmentation::Edges`).
+fn label_edge_regions(f: &VideoFrame, mask: &[bool], w: usize, h: usize) -> Vec<u32> {
+    let rgb = |i: usize| [f.pixels[i * 4] as i32, f.pixels[i * 4 + 1] as i32, f.pixels[i * 4 + 2] as i32];
+    let dist_sq = |a: [i32; 3], b: [i32; 3]| {
+        ((a[0] - b[0]).pow(2) + (a[1] - b[1]).pow(2) + (a[2] - b[2]).pow(2)) as u32
+    };
+    // Edge strength: the larger central difference across the pixel.
+    let mut edge = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if !mask[i] {
+                continue;
+            }
+            let mut e = 0u32;
+            if x > 0 && x + 1 < w {
+                e = e.max(dist_sq(rgb(i - 1), rgb(i + 1)));
+            }
+            if y > 0 && y + 1 < h {
+                e = e.max(dist_sq(rgb(i - w), rgb(i + w)));
+            }
+            edge[i] = e > EDGE_STRENGTH_SQ;
+        }
+    }
+    let close = |a: usize, b: usize| dist_sq(rgb(a), rgb(b)) <= REGION_JOIN_SQ;
+    // Flat pixels join flat pixels, edge pixels join edge pixels.
+    let joins = |a: usize, b: usize| mask[a] && mask[b] && edge[a] == edge[b] && close(a, b);
+    let mut labels = vec![0u32; w * h];
+    let mut uf = UnionFind::new();
+    let mut next: u32 = 1;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if !mask[i] {
+                continue;
+            }
+            let left = if x > 0 && joins(i, i - 1) { labels[i - 1] } else { 0 };
+            let up = if y > 0 && joins(i, i - w) { labels[i - w] } else { 0 };
+            match (left, up) {
+                (0, 0) => {
+                    labels[i] = next;
+                    uf.make_set(next);
+                    next += 1;
+                }
+                (a, 0) => labels[i] = a,
+                (0, b) => labels[i] = b,
+                (a, b) => {
+                    labels[i] = a.min(b);
+                    if a != b {
+                        uf.union(a, b);
+                    }
+                }
+            }
+        }
+    }
+    for l in labels.iter_mut() {
+        if *l != 0 {
+            *l = uf.find(*l);
+        }
+    }
+    for _ in 0..ABSORB_MAX_PASSES {
+        if !absorb_wrapping_fringes(&mut labels, w, h) {
+            break;
+        }
+    }
+    labels
+}
+
+/// One absorption pass for `Edges`: a thin region joins the solid region it
+/// shares the most border with — but only when that border is a large
+/// share of the thin region itself. A fringe wraps the region it fringes;
+/// a line drawn across a region touches it only where it crosses.
+fn absorb_wrapping_fringes(labels: &mut [u32], w: usize, h: usize) -> bool {
+    use std::collections::HashMap;
+    let same_all_4 = |labels: &[u32], i: usize| {
+        let (x, y) = (i % w, i / w);
+        let l = labels[i];
+        (x == 0 || labels[i - 1] == l)
+            && (x + 1 == w || labels[i + 1] == l)
+            && (y == 0 || labels[i - w] == l)
+            && (y + 1 == h || labels[i + w] == l)
+    };
+    let mut solid: HashMap<u32, bool> = HashMap::new();
+    let mut area: HashMap<u32, u32> = HashMap::new();
+    for i in 0..w * h {
+        let l = labels[i];
+        if l == 0 {
+            continue;
+        }
+        *area.entry(l).or_insert(0) += 1;
+        let e = solid.entry(l).or_insert(false);
+        if !*e && same_all_4(labels, i) {
+            *e = true;
+        }
+    }
+    let mut border: HashMap<(u32, u32), u32> = HashMap::new();
+    for i in 0..w * h {
+        let l = labels[i];
+        if l == 0 || solid[&l] {
+            continue;
+        }
+        let (x, y) = (i % w, i / w);
+        let mut visit = |j: usize| {
+            let m = labels[j];
+            if m != 0 && m != l && solid[&m] {
+                *border.entry((l, m)).or_insert(0) += 1;
+            }
+        };
+        if x > 0 {
+            visit(i - 1);
+        }
+        if x + 1 < w {
+            visit(i + 1);
+        }
+        if y > 0 {
+            visit(i - w);
+        }
+        if y + 1 < h {
+            visit(i + w);
+        }
+    }
+    let mut target: HashMap<u32, (u32, u32)> = HashMap::new();
+    for (&(l, m), &n) in &border {
+        if (n as f32) < FRINGE_MIN_WRAP * area[&l] as f32 {
+            continue;
+        }
+        let e = target.entry(l).or_insert((m, n));
+        if n > e.1 || (n == e.1 && m < e.0) {
+            *e = (m, n);
+        }
+    }
+    if target.is_empty() {
+        return false;
+    }
+    for l in labels.iter_mut() {
+        if let Some(&(m, _)) = target.get(l) {
+            *l = m;
+        }
+    }
+    true
 }
 
 /// Primitive class the decompiler thinks best fits this blob's silhouette.
@@ -207,6 +357,13 @@ const SOFT_MIN_CONTRAST_SQ: f64 = 60.0 * 60.0;
 /// to the ground band (v1.1): about 7 levels per channel, well above
 /// codec noise on a flat field.
 const GROUND_MIN_SQ: u32 = 7 * 7 * 3;
+
+/// Squared colour change across a two-pixel span above which a pixel is
+/// on an edge (`Segmentation::Edges`): about 46 levels per channel.
+const EDGE_STRENGTH_SQ: u32 = 80 * 80;
+/// A thin region is a fringe of a solid one when their shared border is
+/// at least this share of the thin region's area.
+const FRINGE_MIN_WRAP: f32 = 0.4;
 
 /// Upper bound on fringe-absorption passes in `label_regions`.
 const ABSORB_MAX_PASSES: usize = 4;
@@ -2195,5 +2352,78 @@ mod soft_size_tests {
         });
         let b = detect_blobs(&f, Color::rgb(20, 20, 28), Segmentation::Components)[0];
         assert!((b.soft_w - 3.0).abs() < 1e-3 && (b.soft_h - 7.0).abs() < 1e-3, "{} x {}", b.soft_w, b.soft_h);
+    }
+}
+
+#[cfg(test)]
+mod edge_region_tests {
+    //! v1.5: edge-gated regions.
+    use super::*;
+
+    /// A grey disc with a long green line drawn across it, on white.
+    fn disc_and_line() -> VideoFrame {
+        let (w, h) = (100u32, 200u32);
+        let mut pixels = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let in_line = (49..51).contains(&x);
+                let d = ((x as f32 - 50.0).powi(2) + (y as f32 - 100.0).powi(2)).sqrt();
+                let c = if in_line {
+                    [0, 128, 0]
+                } else if d <= 25.0 {
+                    [128, 128, 128]
+                } else {
+                    [255, 255, 255]
+                };
+                pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        VideoFrame { width: w, height: h, pixels, delay_ms: 33 }
+    }
+
+    #[test]
+    fn a_line_crossing_a_shape_stays_its_own_region() {
+        let f = disc_and_line();
+        let white = Color::rgb(255, 255, 255);
+        let pure_green = |b: &Blob| b.color.r < 20 && b.color.g > 110 && b.color.b < 20;
+        let tall = |b: &Blob| b.ry >= 95.0;
+        // Plain regions absorb any thin region touching a solid one: the
+        // line (it cuts the disc in two) is swallowed by one half, which
+        // becomes a tall blob of mixed grey-green — no blob is the line.
+        let regions = detect_blobs(&f, white, Segmentation::Regions);
+        assert!(!regions.iter().any(pure_green), "regions kept the line: {regions:?}");
+        assert!(regions.iter().any(|b| tall(b) && !pure_green(b)), "{regions:?}");
+        // Edges keep the line: it touches each half only where it
+        // crosses, a small share of its own area, so it is no fringe.
+        let edges = detect_blobs(&f, white, Segmentation::Edges);
+        assert!(edges.iter().any(|b| pure_green(b) && tall(b)), "edges lost the line: {edges:?}");
+        assert!(
+            edges.iter().filter(|b| !pure_green(b)).all(|b| b.color.r > 110 && b.color.r == b.color.g),
+            "disc pieces should stay pure grey: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn edges_still_absorb_a_fringe_that_wraps_its_shape() {
+        // A red disc with a one-pixel half-blended ring: the ring wraps the
+        // disc, so it is absorbed exactly as under plain regions.
+        let (w, h) = (64u32, 64u32);
+        let mut pixels = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 - 32.0).powi(2) + (y as f32 - 32.0).powi(2)).sqrt();
+                let c = if d <= 15.0 {
+                    [224, 72, 72]
+                } else if d <= 16.0 {
+                    [122, 46, 50]
+                } else {
+                    [20, 20, 28]
+                };
+                pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let f = VideoFrame { width: w, height: h, pixels, delay_ms: 33 };
+        let blobs = detect_blobs(&f, Color::rgb(20, 20, 28), Segmentation::Edges);
+        assert_eq!(blobs.len(), 1, "{blobs:?}");
     }
 }
