@@ -153,6 +153,7 @@ fn fmt_transform(t: &Transform) -> String {
         Transform::Position(x, y) => format!("position({}, {})", fmt_num(*x), fmt_num(*y)),
         Transform::Scale(s) => format!("scale({})", fmt_num(*s)),
         Transform::Opacity(o) => format!("opacity({})", fmt_num(*o)),
+        Transform::Rotate(d) => format!("rotate({})", fmt_num(*d)),
     }
 }
 
@@ -278,5 +279,15 @@ mod tests {
         let s = write(&doc);
         assert!(s.contains("#1a1a2e"), "got:\n{s}");
         assert!(s.contains("#e94560"), "got:\n{s}");
+    }
+
+    #[test]
+    fn rotate_round_trips() {
+        let src = "canvas 10x10 @10fps\nscene s {\n  duration 1s\n  let r = rect(0, 0, 4, 2)\n  animate r {\n    0ms -> rotate(-12.5), position(1, 2)\n    1s -> rotate(90)\n    easing: linear\n  }\n}\n";
+        let doc = crate::parse(src).unwrap();
+        let out = write(&doc);
+        assert!(out.contains("rotate(-12.5), position(1, 2)"), "{out}");
+        assert!(out.contains("rotate(90)"), "{out}");
+        assert_eq!(crate::parse(&out).unwrap(), doc);
     }
 }

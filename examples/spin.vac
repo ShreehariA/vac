@@ -1,0 +1,39 @@
+// Fixture (v0.14): rotation.
+//
+// The rod swings about a fixed pivot, so its centre moves on an arc while
+// it turns; the bar spins in place. Through v0.13 VAC had no rotate(), and
+// a rotating shape came back frozen at one angle, sliding.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #10141f
+
+  let rod = rect(234, -30, 12, 160)
+  rod.fill = #f0c040
+  rod.stroke = none
+
+  animate rod {
+    0ms -> position(279.9, 35.5), rotate(-35)
+    500ms -> position(261.4, 45.2), rotate(-20)
+    1000ms -> position(234.0, 50.0), rotate(0)
+    1500ms -> position(206.6, 45.2), rotate(20)
+    2000ms -> position(188.1, 35.5), rotate(35)
+    2500ms -> position(206.6, 45.2), rotate(20)
+    3000ms -> position(234.0, 50.0), rotate(0)
+    easing: linear
+  }
+
+  let bar = rect(330, 230, 120, 16)
+  bar.fill = #40c0ff
+  bar.stroke = none
+
+  animate bar {
+    0ms -> rotate(0)
+    3s  -> rotate(180)
+    easing: linear
+  }
+}

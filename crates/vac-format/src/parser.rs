@@ -825,9 +825,18 @@ impl Parser {
                 }
                 Ok(Transform::Opacity(nums[0]))
             }
+            "rotate" => {
+                if nums.len() != 1 {
+                    return Err(ParseError::syntax(
+                        span,
+                        format!("rotate() takes 1 arg (degrees), got {}", nums.len()),
+                    ));
+                }
+                Ok(Transform::Rotate(nums[0]))
+            }
             other => Err(ParseError::syntax(
                 span,
-                format!("unknown transform `{other}` (expected position/scale/opacity)"),
+                format!("unknown transform `{other}` (expected position/scale/opacity/rotate)"),
             )),
         }
     }

@@ -91,6 +91,27 @@ pub struct Blob {
     /// Hu image-moment invariants (h₁..h₇). Translation, scale, rotation
     /// invariant — useful for shape-based matching across frames.
     pub hu: [f32; 7],
+    /// Orientation of the principal (long) axis in degrees, in (-90, 90],
+    /// clockwise from +x in screen coordinates — from the second central
+    /// moments, `½·atan2(2μ₁₁, μ₂₀ − μ₀₂)` (v0.14). Meaningless when
+    /// `var_major ≈ var_minor`.
+    pub theta_deg: f32,
+    /// Pixel-position variance along the principal axis and across it.
+    /// Rotation-invariant size: a solid W×H rect has W²/12 and H²/12, a
+    /// solid ellipse with semi-axes a, b has a²/4 and b²/4.
+    pub var_major: f32,
+    pub var_minor: f32,
+    /// Rotation of the fitted primitive in degrees: 0 when an axis-aligned
+    /// rect or ellipse fitted best, `theta_deg` when an oriented one did.
+    pub angle_deg: f32,
+}
+
+impl Blob {
+    /// `sqrt(var_major / var_minor)`: 1 for a disc or a square, where no
+    /// orientation exists; large for a rod.
+    pub fn elongation(&self) -> f32 {
+        (self.var_major / self.var_minor.max(1e-3)).sqrt()
+    }
 }
 
 /// Bbox fill-ratio threshold above which a blob is classified as
@@ -123,6 +144,14 @@ const MIN_BLOB_AREA: u32 = 9;
 /// A rect or ellipse must overlap a blob's pixels at least this well
 /// (IoU) to stand for it; below, the outline is traced as a path.
 const PRIMITIVE_MIN_IOU: f32 = 0.88;
+
+/// Below this elongation (`sqrt(var_major / var_minor)`) a blob has no
+/// meaningful orientation and is never fitted with a rotated primitive.
+const ORIENTED_MIN_ELONGATION: f32 = 1.25;
+
+/// How much better (IoU) an oriented fit must be than the best
+/// axis-aligned one to be preferred.
+const ORIENTED_MIN_GAIN: f32 = 0.03;
 
 /// Squared RGB distance within which two adjacent foreground pixels are
 /// the same region (v0.13). Well above H.264 noise on a flat fill, well
@@ -517,11 +546,28 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<
         a.cx = cx as f32;
         a.cy = cy as f32;
         a.hu = hu_moments(a.m00, mu20, mu02, mu11, mu30, mu03, mu21, mu12);
+        a.mu20 = mu20;
+        a.mu02 = mu02;
+        a.mu11 = mu11;
+    }
+
+    // Third pass (v0.14): oriented fits. Second moments give each blob's
+    // principal axis; an oriented rect and an oriented ellipse of the
+    // moment-implied size are scored against the pixels exactly as the
+    // axis-aligned ones are, and compete with them below.
+    let mut oriented: Vec<Option<OrientedFit>> = Vec::with_capacity(acc.len());
+    for (bi, a) in acc.iter().enumerate() {
+        oriented.push(if a.area == 0 {
+            None
+        } else {
+            oriented_fit(&labels, w, h, kept_labels[bi], a)
+        });
     }
 
     acc.into_iter()
-        .filter(|a| a.area > 0)
-        .map(|a| {
+        .zip(oriented)
+        .filter(|(a, _)| a.area > 0)
+        .map(|(a, of)| {
             let bbox_w = (a.max_x - a.min_x + 1) as f32;
             let bbox_h = (a.max_y - a.min_y + 1) as f32;
             let rx = bbox_w * 0.5;
@@ -549,9 +595,27 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<
             } else {
                 0.0
             };
-            let best = iou_rect.max(iou_ellipse);
+            let axis_best = iou_rect.max(iou_ellipse);
+            let (principal, var_major, var_minor) = principal_axes(a.area, a.mu20, a.mu02, a.mu11);
+            // An oriented fit has to beat the axis-aligned ones by a clear
+            // margin, so a shape sitting near 0° does not flicker between
+            // the two descriptions from frame to frame.
+            let (mut angle_deg, mut fit_rect, mut fit_iou) = (0.0f32, iou_rect >= iou_ellipse, axis_best);
+            if let Some(of) = &of {
+                let (o_rect, o_iou) = if of.iou_rect >= of.iou_ellipse {
+                    (true, of.iou_rect)
+                } else {
+                    (false, of.iou_ellipse)
+                };
+                if o_iou > axis_best + ORIENTED_MIN_GAIN {
+                    angle_deg = principal;
+                    fit_rect = o_rect;
+                    fit_iou = o_iou;
+                }
+            }
+            let best = fit_iou;
             let kind = if best >= PRIMITIVE_MIN_IOU {
-                if iou_rect >= iou_ellipse {
+                if fit_rect {
                     ShapeKind::Rect
                 } else {
                     ShapeKind::Ellipse
@@ -562,8 +626,12 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<
                 // Too small to trace and fitting neither primitive (a
                 // diagonal loader tick): the ellipse, which overclaims
                 // the bbox least — what v0.4–v0.12 did here too.
+                angle_deg = 0.0;
                 ShapeKind::Ellipse
             };
+            if kind == ShapeKind::Path {
+                angle_deg = 0.0;
+            }
             let color = if a.int_count > 0 {
                 Color::rgb(
                     (a.int_r / a.int_count) as u8,
@@ -589,6 +657,10 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<
                 color,
                 area: a.area,
                 hu: a.hu,
+                theta_deg: principal,
+                var_major,
+                var_minor,
+                angle_deg,
             }
         })
         .collect()
@@ -694,6 +766,92 @@ pub fn extract_contour(
     pac_decompiler::contour::trace_outer_contour(&labels, frame.width, frame.height, &region)
 }
 
+/// Principal-axis orientation (degrees, (-90, 90]) and the pixel-position
+/// variances along and across it, from raw central-moment sums.
+fn principal_axes(area: u32, mu20: f64, mu02: f64, mu11: f64) -> (f32, f32, f32) {
+    let n = (area as f64).max(1.0);
+    let (a, b, c) = (mu20 / n, mu02 / n, mu11 / n);
+    let theta = 0.5 * (2.0 * c).atan2(a - b);
+    let mid = 0.5 * (a + b);
+    let rad = (0.25 * (a - b) * (a - b) + c * c).sqrt();
+    let mut deg = theta.to_degrees() as f32;
+    if deg <= -90.0 {
+        deg += 180.0;
+    }
+    (deg, (mid + rad) as f32, (mid - rad).max(0.0) as f32)
+}
+
+/// An oriented rect and an oriented ellipse sized from a blob's second
+/// moments, each scored by IoU against its pixels.
+struct OrientedFit {
+    iou_rect: f32,
+    iou_ellipse: f32,
+}
+
+/// Half-lengths of the solid rect with the given pixel-position variance
+/// along an axis: a run of W pixel centres has variance (W² − 1)/12.
+pub fn rect_half(var: f32) -> f32 {
+    (3.0 * var + 0.25).sqrt()
+}
+
+/// Semi-axis of the solid ellipse with the given variance along an axis
+/// (a²/4 for a continuous ellipse).
+pub fn ellipse_semi(var: f32) -> f32 {
+    2.0 * var.max(0.0).sqrt()
+}
+
+fn oriented_fit(labels: &[u32], w: usize, h: usize, l: u32, a: &BlobAcc) -> Option<OrientedFit> {
+    let (deg, v1, v2) = principal_axes(a.area, a.mu20, a.mu02, a.mu11);
+    // Orientation only exists for elongated shapes, and a fit within a
+    // degree of the axes is the axis-aligned fit already scored.
+    if (v1 / v2.max(1e-3)).sqrt() < ORIENTED_MIN_ELONGATION || deg.abs() < 1.0 || deg.abs() > 89.0 {
+        return None;
+    }
+    let th = (deg as f64).to_radians();
+    let (cs, sn) = (th.cos(), th.sin());
+    // Pixel (x, y) covers [x, x+1); its centre is x + 0.5, and the
+    // centroid of index positions sits half a pixel left of that.
+    let (cx, cy) = (a.cx as f64 + 0.5, a.cy as f64 + 0.5);
+    let score = |h0: f64, h1: f64, ellipse: bool| -> f32 {
+        let ex = (h0 * cs).abs() + (h1 * sn).abs();
+        let ey = (h0 * sn).abs() + (h1 * cs).abs();
+        let x0 = (cx - ex).floor().max(0.0) as usize;
+        let x1 = ((cx + ex).ceil() as usize).min(w.saturating_sub(1));
+        let y0 = (cy - ey).floor().max(0.0) as usize;
+        let y1 = ((cy + ey).ceil() as usize).min(h.saturating_sub(1));
+        let (mut total, mut hit) = (0u32, 0u32);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = x as f64 + 0.5 - cx;
+                let dy = y as f64 + 0.5 - cy;
+                let u = dx * cs + dy * sn;
+                let v = -dx * sn + dy * cs;
+                let inside = if ellipse {
+                    (u / h0).powi(2) + (v / h1).powi(2) <= 1.0
+                } else {
+                    u.abs() <= h0 && v.abs() <= h1
+                };
+                if inside {
+                    total += 1;
+                    if labels[y * w + x] == l {
+                        hit += 1;
+                    }
+                }
+            }
+        }
+        let union = a.area + total - hit;
+        if union == 0 {
+            0.0
+        } else {
+            hit as f32 / union as f32
+        }
+    };
+    Some(OrientedFit {
+        iou_rect: score(rect_half(v1) as f64, rect_half(v2) as f64, false),
+        iou_ellipse: score(ellipse_semi(v1) as f64, ellipse_semi(v2) as f64, true),
+    })
+}
+
 /// Compute the 7 Hu moment invariants from a blob's central moments.
 /// Given `m00` (= area) and central moments μ₂₀ μ₀₂ μ₁₁ μ₃₀ μ₀₃ μ₂₁ μ₁₂.
 fn hu_moments(
@@ -766,6 +924,9 @@ struct BlobAcc {
     /// belong to the blob — the ellipse's overlap with the actual pixels.
     ell_total: u32,
     ell_hit: u32,
+    mu20: f64,
+    mu02: f64,
+    mu11: f64,
 }
 
 impl BlobAcc {
@@ -791,6 +952,9 @@ impl BlobAcc {
             int_count: 0,
             ell_total: 0,
             ell_hit: 0,
+            mu20: 0.0,
+            mu02: 0.0,
+            mu11: 0.0,
         }
     }
 }
@@ -1369,5 +1533,76 @@ mod region_tests {
         }
         let bg = estimate_background_border(&f);
         assert_eq!((bg.r, bg.g, bg.b), (255, 255, 255));
+    }
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    //! v0.14: principal axes and oriented primitive fits.
+    use super::*;
+
+    /// A 60×8 bar centred at (50, 50) rotated by `deg` (clockwise, screen
+    /// coordinates), sampled at pixel centres.
+    fn bar(deg: f32) -> VideoFrame {
+        let (w, h) = (100u32, 100u32);
+        let th = deg.to_radians();
+        let (cs, sn) = (th.cos(), th.sin());
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f32 + 0.5 - 50.0, y as f32 + 0.5 - 50.0);
+                let u = dx * cs + dy * sn;
+                let v = -dx * sn + dy * cs;
+                let inside = u.abs() <= 30.0 && v.abs() <= 4.0;
+                let c = if inside { [240, 192, 64] } else { [16, 20, 31] };
+                pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        VideoFrame {
+            width: w,
+            height: h,
+            pixels,
+            delay_ms: 33,
+        }
+    }
+
+    #[test]
+    fn a_rotated_bar_is_fitted_as_a_rotated_rect() {
+        for deg in [30.0f32, -50.0, 70.0] {
+            let blobs = detect_blobs(&bar(deg), Color::rgb(16, 20, 31), Segmentation::Components);
+            assert_eq!(blobs.len(), 1);
+            let b = blobs[0];
+            assert_eq!(b.kind, ShapeKind::Rect, "{deg}°: {b:?}");
+            assert!((b.angle_deg - deg).abs() < 2.0, "{deg}°: fitted {}", b.angle_deg);
+            let len = 2.0 * rect_half(b.var_major);
+            let thick = 2.0 * rect_half(b.var_minor);
+            assert!((len - 60.0).abs() < 3.0, "{deg}°: length {len}");
+            assert!((thick - 8.0).abs() < 2.0, "{deg}°: thickness {thick}");
+        }
+    }
+
+    #[test]
+    fn an_axis_aligned_bar_keeps_an_axis_aligned_fit() {
+        let blobs = detect_blobs(&bar(0.0), Color::rgb(16, 20, 31), Segmentation::Components);
+        assert_eq!(blobs[0].kind, ShapeKind::Rect);
+        assert_eq!(blobs[0].angle_deg, 0.0);
+    }
+
+    #[test]
+    fn a_disc_has_no_orientation_to_fit() {
+        let (w, h) = (60u32, 60u32);
+        let mut pixels = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 + 0.5 - 30.0).powi(2) + (y as f32 + 0.5 - 30.0).powi(2)).sqrt();
+                let c = if d <= 20.0 { [200, 60, 60] } else { [10, 10, 10] };
+                pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let f = VideoFrame { width: w, height: h, pixels, delay_ms: 33 };
+        let b = detect_blobs(&f, Color::rgb(10, 10, 10), Segmentation::Components)[0];
+        assert_eq!(b.kind, ShapeKind::Ellipse);
+        assert_eq!(b.angle_deg, 0.0);
+        assert!(b.elongation() < 1.05);
     }
 }

@@ -263,6 +263,16 @@ const OPACITY_MAX_EMITTED: f32 = 0.88;
 /// Keyframe tolerance for the opacity channel, in 0–255 levels.
 const OPACITY_RDP_TOLERANCE: f32 = 6.0;
 
+/// A rotated rect/ellipse track emits `rotate()` when its angle sweeps at
+/// least this many degrees, or sits at least `ROT_MIN_STATIC_DEG` away
+/// from axis-aligned throughout.
+const ROT_MIN_RANGE_DEG: f32 = 3.0;
+const ROT_MIN_STATIC_DEG: f32 = 1.5;
+/// A path track only carries rotation when it is clearly elongated (so its
+/// principal axis is meaningful) and turns through at least this much.
+const PATH_ROT_MIN_ELONGATION: f32 = 1.6;
+const PATH_ROT_MIN_RANGE_DEG: f32 = 8.0;
+
 /// How close a bbox edge must sit to the canvas border to count as
 /// clipped by it.
 const CLIP_EDGE_PX: f32 = 1.5;
@@ -285,6 +295,23 @@ fn emit_shape(
     let rys: Vec<f32> = track.samples.iter().map(|(_, b)| b.ry).collect();
     let mut rx = round_to_int(median_f32(&rxs));
     let mut ry = round_to_int(median_f32(&rys));
+    // v0.14: a rect/ellipse track is *rotated* when most of its samples
+    // were fitted best by an oriented primitive. Its size is then measured
+    // along its own axes from the second moments — the bbox of a turning
+    // bar says nothing about the bar — and its angle becomes a channel.
+    let rotated = matches!(kind, ShapeKind::Rect | ShapeKind::Ellipse)
+        && track.samples.iter().filter(|(_, b)| b.angle_deg != 0.0).count() * 2
+            > track.samples.len();
+    if rotated {
+        let half = |v: f32| match kind {
+            ShapeKind::Rect => crate::detect::rect_half(v),
+            _ => crate::detect::ellipse_semi(v),
+        };
+        let majors: Vec<f32> = track.samples.iter().map(|(_, b)| half(b.var_major)).collect();
+        let minors: Vec<f32> = track.samples.iter().map(|(_, b)| half(b.var_minor)).collect();
+        rx = round_half(median_f32(&majors)).max(0.5);
+        ry = round_half(median_f32(&minors)).max(0.5);
+    }
     let color = median_color(track.samples.iter().map(|(_, b)| b.color));
     let (first_t, first_b) = track.samples[0];
 
@@ -340,6 +367,10 @@ fn emit_shape(
     let canvas = frames.first().map(|f| (f.width as f32, f.height as f32));
     let unclip = |b: &Blob| -> Blob {
         let Some((w, h)) = canvas else { return *b };
+        if rotated {
+            // rx/ry are axis lengths here, not bbox extents.
+            return *b;
+        }
         let mut u = *b;
         if b.rx < rx {
             if b.cx - b.rx <= CLIP_EDGE_PX {
@@ -386,6 +417,7 @@ fn emit_shape(
     // canvas edge, whose visible area shrinks without the shape doing so.
     let scales: Option<Vec<f32>> = (|| {
         if kind == ShapeKind::Path
+            || rotated
             || track.samples.len() < 3
             || track.samples.iter().any(|(_, b)| touches_edge(b))
         {
@@ -480,6 +512,46 @@ fn emit_shape(
     })();
     let color = opacity.as_ref().map_or(color, |(_, full)| *full);
 
+    // v0.14: the rotation channel, in degrees. Principal-axis angles are
+    // only defined modulo 180°, so the series is unwrapped to the nearest
+    // turn of its predecessor before anything reads it. Rect and ellipse
+    // tracks carry their absolute angle; a path carries its angle relative
+    // to the sample its outline was traced from.
+    let unwrapped: Vec<f32> = {
+        let mut out: Vec<f32> = Vec::with_capacity(track.samples.len());
+        for (_, b) in &track.samples {
+            let mut a = b.theta_deg;
+            if let Some(&p) = out.last() {
+                while a - p > 90.0 {
+                    a -= 180.0;
+                }
+                while a - p < -90.0 {
+                    a += 180.0;
+                }
+            }
+            out.push(a);
+        }
+        out
+    };
+    let rotation: Option<Vec<f32>> = (|| {
+        let lo = unwrapped.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = unwrapped.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        if rotated {
+            let med = median_f32(&unwrapped);
+            return (hi - lo >= ROT_MIN_RANGE_DEG || med.abs() >= ROT_MIN_STATIC_DEG)
+                .then(|| unwrapped.clone());
+        }
+        if kind == ShapeKind::Path && track.samples.len() >= 3 {
+            let el: Vec<f32> = track.samples.iter().map(|(_, b)| b.elongation()).collect();
+            if median_f32(&el) < PATH_ROT_MIN_ELONGATION || hi - lo < PATH_ROT_MIN_RANGE_DEG {
+                return None;
+            }
+            let rep = unwrapped[representative_sample(track)];
+            return Some(unwrapped.iter().map(|a| a - rep).collect());
+        }
+        None
+    })();
+
     let shape = match kind {
         ShapeKind::Ellipse => Shape::Ellipse {
             cx: round_to_int(base_cx),
@@ -527,6 +599,12 @@ fn emit_shape(
         let levels: Vec<f32> = al.iter().map(|a| a * 255.0).collect();
         keep.extend(rdp_1d(&times, &levels, OPACITY_RDP_TOLERANCE));
     }
+    if let Some(rot) = &rotation {
+        // Tolerance in pixels at the shape's tip, like position.
+        let reach = rx.max(ry).max(1.0);
+        let tol_deg = (RDP_TOLERANCE_PX / reach).to_degrees();
+        keep.extend(rdp_1d(&times, rot, tol_deg));
+    }
     if !keep.contains(&0) {
         keep.insert(0, 0);
     }
@@ -541,7 +619,9 @@ fn emit_shape(
     // scales about its top-left anchor, so a scaling rect needs position
     // keyframes to stay centred.
     let emit_pos = !stationary || (scales.is_some() && kind == ShapeKind::Rect);
-    let has_channels = keep.len() >= 2 && (emit_pos || scales.is_some() || opacity.is_some());
+    let has_channels = (keep.len() >= 2
+        && (emit_pos || scales.is_some() || opacity.is_some() || rotation.is_some()))
+        || (keep.len() == 1 && rotation.is_some());
 
     // Lifetime.  A track first seen after the clip starts, or last seen
     // before it ends, was not on screen the whole time.
@@ -567,14 +647,21 @@ fn emit_shape(
     let off = |b: &Blob| -> Option<(f32, f32)> {
         let (w, h) = canvas?;
         let (mut cx, mut cy) = (b.cx, b.cy);
+        // A rotated shape can reach as far as its half-diagonal.
+        let (ox, oy) = if rotated {
+            let d = (rx * rx + ry * ry).sqrt();
+            (d, d)
+        } else {
+            (rx, ry)
+        };
         if b.cx - b.rx <= CLIP_EDGE_PX {
-            cx = -rx;
+            cx = -ox;
         } else if b.cx + b.rx >= w - CLIP_EDGE_PX {
-            cx = w + rx;
+            cx = w + ox;
         } else if b.cy - b.ry <= CLIP_EDGE_PX {
-            cy = -ry;
+            cy = -oy;
         } else if b.cy + b.ry >= h - CLIP_EDGE_PX {
-            cy = h + ry;
+            cy = h + oy;
         } else {
             return None;
         }
@@ -626,6 +713,9 @@ fn emit_shape(
                 }
                 if let Some((al, _)) = &opacity {
                     transforms.push(Transform::Opacity((al[i] * 100.0).round() / 100.0));
+                }
+                if let Some(rot) = &rotation {
+                    transforms.push(Transform::Rotate((rot[i] * 10.0).round() / 10.0));
                 }
                 Keyframe {
                     time_ms: t,
@@ -716,6 +806,20 @@ fn majority_kind(samples: &[(u32, Blob)]) -> ShapeKind {
     }
 }
 
+/// The sample a path's outline is traced from: median area, the frame
+/// where the blob is most typical. A path's rotation channel is measured
+/// relative to this same sample.
+fn representative_sample(track: &Track) -> usize {
+    let mut order: Vec<usize> = (0..track.samples.len()).collect();
+    order.sort_by_key(|&i| track.samples[i].1.area);
+    order[order.len() / 2]
+}
+
+/// Round to the nearest half pixel, so a rect's width `2·rx` can be odd.
+fn round_half(v: f32) -> f32 {
+    (v * 2.0).round() / 2.0
+}
+
 /// Trace a Path-kind track's outline at its representative sample
 /// (median area — the frame where the blob is most typical), simplify
 /// with PAC's closed-loop RDP, fit Schneider Beziers, and translate
@@ -728,9 +832,7 @@ fn trace_track_outline(
     detections: &[Detection],
     declare_at: (f32, f32),
 ) -> Option<Vec<PathSeg>> {
-    let mut order: Vec<usize> = (0..track.samples.len()).collect();
-    order.sort_by_key(|&i| track.samples[i].1.area);
-    let rep = order[order.len() / 2];
+    let rep = representative_sample(track);
     let (_, rep_b) = track.samples[rep];
     let fidx = *track.frame_indices.get(rep)?;
     let frame = frames.get(fidx)?;
@@ -1200,6 +1302,10 @@ mod tests {
             color,
             area: 1800,
             hu: [0.0; 7],
+            theta_deg: 0.0,
+            var_major: 144.0,
+            var_minor: 144.0,
+            angle_deg: 0.0,
         }
     }
 

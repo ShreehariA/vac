@@ -72,8 +72,13 @@ const STATIC_MIN_AGREEMENT: f32 = 0.75;
 /// below the blob detector's floor anyway.
 const BLEED_MIN_COMPONENT_PX: usize = 16;
 /// A frame "bleeds" when at least this fraction of a component's outer
-/// ring shows the component's own colour.
-const BLEED_RING_FRACTION: f32 = 0.5;
+/// ring shows the component's own colour. 0.5 until v0.14, which was too
+/// strict for anything that *turns*: a spinning bar crosses the ring
+/// around its always-covered centre at only two points, so its centre
+/// stayed "scenery" and stripping it cut the bar in half
+/// (`examples/spin.vac`). Measured on the corpus, 0.2 frees those cores
+/// and is the loosest value that leaves `real_loader` unchanged.
+const BLEED_RING_FRACTION: f32 = 0.2;
 /// A component that bleeds in at least this fraction of frames is the
 /// core of a moving or growing shape, not scenery.
 const BLEED_MIN_FRAMES: f32 = 0.25;

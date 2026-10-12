@@ -251,6 +251,84 @@ fn touching_colours_are_separated_by_measured_choice() {
     );
 }
 
+/// **FIXED in v0.14 — rotation.**
+///
+/// Through v0.13 VAC could translate, scale and fade a shape but not turn
+/// it. `spin.vac`'s swinging rod and spinning bar came back as eight
+/// fragments frozen at fixed angles (ink IoU 0.353). Each recovered
+/// keyframe's angle is now checked against the source's own rotation
+/// curve. A rect's long axis is what is measurable, and the decompiler
+/// declares rects long side horizontal, so angles are compared as
+/// principal-axis directions modulo 180°.
+#[test]
+fn rotation_is_recovered_along_the_source_curve() {
+    let (source, recovered, fid) = hermetic("spin.vac");
+    println!("{}\n{fid}", vac::to_string(&recovered));
+    assert_eq!(shapes_of(&recovered), 2, "one rod and one bar");
+    assert!(fid.ink_iou >= 0.90, "spin.vac ink IoU {:.4}", fid.ink_iou);
+
+    // (name, long axis offset, rotation curve) for each animated rect.
+    let curves = |d: &Document| -> Vec<(f32, Vec<(u32, f32)>)> {
+        let mut out = Vec::new();
+        for st in d.scenes.iter().flat_map(|s| &s.statements) {
+            if let Statement::Animate(a) = st {
+                let offset = d
+                    .scenes
+                    .iter()
+                    .flat_map(|s| &s.statements)
+                    .find_map(|s| match s {
+                        Statement::Let { name, shape: vac::Shape::Rect { w, h, .. } } if *name == a.target => {
+                            Some(if w >= h { 0.0 } else { 90.0 })
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(0.0);
+                let rot: Vec<(u32, f32)> = a
+                    .keyframes
+                    .iter()
+                    .filter_map(|k| {
+                        k.transforms.iter().find_map(|t| match t {
+                            Transform::Rotate(r) => Some((k.time_ms, *r)),
+                            _ => None,
+                        })
+                    })
+                    .collect();
+                if !rot.is_empty() {
+                    out.push((offset, rot));
+                }
+            }
+        }
+        out
+    };
+    let at = |c: &[(u32, f32)], t: u32| -> f32 {
+        let i = c.iter().position(|&(kt, _)| kt >= t).unwrap_or(c.len() - 1);
+        if i == 0 || c[i].0 == t || c[i].0 < t {
+            return c[i].1;
+        }
+        let ((t0, v0), (t1, v1)) = (c[i - 1], c[i]);
+        v0 + (v1 - v0) * (t - t0) as f32 / (t1 - t0) as f32
+    };
+    let axis_diff = |a: f32, b: f32| {
+        let d = (a - b).rem_euclid(180.0);
+        d.min(180.0 - d)
+    };
+    let src = curves(&source);
+    let got = curves(&recovered);
+    assert_eq!(got.len(), 2, "both shapes should carry rotation");
+    for (g_off, g) in &got {
+        // Match each recovered curve to the source curve it tracks best.
+        let err = src
+            .iter()
+            .map(|(s_off, s)| {
+                g.iter()
+                    .map(|&(t, r)| axis_diff(r + g_off, at(s, t) + s_off))
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(err <= 4.0, "recovered rotation strays {err:.1}° from the source: {g:?}");
+    }
+}
+
 /// **DEFECT — strokes are never recovered.**
 ///
 /// `emit_shape` writes `stroke = none` unconditionally, and the renderer

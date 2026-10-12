@@ -28,6 +28,8 @@ struct ShapeState {
     position: Option<(f32, f32)>,
     scale: f32,
     opacity: f32,
+    /// Clockwise degrees about the shape's centre (v0.14).
+    rotation: f32,
 }
 
 impl ShapeState {
@@ -39,6 +41,7 @@ impl ShapeState {
             position: None,
             scale: 1.0,
             opacity: 1.0,
+            rotation: 0.0,
         }
     }
 }
@@ -155,6 +158,9 @@ fn apply_animation(base: &ShapeState, anim: Option<&Animation>, t_ms: u32) -> Sh
     if let Some(o) = sample_channel(anim, t_ms, first_opacity, |a, b, p| a + (b - a) * p) {
         st.opacity = o;
     }
+    if let Some(r) = sample_channel(anim, t_ms, first_rotation, |a, b, p| a + (b - a) * p) {
+        st.rotation = r;
+    }
     st
 }
 
@@ -197,6 +203,12 @@ fn first_scale(k: &Keyframe) -> Option<f32> {
         _ => None,
     })
 }
+fn first_rotation(k: &Keyframe) -> Option<f32> {
+    k.transforms.iter().find_map(|t| match t {
+        VTransform::Rotate(d) => Some(*d),
+        _ => None,
+    })
+}
 fn first_opacity(k: &Keyframe) -> Option<f32> {
     k.transforms.iter().find_map(|t| match t {
         VTransform::Opacity(o) => Some(*o),
@@ -205,16 +217,16 @@ fn first_opacity(k: &Keyframe) -> Option<f32> {
 }
 
 fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
-    let (path, anchor) = match &state.base {
+    let (path, anchor, centre) = match &state.base {
         Shape::Rect { x, y, w, h } => {
             let pb = PathBuilder::from_rect(
                 tiny_skia::Rect::from_xywh(*x, *y, *w, *h)
                     .unwrap_or_else(|| tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap()),
             );
-            (pb, (*x, *y))
+            (pb, (*x, *y), (*x + *w * 0.5, *y + *h * 0.5))
         }
         Shape::Ellipse { cx, cy, rx, ry } => {
-            (build_ellipse_path(*cx, *cy, *rx, *ry), (*cx, *cy))
+            (build_ellipse_path(*cx, *cy, *rx, *ry), (*cx, *cy), (*cx, *cy))
         }
         Shape::Path(segs) => {
             let Some(path) = build_path(segs) else {
@@ -223,14 +235,17 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
             // Anchor at the outline's shoelace centroid — this is the
             // point `position(x, y)` keyframes move, matching the
             // measured blob centroid the decompiler emits.
-            (path, vac_format::path_anchor(segs))
+            let a = vac_format::path_anchor(segs);
+            (path, a, a)
         }
     };
 
-    // World transform: (translate to origin) (scale) (translate to position)
+    // World transform: (rotate about the shape's centre) (translate the
+    // anchor to the origin) (scale) (translate to position).
     let scale = state.scale.max(0.0);
     let pos = state.position.unwrap_or(anchor);
-    let transform = Transform::from_translate(-anchor.0, -anchor.1)
+    let transform = Transform::from_rotate_at(state.rotation, centre.0, centre.1)
+        .post_translate(-anchor.0, -anchor.1)
         .post_scale(scale, scale)
         .post_translate(pos.0, pos.1);
 
@@ -328,6 +343,7 @@ mod tests {
             position: None,
             scale: 1.0,
             opacity: 1.0,
+            rotation: 0.0,
         };
         apply_animation(&base, Some(anim), t)
     }
@@ -349,6 +365,36 @@ mod tests {
         let st = state_at(&anim, 750);
         assert!((st.scale - 3.5).abs() < 1e-4, "scale {}", st.scale);
         assert_eq!(st.position, Some((15.0, 0.0)));
+    }
+
+    #[test]
+    fn rotation_interpolates_like_any_other_channel() {
+        let anim = Animation {
+            target: "s".into(),
+            easing: Easing::Linear,
+            keyframes: vec![
+                kf(0, vec![VTransform::Rotate(0.0)]),
+                kf(500, vec![VTransform::Position(10.0, 0.0)]),
+                kf(1000, vec![VTransform::Rotate(90.0)]),
+            ],
+        };
+        assert!((state_at(&anim, 250).rotation - 22.5).abs() < 1e-4);
+        assert_eq!(state_at(&anim, 2000).rotation, 90.0);
+    }
+
+    /// A 40×10 bar rotated 90° about its centre must cover a 10×40
+    /// vertical strip around the same centre.
+    #[test]
+    fn a_rotated_rect_turns_about_its_centre() {
+        let doc = vac_format::parse(
+            "canvas 100x100 @10fps\nscene s {\n  duration 100ms\n  let bg = rect(0, 0, 100, 100)\n  bg.fill = #000000\n  let bar = rect(30, 45, 40, 10)\n  bar.fill = #ffffff\n  animate bar {\n    0ms -> rotate(90)\n  }\n}\n",
+        )
+        .unwrap();
+        let frames = render_document(&doc).unwrap();
+        let f = &frames[0];
+        let lit = |x: u32, y: u32| f.rgba[((y * 100 + x) * 4) as usize] > 128;
+        assert!(lit(50, 32) && lit(50, 68), "vertical extent after rotation");
+        assert!(!lit(32, 50) && !lit(68, 50), "horizontal extent gone after rotation");
     }
 
     #[test]

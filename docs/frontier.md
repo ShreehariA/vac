@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v0.13) and is
+table re-measured 2026-10-12 at v0.14) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -95,24 +95,7 @@ escape hatch is the fallback for what no vector primitive can say.
 
 ---
 
-## 4. Rotation has no transform
-
-**Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`,
-`real_loader.gif`.**
-
-A pendulum rod sweeps an arc. VAC can only translate, scale and fade a shape,
-so the recovered rod is drawn frozen at the angle of the frame its outline was
-traced in, and slides. The loader's ticks are rotated rectangles that fit
-neither an axis-aligned rect nor an ellipse.
-
-Found by looking, not by counting: `vac verify --dump` on the pendulum shows
-the rod drawn at the wrong angle in every frame but one. The orientation of a
-blob is already measurable from the second central moments the detector
-computes for its Hu invariants (`θ = ½·atan2(2μ₁₁, μ₂₀ − μ₀₂)`).
-
----
-
-## 5. Dotted and dashed strokes fragment
+## 4. Dotted and dashed strokes fragment
 
 **Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
 
@@ -186,6 +169,18 @@ always true; only one of them was measurable.
   reference colour). The reconstruction did not change at all. Only the
   ruler did, and it now measures what it claims to.
 
+- **v0.14 — rotation.** The language gains `rotate(deg)` (clockwise, about
+  the shape's centre). The detector reads each blob's principal axis and
+  extent from its second moments, scores an oriented rect and ellipse
+  against the pixels alongside the axis-aligned ones, and the tracker
+  unwraps the angle series into a channel. The static layer's
+  bleeding-core test was loosened (ring fraction 0.5 → 0.2): a spinning
+  bar's always-covered centre had been stripped as scenery, cutting the bar
+  in half. `spin.vac` 0.353 → **0.917**; `testsrc2.mp4` residual 1711 →
+  **1349** (its colour band rotates); `real_pendulum.gif` 0.376 → **0.420**
+  (residual 872 → 657); `real_double_pendulum.gif` 0.410 → **0.457**. No
+  row regressed.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -194,15 +189,15 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
 | `slide_in_card.mp4` | 0.9918 | 0.8792 | 3.0 | 43.42 | 0.3% | 2 |
-| `testsrc2.mp4` | 0.9843 | 0.9771 | 1710.5 | 15.80 | 1.3% | 213 |
+| `testsrc2.mp4` | 0.9871 | 0.9771 | 1349.2 | 16.83 | 1.2% | 202 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9596 | 0.9449 | 9.1 | 38.54 | 2.9% | 3 |
 | `real_bouncing_ball.gif` | 0.8684 | 0.8663 | 420.1 | 21.90 | 14.0% | 3 |
-| `mandelbrot.mp4` | 0.7650 | 0.3963 | 4186.4 | 11.91 | 14.0% | 43 |
-| `real_newtons_cradle.gif` | 0.6413 | 0.6354 | 542.7 | 20.79 | 46.9% | 202 |
-| `real_loader.gif` | 0.6980 | 0.6655 | 258.7 | 24.00 | 23.0% | 16 |
-| `real_double_pendulum.gif` | 0.4099 | 0.2894 | 1199.5 | 17.34 | 56.5% | 378 |
-| `real_pendulum.gif` | 0.3760 | 0.2207 | 871.7 | 18.73 | 44.8% | 111 |
+| `mandelbrot.mp4` | 0.7650 | 0.3962 | 4186.4 | 11.91 | 14.0% | 43 |
+| `real_loader.gif` | 0.6908 | 0.6577 | 228.3 | 24.55 | 13.4% | 16 |
+| `real_newtons_cradle.gif` | 0.6419 | 0.6369 | 528.9 | 20.90 | 46.9% | 202 |
+| `real_double_pendulum.gif` | 0.4569 | 0.3202 | 1055.9 | 17.89 | 48.5% | 378 |
+| `real_pendulum.gif` | 0.4195 | 0.3272 | 656.7 | 19.96 | 11.4% | 48 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread

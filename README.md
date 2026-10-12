@@ -1437,3 +1437,42 @@ No corpus row regressed. `vac verify` reports which candidate won, and
 - The ink metric is blind on transparent canvases: `real_loader`'s IoU
   measures only its three highlighted ticks. That fix changes the ruler, so
   it gets its own commit.
+
+## v0.14 — Rotation
+
+`vac verify --dump` on the pendulum showed its rod drawn frozen at one angle,
+sliding. VAC could move, scale and fade a shape, but not turn it. The same gap
+explained the rainbow band that sweeps across `testsrc2` and the loader's
+diagonal ticks.
+
+- **Language:** `rotate(deg)`, clockwise, about the shape's centre, the way
+  CSS `transform-origin: center` works. It is a per-channel transform like
+  the others.
+- **Detector:** a blob's principal axis and its extent along and across it
+  come from the second central moments it already computed for the Hu
+  invariants: `θ = ½·atan2(2μ₁₁, μ₂₀ − μ₀₂)`. A solid W×H rect has variances
+  W²/12 and H²/12, so its true side lengths are recoverable at any angle. An
+  oriented rect and an oriented ellipse of that size are scored by IoU
+  against the pixels, next to the axis-aligned fits, and must win by a
+  margin so near-axis shapes don't flicker.
+- **Tracker:** a track whose samples mostly fit oriented primitives is
+  sized along its own axes. Its angle series is unwrapped (principal axes
+  are only defined mod 180°) and simplified with a tolerance measured in
+  pixels at the shape's tip. Elongated paths carry rotation relative to the
+  frame their outline was traced from.
+- **Static layer:** the centre of a spinning bar is covered in every frame,
+  so it looked like scenery, and stripping it cut the bar in half. The
+  bleeding-core test now needs 20% of the surrounding ring, not 50%, to show
+  the shape's colour. That was measured on the corpus as the loosest
+  setting that leaves the loader unchanged.
+
+| | ink IoU | residual |
+|---|---|---|
+| `spin.vac` (new fixture) | 0.353 → **0.917** | 673 → **40** |
+| `testsrc2.mp4` | 0.984 → 0.987 | 1711 → **1349** |
+| `real_pendulum.gif` | 0.376 → **0.420** | 872 → **657** |
+| `real_double_pendulum.gif` | 0.410 → **0.457** | 1199 → 1056 |
+| `real_loader.gif` | 0.698 → 0.691 | 259 → **228** |
+
+No corpus row regressed. `testsrc2`'s residual is now **11.2× lower than
+v0.12's 15063**: the colour slice's 10× target, met across v0.13 and v0.14.

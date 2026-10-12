@@ -7,8 +7,8 @@
 > `crates/vac-format/src/parser.rs`, whose header doc-comment carries an
 > accurate EBNF. Two facts worth knowing that contradict the text below:
 > `duration` is documented as required but the parser defaults it to 0,
-> and `scale()` / `opacity()` are fully implemented in parser, writer and
-> renderer yet are emitted by nothing — see `docs/frontier.md`.
+> and the transform table below is current: `scale()` and `opacity()` are
+> recovered by the decompiler since v0.11 and `rotate()` exists since v0.14.
 
 This is the **v0.1 subset** of the VAC source format — deliberately tiny, scoped to what a single moving ball needs. Every later version of this spec is a strict superset.
 
@@ -120,10 +120,21 @@ v0.1 transforms:
 | `position(x, y)` | absolute world point | overrides the shape's declared anchor |
 | `scale(s)` | uniform | multiplies extent about the anchor |
 | `opacity(o)` | `[0, 1]` | multiplies fill/stroke alpha |
+| `rotate(deg)` | degrees, clockwise | turns the shape about its **centre** (rect/ellipse centre, path centroid), independent of the `position` anchor — added v0.14 |
 
 v0.1 easings: `linear`, `ease-in`, `ease-out`, `ease-in-out`.
 
-Between two consecutive keyframes `(t0, V0)` and `(t1, V1)` for transform `V`, the runtime computes `t = (now − t0) / (t1 − t0)`, applies the easing curve `e = easing(t)`, and produces `V0 + (V1 − V0) * e`. Outside the keyframe range the value clamps.
+**Each transform kind is its own channel (v0.11).** For transform kind `V`,
+the runtime finds the nearest keyframes *that carry `V`* on either side of
+`now` — `(t0, V0)` and `(t1, V1)` — computes `t = (now − t0) / (t1 − t0)`,
+applies the easing curve `e = easing(t)`, and produces `V0 + (V1 − V0) * e`.
+Keyframes that set only other kinds are skipped, not treated as resets.
+Before its first keyframe and after its last, a kind holds that keyframe's
+value. (Through v0.10 the runtime used only the two keyframes bracketing
+`now`, so a kind absent from both reverted to its base value.)
+
+Composition order when rendering a shape: rotate about its centre, then
+scale about its anchor, then move the anchor to `position`.
 
 ---
 

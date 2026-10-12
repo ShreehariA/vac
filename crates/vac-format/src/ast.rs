@@ -204,6 +204,10 @@ pub enum Transform {
     Position(f32, f32),
     Scale(f32),
     Opacity(f32),
+    /// Clockwise rotation in degrees (v0.14), about the shape's centre —
+    /// a rect's or ellipse's centre, a path's centroid — independent of
+    /// the `position` anchor, the way CSS `transform-origin: center` is.
+    Rotate(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
