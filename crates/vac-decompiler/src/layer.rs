@@ -34,7 +34,7 @@
 
 use vac_format::Color;
 
-use crate::detect::{estimate_background, foreground_mask, MIN_OPAQUE_ALPHA};
+use crate::detect::{background_of, foreground_mask, Background, MIN_OPAQUE_ALPHA};
 use crate::frames::VideoFrame;
 
 /// Fewer frames than this and a temporal median is not a measurement,
@@ -107,6 +107,7 @@ pub struct StaticLayer {
     /// forward scan rather than a full-canvas walk.
     indices: Vec<usize>,
     delay_ms: u32,
+    model: Background,
 }
 
 impl StaticLayer {
@@ -114,7 +115,7 @@ impl StaticLayer {
     /// short to median meaningfully, when frame sizes disagree, or when
     /// nothing at all is persistent — all of which mean "carry on as if
     /// v0.7", not "fail".
-    pub fn measure(frames: &[VideoFrame]) -> Option<StaticLayer> {
+    pub fn measure(frames: &[VideoFrame], model: Background) -> Option<StaticLayer> {
         if frames.len() < MIN_LAYER_FRAMES {
             return None;
         }
@@ -138,7 +139,7 @@ impl StaticLayer {
             pixels: median.clone(),
             delay_ms: frames[0].delay_ms,
         };
-        let bg = estimate_background(&plate);
+        let bg = background_of(&plate, model);
         let candidate = foreground_mask(&plate, bg);
 
         // Occlusion measurement: how often is each candidate pixel
@@ -188,6 +189,7 @@ impl StaticLayer {
             mask,
             indices,
             delay_ms: frames[0].delay_ms,
+            model,
         })
     }
 
@@ -229,7 +231,7 @@ impl StaticLayer {
             }
             // Measured before the frame is edited — the corner blocks
             // this samples may themselves be static pixels.
-            let bg = estimate_background(f);
+            let bg = background_of(f, self.model);
             for &i in &self.indices {
                 if !plate_visible(&f.pixels, &self.median, i) {
                     continue;
@@ -516,7 +518,7 @@ mod tests {
             })
             .collect();
 
-        let layer = StaticLayer::measure(&frames).expect("tick should be a static layer");
+        let layer = StaticLayer::measure(&frames, Background::Corners).expect("tick should be a static layer");
         // The tick is 6 × 60 = 360 px; the mover is never persistent.
         assert!(
             (300..=420).contains(&layer.area),
@@ -565,7 +567,7 @@ mod tests {
             })
             .collect();
 
-        match StaticLayer::measure(&frames) {
+        match StaticLayer::measure(&frames, Background::Corners) {
             None => {}
             Some(l) => assert!(
                 l.area < 40,
@@ -589,7 +591,7 @@ mod tests {
             })
             .collect();
         assert!(
-            StaticLayer::measure(&frames).is_none(),
+            StaticLayer::measure(&frames, Background::Corners).is_none(),
             "invented a static layer from a clip with only a mover in it"
         );
     }

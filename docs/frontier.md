@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-09-15 at v0.10) and is
+table re-measured 2026-10-12 at v0.13) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -73,36 +73,61 @@ shape comes back as a bare fill.
 
 ---
 
-## 3. Colour: the single-flat-background model
+## 3. Smooth gradients have no primitive
 
-**Status: open. Best-evidenced fidelity gap. Corpus rows: `testsrc2.mp4`,
-`mandelbrot.mp4`.**
+**Status: open. Corpus rows: `mandelbrot.mp4`, `real_newtons_cradle.gif`.**
 
-VAC's entire background model is four 5×5 corner blocks reduced to a
-**per-channel** median (`detect::estimate_background`) — one flat `Color` per
-frame — with everything else classified foreground by distance from it.
-Because the channels are medianed independently, the result can name a colour
-that appears nowhere in the frame.
+Every fill in VAC is one flat colour. The Mandelbrot zoom is radial colour
+ramps on a pink radial background; the Newton's cradle is a greyscale
+photograph. Each is approximated by flat patches, and v0.13's measured
+search shows how little the choice of patches matters: colour-aware regions
+shatter the Mandelbrot into 289 shapes and 261 KB of source while making it
+*worse* (IoU 0.67), so the search keeps the coarse decomposition.
 
-| | ink IoU | residual | psnr |
+| | ink IoU | worst | residual |
 |---|---|---|---|
-| `testsrc2.mp4` (SMPTE colour bars) | 0.840 | **15127.9** | 6.33 dB |
-| `mandelbrot.mp4` | 0.716 | 4644.6 | 11.46 dB |
+| `mandelbrot.mp4` | 0.765 | 0.396 | 4186.4 |
+| `real_newtons_cradle.gif` | 0.641 | 0.635 | 542.7 |
 
-A residual of 15127 means each channel is off by roughly 123 out of 255. The
-IoU of 0.84 looks respectable and is measuring the right thing: the *ink* is
-broadly in the right places. The colour is what is destroyed — the bars
-reconstruct as a flat grey field. This is the clearest case in the corpus for
-reporting both numbers rather than one.
-
-**The fix is mostly reuse.** PAC — which `vac-decompiler` already depends on —
-has `kmeans::quantize_auto` and `regions::label_regions_per_cluster`. v0.6
-merged PAC into VAC and took its contour tracer, RDP and Bézier fitter — its
-pen — while leaving its eyes behind.
+PAC already fits linear gradients (`pac_decompiler::gradient`). A `gradient`
+fill in the language is the obvious next primitive; the planned `raster()`
+escape hatch is the fallback for what no vector primitive can say.
 
 ---
 
-## 4. Dotted and dashed strokes fragment
+## 4. Rotation has no transform
+
+**Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`,
+`real_loader.gif`.**
+
+A pendulum rod sweeps an arc. VAC can only translate, scale and fade a shape,
+so the recovered rod is drawn frozen at the angle of the frame its outline was
+traced in, and slides. The loader's ticks are rotated rectangles that fit
+neither an axis-aligned rect nor an ellipse.
+
+Found by looking, not by counting: `vac verify --dump` on the pendulum shows
+the rod drawn at the wrong angle in every frame but one. The orientation of a
+blob is already measurable from the second central moments the detector
+computes for its Hu invariants (`θ = ½·atan2(2μ₁₁, μ₂₀ − μ₀₂)`).
+
+---
+
+## 5. The ink metric is blind on transparent canvases
+
+**Status: open (metric). Corpus row: `real_loader.gif`.**
+
+`modal_background` votes among *opaque* pixels only. On a clip whose canvas
+is mostly transparent, the vote is won by a foreground colour (the spinner's
+tick grey), so "ink" means only the few pixels that differ from the ticks.
+`real_loader`'s IoU of 0.50 is measuring its three highlighted ticks, not the
+twelve. Found in v0.13 when the measured search preferred a reconstruction
+that had lost nine ticks. The decompiler side is fixed (a transparent border
+now means a white background); the metric fix is a ruler change and lands on
+its own with a before/after table.
+
+---
+
+## 6. Dotted and dashed strokes fragment
 
 **Status: open. Corpus rows: `real_pendulum.gif`, `real_double_pendulum.gif`.**
 
@@ -153,6 +178,18 @@ always true; only one of them was measurable.
   fragmentation itself (row 4) is still open. This only stopped the fragments
   from outliving themselves.
 
+- **v0.13 — colour: regions, a real background, and a measured choice.**
+  Blobs were connected components of "not background", which is colour-blind,
+  and the background was a per-channel median of four corners. v0.13 adds
+  colour-aware region labelling (edge fringes absorbed), a border-mode
+  background, and primitive choice by measured IoU instead of fill-ratio
+  bands. Because each of these helps some clips and hurts others, the facade
+  decompiles every combination, re-renders each, and keeps the one that
+  reconstructs the source best. `testsrc2.mp4` residual 15063 → **1711**
+  (8.8×), `real_double_pendulum.gif` IoU 0.174 → **0.410**,
+  `real_newtons_cradle.gif` residual 706 → 543, `two_tone.vac` residual
+  6676 → **83**. No row regressed.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -161,15 +198,15 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
 | `slide_in_card.mp4` | 0.9918 | 0.8792 | 3.0 | 43.42 | 0.3% | 2 |
+| `testsrc2.mp4` | 0.9843 | 0.9771 | 1710.5 | 15.80 | 1.3% | 213 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9596 | 0.9449 | 9.1 | 38.54 | 2.9% | 3 |
-| `real_bouncing_ball.gif` | 0.8758 | 0.8736 | 413.8 | 21.96 | 13.0% | 3 |
-| `testsrc2.mp4` | 0.8398 | 0.8387 | 15063.1 | 6.35 | 19.1% | 76 |
-| `mandelbrot.mp4` | 0.7227 | 0.6513 | 4508.3 | 11.59 | 33.3% | 46 |
-| `real_newtons_cradle.gif` | 0.6049 | 0.5996 | 705.7 | 19.64 | 57.1% | 186 |
+| `real_bouncing_ball.gif` | 0.8684 | 0.8663 | 420.1 | 21.90 | 14.0% | 3 |
+| `mandelbrot.mp4` | 0.7650 | 0.3963 | 4186.4 | 11.91 | 14.0% | 43 |
+| `real_newtons_cradle.gif` | 0.6413 | 0.6354 | 542.7 | 20.79 | 46.9% | 202 |
 | `real_loader.gif` | 0.5012 | 0.4766 | 258.7 | 24.00 | 76.2% | 16 |
+| `real_double_pendulum.gif` | 0.4099 | 0.2894 | 1199.5 | 17.34 | 56.5% | 378 |
 | `real_pendulum.gif` | 0.3760 | 0.2207 | 871.7 | 18.73 | 44.8% | 111 |
-| `real_double_pendulum.gif` | 0.1742 | 0.1011 | 2456.1 | 14.23 | 136.0% | 92 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread

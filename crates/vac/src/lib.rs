@@ -47,7 +47,7 @@ pub use vac_format::{
 // Re-export the underlying error types so callers can pattern-match if they
 // want to, without taking direct dependencies on the sub-crates.
 pub use vac_compiler::CompileError;
-pub use vac_decompiler::{DecompileError, Options as DecompileOptions};
+pub use vac_decompiler::{Background, DecompileError, Options as DecompileOptions, Segmentation};
 
 // --------------------------------------------------------------------
 // Errors
@@ -100,11 +100,7 @@ pub fn read_video<P: AsRef<Path>>(path: P) -> Result<Document> {
 
 /// [`read_video`] with explicit decompiler [`DecompileOptions`].
 pub fn read_video_with<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Document> {
-    let path = path.as_ref();
-    match video_format(path)? {
-        VideoFormat::Mp4 => Ok(vac_decompiler::decompile_mp4_with(path, opts)?),
-        VideoFormat::Gif => Ok(vac_decompiler::decompile_gif_with(path, opts)?),
-    }
+    decompile_frames(load_video_frames(path)?, opts)
 }
 
 /// Render a [`Document`] to a video file on disk.
@@ -198,7 +194,7 @@ fn video_format(path: &Path) -> Result<VideoFormat> {
 
 pub use vac_compiler::render::RenderedFrame;
 pub use vac_decompiler::frames::VideoFrame;
-pub use vac_metrics::{CompareOptions, Fidelity, FrameScore, MetricError, Rgb};
+pub use vac_metrics::{is_ink, CompareOptions, Fidelity, FrameScore, MetricError, Rgb};
 
 /// Rasterise a document to frames in memory, with no encoder involved.
 pub fn render(doc: &Document) -> Result<Vec<RenderedFrame>> {
@@ -223,7 +219,94 @@ pub fn decompile_frames(
     frames: Vec<VideoFrame>,
     opts: &DecompileOptions,
 ) -> Result<Document> {
-    Ok(vac_decompiler::decompile_frames(frames, opts)?)
+    Ok(decompile_chosen(frames, opts)?.document)
+}
+
+/// The outcome of a decompile, with what measurement decided.
+struct Chosen {
+    document: Document,
+    /// The segmentation actually used.
+    segmentation: Segmentation,
+    /// The background rule actually used.
+    background: Background,
+    /// The chosen candidate's fidelity, when `Auto` had to measure it.
+    fidelity: Option<Fidelity>,
+}
+
+/// Every `Auto` knob is resolved here, because this is the layer that
+/// has a renderer. Each combination of the undecided knobs is decompiled,
+/// rendered, and scored against the source, and the candidate that
+/// reconstructs best is kept — the way a video encoder makes a
+/// rate–distortion mode decision against the frames it is encoding. No
+/// content classifier decides; the reconstruction does.
+fn decompile_chosen(frames: Vec<VideoFrame>, opts: &DecompileOptions) -> Result<Chosen> {
+    let segs: &[Segmentation] = match opts.segmentation {
+        Segmentation::Auto => &[Segmentation::Components, Segmentation::Regions],
+        Segmentation::Components => &[Segmentation::Components],
+        Segmentation::Regions => &[Segmentation::Regions],
+    };
+    let bgs: &[Background] = match opts.background {
+        Background::Auto => &[Background::Corners, Background::Border],
+        Background::Corners => &[Background::Corners],
+        Background::Border => &[Background::Border],
+    };
+    if segs.len() * bgs.len() == 1 {
+        let cand_opts = DecompileOptions {
+            segmentation: segs[0],
+            background: bgs[0],
+            ..*opts
+        };
+        return Ok(Chosen {
+            document: vac_decompiler::decompile_frames(frames, &cand_opts)?,
+            segmentation: segs[0],
+            background: bgs[0],
+            fidelity: None,
+        });
+    }
+    let mut best: Option<Chosen> = None;
+    for &background in bgs {
+        for &segmentation in segs {
+            let cand_opts = DecompileOptions {
+                segmentation,
+                background,
+                ..*opts
+            };
+            let doc = vac_decompiler::decompile_frames(frames.clone(), &cand_opts)?;
+            let fid = measure(&frames, &doc)?;
+            let wins = match &best {
+                None => true,
+                Some(b) => reconstructs_better(&fid, b.fidelity.as_ref().expect("measured")),
+            };
+            if wins {
+                best = Some(Chosen {
+                    document: doc,
+                    segmentation,
+                    background,
+                    fidelity: Some(fid),
+                });
+            }
+        }
+    }
+    Ok(best.expect("at least one candidate"))
+}
+
+/// Whether reconstruction `b` beats `a`.
+///
+/// A candidate at least as good on both residual and ink IoU (and
+/// strictly better on one) wins outright. When they trade off, the two
+/// relative changes are weighed equally — `ln(residual_a / residual_b) +
+/// ln(iou_b / iou_a)` — so a 10% loss of ink overlap is never bought with
+/// a 1% gain in colour error, or the reverse. Ties keep `a`.
+pub fn reconstructs_better(b: &Fidelity, a: &Fidelity) -> bool {
+    let (ra, rb) = (a.residual.max(1e-9), b.residual.max(1e-9));
+    let (ia, ib) = (a.ink_iou.max(1e-9), b.ink_iou.max(1e-9));
+    if rb <= ra && ib >= ia {
+        return rb < ra || ib > ia;
+    }
+    if ra <= rb && ia >= ib {
+        return false;
+    }
+    (ra / rb).ln() + (ib / ia).ln() > 0.0
 }
 
 /// Reinterpret rendered frames as decoder frames. Both sides are
@@ -271,9 +354,7 @@ pub fn measure_with(
     opts: &CompareOptions,
 ) -> Result<Fidelity> {
     let rendered = render(doc)?;
-    let delays: Vec<u32> = original.iter().map(|f| f.delay_ms).collect();
-    let times = vac_metrics::timeline_from_delays(&delays);
-    let idx = vac_metrics::align(&times, rendered.len(), doc.canvas.fps);
+    let idx = aligned_indices(original, rendered.len(), doc.canvas.fps);
 
     let src: Vec<vac_metrics::FrameRef> = original
         .iter()
@@ -298,11 +379,52 @@ pub fn measure_with(
     Ok(vac_metrics::compare(&src, &recon, &backgrounds, opts)?)
 }
 
+fn aligned_indices(original: &[VideoFrame], rendered: usize, fps: u32) -> Vec<usize> {
+    let delays: Vec<u32> = original.iter().map(|f| f.delay_ms).collect();
+    let times = vac_metrics::timeline_from_delays(&delays);
+    vac_metrics::align(&times, rendered, fps)
+}
+
+/// The reconstruction, re-rendered and aligned to the source's timeline:
+/// element `i` is what the `.vac` shows while source frame `i` is on
+/// screen — exactly the frame `measure` scores it against.
+pub fn render_aligned(original: &[VideoFrame], doc: &Document) -> Result<Vec<RenderedFrame>> {
+    let rendered = render(doc)?;
+    let idx = aligned_indices(original, rendered.len(), doc.canvas.fps);
+    Ok(idx
+        .into_iter()
+        .map(|i| {
+            let r = &rendered[i];
+            RenderedFrame {
+                width: r.width,
+                height: r.height,
+                rgba: r.rgba.clone(),
+            }
+        })
+        .collect())
+}
+
+/// The background the fidelity metric measures ink against for this
+/// clip (the modal colour of the source, computed independently of the
+/// decompiler's own background rule).
+pub fn ink_background(original: &[VideoFrame]) -> Rgb {
+    let src: Vec<vac_metrics::FrameRef> = original
+        .iter()
+        .map(|f| vac_metrics::FrameRef::new(f.width, f.height, &f.pixels))
+        .collect();
+    vac_metrics::modal_background(&src)
+}
+
 /// Rate *and* distortion for one clip — everything `vac verify` reports.
 #[derive(Debug, Clone)]
 pub struct Verification {
     pub fidelity: Fidelity,
     pub document: Document,
+    /// The segmentation the decompile used — under `Auto`, the one
+    /// measurement picked.
+    pub segmentation: Segmentation,
+    /// The background rule the decompile used.
+    pub background: Background,
     /// Frames decoded from the source.
     pub source_frames: usize,
     /// Size of the emitted `.vac` source, in bytes. The "rate" axis.
@@ -317,12 +439,27 @@ pub struct Verification {
 pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verification> {
     let frames = load_video_frames(path)?;
     let source_frames = frames.len();
-    let doc = decompile_frames(frames.clone(), opts)?;
-    let fidelity = measure(&frames, &doc)?;
-    Ok(summarise(doc, fidelity, source_frames))
+    let chosen = decompile_chosen(frames.clone(), opts)?;
+    let fidelity = match chosen.fidelity {
+        Some(f) => f,
+        None => measure(&frames, &chosen.document)?,
+    };
+    Ok(summarise(
+        chosen.document,
+        fidelity,
+        source_frames,
+        chosen.segmentation,
+        chosen.background,
+    ))
 }
 
-fn summarise(doc: Document, fidelity: Fidelity, source_frames: usize) -> Verification {
+fn summarise(
+    doc: Document,
+    fidelity: Fidelity,
+    source_frames: usize,
+    segmentation: Segmentation,
+    background: Background,
+) -> Verification {
     let text = vac_format::write(&doc);
     let mut shapes = 0usize;
     let mut animate_blocks = 0usize;
@@ -342,10 +479,57 @@ fn summarise(doc: Document, fidelity: Fidelity, source_frames: usize) -> Verific
     Verification {
         fidelity,
         document: doc,
+        segmentation,
+        background,
         source_frames,
         vac_bytes: text.len(),
         shapes,
         animate_blocks,
         keyframes,
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn fid(residual: f64, ink_iou: f64) -> Fidelity {
+        Fidelity {
+            frames_compared: 1,
+            residual,
+            psnr_db: vac_metrics::psnr_from_mse(residual),
+            ink_iou,
+            missing_ink: 0.0,
+            spurious_ink: 0.0,
+            worst_psnr_db: 0.0,
+            worst_psnr_frame: 0,
+            worst_iou: ink_iou,
+            worst_iou_frame: 0,
+            frames: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_candidate_better_on_both_axes_wins() {
+        assert!(reconstructs_better(&fid(100.0, 0.9), &fid(200.0, 0.8)));
+        assert!(!reconstructs_better(&fid(200.0, 0.8), &fid(100.0, 0.9)));
+    }
+
+    #[test]
+    fn a_tie_keeps_the_incumbent() {
+        assert!(!reconstructs_better(&fid(100.0, 0.9), &fid(100.0, 0.9)));
+    }
+
+    /// The trade-off rule weighs relative changes equally, so a small gain
+    /// on one axis never buys a large loss on the other — in either
+    /// direction.
+    #[test]
+    fn trade_offs_are_weighed_by_relative_change() {
+        // 10% IoU loss for a 1% residual gain: no.
+        assert!(!reconstructs_better(&fid(99.0, 0.81), &fid(100.0, 0.90)));
+        // 40% IoU gain for a 14% residual loss: yes.
+        assert!(reconstructs_better(&fid(114.0, 0.70), &fid(100.0, 0.50)));
+        // Residual halved for a 5% IoU loss: yes.
+        assert!(reconstructs_better(&fid(50.0, 0.855), &fid(100.0, 0.90)));
     }
 }

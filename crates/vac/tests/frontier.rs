@@ -212,6 +212,45 @@ fn objects_are_only_drawn_during_their_lifetime() {
     }
 }
 
+/// **FIXED in v0.13 — touching regions of different colour.**
+///
+/// Through v0.12 a blob was a connected component of "not background":
+/// colour-blind. `two_tone.vac`'s four touching bars fused into one blob
+/// and its two-tone card into one shape of their averaged colour, and the
+/// background was a per-channel median of four corners that landed on a
+/// bar.
+///
+/// v0.13 adds colour-aware regions and a border-mode background, and the
+/// facade keeps them only when they measurably reconstruct better. This
+/// test pins both halves: the measured choice is right, *and* it matters
+/// — forcing the old pipeline is an order of magnitude worse.
+#[test]
+fn touching_colours_are_separated_by_measured_choice() {
+    let source = vac::read(examples_dir().join("two_tone.vac")).unwrap();
+    let frames = vac::rendered_to_video_frames(&vac::render(&source).unwrap(), source.canvas.fps);
+
+    let auto = vac::decompile_frames(frames.clone(), &DecompileOptions::default()).unwrap();
+    let auto_fid = vac::measure(&frames, &auto).unwrap();
+    let legacy_opts = DecompileOptions {
+        segmentation: vac::Segmentation::Components,
+        background: vac::Background::Corners,
+        ..Default::default()
+    };
+    let legacy = vac::decompile_frames(frames.clone(), &legacy_opts).unwrap();
+    let legacy_fid = vac::measure(&frames, &legacy).unwrap();
+    println!("auto:   {auto_fid}\nlegacy: {legacy_fid}");
+
+    assert_eq!(shapes_of(&auto), shapes_of(&source), "{}", vac::to_string(&auto));
+    assert!(auto_fid.residual < 150.0, "auto residual {:.1}", auto_fid.residual);
+    assert!(auto_fid.ink_iou > 0.98, "auto ink IoU {:.4}", auto_fid.ink_iou);
+    assert!(
+        legacy_fid.residual > 10.0 * auto_fid.residual,
+        "the legacy pipeline should be far worse here: {:.1} vs {:.1}",
+        legacy_fid.residual,
+        auto_fid.residual
+    );
+}
+
 /// **DEFECT — strokes are never recovered.**
 ///
 /// `emit_shape` writes `stroke = none` unconditionally, and the renderer

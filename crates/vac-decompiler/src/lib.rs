@@ -54,13 +54,23 @@ pub struct Options {
     /// Measure and strip the persistent scene before tracking (v0.8).
     /// Off reproduces the v0.7 single-layer pipeline exactly.
     pub static_layer: bool,
+    /// How foreground pixels are grouped into blobs (v0.13).
+    pub segmentation: Segmentation,
+    /// Which rule picks each frame's background colour (v0.13).
+    pub background: Background,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { static_layer: true }
+        Options {
+            static_layer: true,
+            segmentation: Segmentation::Auto,
+            background: Background::Auto,
+        }
     }
 }
+
+pub use detect::{Background, Segmentation};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecompileError {
@@ -113,13 +123,13 @@ pub fn decompile_frames(
         return Err(DecompileError::Other("no frames in input".into()));
     }
     let scene = if opts.static_layer {
-        layer::StaticLayer::measure(&frames)
+        layer::StaticLayer::measure(&frames, opts.background)
     } else {
         None
     };
     if let Some(l) = &scene {
         l.strip(&mut frames);
     }
-    let detections = detect::detect_all(&frames);
+    let detections = detect::detect_all(&frames, opts.segmentation, opts.background);
     Ok(track::build_document(&frames, &detections, scene.as_ref()))
 }

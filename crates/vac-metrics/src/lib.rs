@@ -404,6 +404,13 @@ pub fn modal_background(frames: &[FrameRef]) -> Rgb {
     }
 }
 
+/// Whether one RGBA pixel counts as ink against `background` — the exact
+/// rule `compare_frame` scores with, exported so diagnostic views (the
+/// `vac verify --dump` ink map) draw the same masks the numbers came from.
+pub fn is_ink(px: &[u8], background: Rgb, opts: &CompareOptions) -> bool {
+    px[3] >= MIN_OPAQUE_ALPHA && dist_sq(px, background) > opts.ink_threshold_sq
+}
+
 fn dist_sq(px: &[u8], bg: Rgb) -> u32 {
     let dr = px[0] as i32 - bg.r as i32;
     let dg = px[1] as i32 - bg.g as i32;

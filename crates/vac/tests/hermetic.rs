@@ -136,6 +136,7 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("static_and_moving.vac", 0.9975, 1.02),
     ("triangle.vac", 0.9748, 18.75),
     ("two_balls.vac", 0.9523, 8.75),
+    ("two_tone.vac", 0.9909, 83.45),
 ];
 
 fn baseline_for(sample: &str) -> (f64, f64) {
@@ -322,11 +323,12 @@ fn static_layering_does_not_hurt_fidelity_on_the_occlusion_fixture() {
     // v0.8 justified static-scene layering with shape and keyframe
     // counts. This is the first time the claim is checked against
     // reconstruction quality on either side of the switch.
-    let with = hermetic_with("occlusion.vac", &DecompileOptions { static_layer: true });
+    let with = hermetic_with("occlusion.vac", &DecompileOptions { static_layer: true, ..Default::default() });
     let without = hermetic_with(
         "occlusion.vac",
         &DecompileOptions {
             static_layer: false,
+            ..Default::default()
         },
     );
 

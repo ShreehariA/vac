@@ -24,6 +24,34 @@ pub struct Detection {
     /// by area (largest first — useful when the tracker wants a stable
     /// processing order).
     pub blobs: Vec<Blob>,
+    /// How this frame's pixels were grouped into blobs. Carried so that
+    /// re-tracing a blob's outline later groups pixels the same way.
+    pub segmentation: Segmentation,
+}
+
+/// How foreground pixels are grouped into blobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Segmentation {
+    /// v0.3–v0.12: connected components of the foreground mask.
+    /// Colour-blind — touching regions of different colours fuse.
+    #[default]
+    Components,
+    /// v0.13: connected regions of similar colour, with edge fringes
+    /// absorbed. Separates the bars of a test card; on smooth-gradient
+    /// content (a Mandelbrot zoom) it shatters the picture instead.
+    Regions,
+    /// Decide by measurement. The decompiler has no renderer, so on its
+    /// own this behaves as `Components`; the `vac` facade, which does,
+    /// decompiles both ways, re-renders each, and keeps the one that
+    /// reconstructs the source better.
+    Auto,
+}
+
+fn label(f: &VideoFrame, mask: &[bool], w: usize, h: usize, seg: Segmentation) -> Vec<u32> {
+    match seg {
+        Segmentation::Regions => label_regions(f, mask, w, h),
+        Segmentation::Components | Segmentation::Auto => label_components_4(mask, w, h),
+    }
 }
 
 /// Primitive class the decompiler thinks best fits this blob's silhouette.
@@ -92,6 +120,22 @@ const FG_THRESHOLD_SQ: u32 = 24 * 24 * 3;
 /// and discarded (smaller than a 3x3 cluster).
 const MIN_BLOB_AREA: u32 = 9;
 
+/// A rect or ellipse must overlap a blob's pixels at least this well
+/// (IoU) to stand for it; below, the outline is traced as a path.
+const PRIMITIVE_MIN_IOU: f32 = 0.88;
+
+/// Squared RGB distance within which two adjacent foreground pixels are
+/// the same region (v0.13). Well above H.264 noise on a flat fill, well
+/// below the contrast of any two colours a viewer would call different.
+const REGION_JOIN_SQ: u32 = 20 * 20 * 3;
+
+/// Squared RGB distance around the modal border bin that still counts
+/// toward the background mean.
+const BG_REFINE_SQ: u32 = 12 * 12 * 3;
+
+/// Upper bound on fringe-absorption passes in `label_regions`.
+const ABSORB_MAX_PASSES: usize = 4;
+
 /// Alpha below this is treated as transparent and excluded from both
 /// background estimation and the foreground mask (v0.5.2). GIF alpha
 /// is binary (0 or 255) and H.264 frames decode with alpha = 255
@@ -101,32 +145,138 @@ const MIN_BLOB_AREA: u32 = 9;
 pub(crate) const MIN_OPAQUE_ALPHA: u8 = 128;
 
 /// Run detection across all frames.
-pub fn detect_all(frames: &[VideoFrame]) -> Vec<Detection> {
+pub fn detect_all(frames: &[VideoFrame], seg: Segmentation, model: Background) -> Vec<Detection> {
     let mut out = Vec::with_capacity(frames.len());
     let mut t_ms: u32 = 0;
     for (i, f) in frames.iter().enumerate() {
-        let bg = estimate_background(f);
-        let mut blobs = detect_blobs(f, bg);
+        let bg = background_of(f, model);
+        let mut blobs = detect_blobs(f, bg, seg);
         blobs.sort_by(|a, b| b.area.cmp(&a.area).then_with(|| cmp_position(a, b)));
         out.push(Detection {
             frame_index: i,
             t_ms,
             bg,
             blobs,
+            segmentation: seg,
         });
         t_ms = t_ms.saturating_add(f.delay_ms);
     }
     out
 }
 
-/// Sample a small block at each corner and return the median RGB.
+/// The frame's background colour: the colour that occupies the most of
+/// its border (v0.13).
+///
+/// Through v0.12 this was the per-channel median of four 5×5 corner
+/// blocks. When the corners agree that is the same answer; when they do
+/// not — a test card's bars, a scene whose lower half is floor — the
+/// channels are medianed independently and the result can name a colour
+/// that appears nowhere in the frame (`two_tone.vac` came back with a
+/// red-bar "background" and its real dark ground drawn as an ellipse).
+///
+/// Border pixels are binned at 5 bits per channel; the fullest bin wins,
+/// and the answer is the mean of every border pixel within
+/// `BG_REFINE_SQ` of that bin's mean, so codec noise straddling a bin
+/// edge does not shift it. Transparent pixels are excluded; a canvas with
+/// no opaque border pixel falls back to white, the colour viewers
+/// composite transparent GIFs onto.
+pub fn estimate_background_border(f: &VideoFrame) -> Color {
+    let (w, h) = (f.width as usize, f.height as usize);
+    if w == 0 || h == 0 {
+        return Color::rgb(255, 255, 255);
+    }
+    let mut border: Vec<[u8; 3]> = Vec::with_capacity(2 * (w + h));
+    let mut transparent = 0usize;
+    let mut take = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        if f.pixels[i + 3] >= MIN_OPAQUE_ALPHA {
+            border.push([f.pixels[i], f.pixels[i + 1], f.pixels[i + 2]]);
+        } else {
+            transparent += 1;
+        }
+    };
+    for x in 0..w {
+        take(x, 0);
+        if h > 1 {
+            take(x, h - 1);
+        }
+    }
+    for y in 1..h.saturating_sub(1) {
+        take(0, y);
+        if w > 1 {
+            take(w - 1, y);
+        }
+    }
+    // A mostly transparent border means the background *is*
+    // transparency. Voting among the few opaque border pixels would
+    // instead crown whatever foreground touches the edge — on the
+    // `real_loader` spinner, the tick colour, after which 9 of its 12
+    // ticks matched "background" and vanished.
+    if border.len() <= transparent {
+        return Color::rgb(255, 255, 255);
+    }
+    let bin = |p: &[u8; 3]| ((p[0] as u32 >> 3) << 10) | ((p[1] as u32 >> 3) << 5) | (p[2] as u32 >> 3);
+    let mut counts: std::collections::HashMap<u32, (u32, [u64; 3])> = std::collections::HashMap::new();
+    for p in &border {
+        let e = counts.entry(bin(p)).or_insert((0, [0; 3]));
+        e.0 += 1;
+        for c in 0..3 {
+            e.1[c] += p[c] as u64;
+        }
+    }
+    // Fullest bin; ties to the lower bin index, so the result never
+    // depends on HashMap iteration order.
+    let (_, (n, sum)) = counts
+        .iter()
+        .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.cmp(a.0)))
+        .expect("non-empty");
+    let seed = [
+        (sum[0] / *n as u64) as i32,
+        (sum[1] / *n as u64) as i32,
+        (sum[2] / *n as u64) as i32,
+    ];
+    let (mut acc, mut k) = ([0u64; 3], 0u64);
+    for p in &border {
+        let d = |c: usize| p[c] as i32 - seed[c];
+        if ((d(0) * d(0) + d(1) * d(1) + d(2) * d(2)) as u32) <= BG_REFINE_SQ {
+            for c in 0..3 {
+                acc[c] += p[c] as u64;
+            }
+            k += 1;
+        }
+    }
+    let k = k.max(1);
+    Color::rgb((acc[0] / k) as u8, (acc[1] / k) as u8, (acc[2] / k) as u8)
+}
+
+/// The frame's background colour under `model` (v0.13).
+pub fn background_of(f: &VideoFrame, model: Background) -> Color {
+    match model {
+        Background::Border => estimate_background_border(f),
+        Background::Corners | Background::Auto => estimate_background(f),
+    }
+}
+
+/// Which rule picks a frame's single background colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Background {
+    /// v0.1–v0.12: per-channel median of four 5×5 corner blocks.
+    #[default]
+    Corners,
+    /// v0.13: the modal colour of the frame's border.
+    Border,
+    /// Decide by measurement — resolved by the `vac` facade, which can
+    /// render; on its own the decompiler treats it as `Corners`.
+    Auto,
+}
+
+/// Sample a small block at each corner and return the median RGB — the
+/// v0.1–v0.12 background rule, `Background::Corners`.
 ///
 /// Fully-transparent pixels are excluded from the samples. If *no*
 /// corner pixel is opaque, the canvas has no measurable background
 /// colour at all — fall back to white, the colour viewers composite
 /// transparent GIFs onto.
-/// Public since v0.9: the fidelity metric needs the *source* frame's
-/// background as the reference its ink mask is measured against.
 pub fn estimate_background(f: &VideoFrame) -> Color {
     let w = f.width as i32;
     let h = f.height as i32;
@@ -213,12 +363,12 @@ pub(crate) fn foreground_mask(f: &VideoFrame, bg: Color) -> Vec<bool> {
     mask
 }
 
-pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
+pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<Blob> {
     let w = f.width as usize;
     let h = f.height as usize;
 
     let mask = foreground_mask(f, bg);
-    let labels = label_components_4(&mask, w, h);
+    let labels = label(f, &mask, w, h, seg);
 
     // Per-label area count.
     let mut counts = std::collections::HashMap::<u32, u32>::new();
@@ -333,10 +483,23 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
         let x1 = a.max_x as usize;
         let y0 = a.min_y as usize;
         let y1 = a.max_y as usize;
+        let ecx = (x0 + x1 + 1) as f64 * 0.5;
+        let ecy = (y0 + y1 + 1) as f64 * 0.5;
+        let erx = (x1 - x0 + 1) as f64 * 0.5;
+        let ery = (y1 - y0 + 1) as f64 * 0.5;
         for y in y0..=y1 {
             for x in x0..=x1 {
+                let ex = (x as f64 + 0.5 - ecx) / erx;
+                let ey = (y as f64 + 0.5 - ecy) / ery;
+                let in_ellipse = ex * ex + ey * ey <= 1.0;
+                if in_ellipse {
+                    a.ell_total += 1;
+                }
                 if labels[y * w + x] != l {
                     continue;
+                }
+                if in_ellipse {
+                    a.ell_hit += 1;
                 }
                 let dx = x as f64 - cx;
                 let dy = y as f64 - cy;
@@ -370,12 +533,36 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color) -> Vec<Blob> {
             } else {
                 0.0
             };
-            let kind = if fill_ratio >= RECT_FILL_THRESHOLD {
-                ShapeKind::Rect
-            } else if fill_ratio >= ELLIPSE_MIN_FILL || a.area < MIN_PATH_AREA {
-                ShapeKind::Ellipse
+            // v0.13: measure, don't threshold. Each primitive's fit is its
+            // IoU with the blob's actual pixels — a bbox rect's IoU is the
+            // fill ratio, an inscribed ellipse's is counted on the
+            // lattice. The better fit wins; if neither reaches
+            // `PRIMITIVE_MIN_IOU` the outline is traced as a path.
+            //
+            // The fill-ratio bands this replaces called a bar notched by
+            // a caption box (fill 0.85) an *ellipse*, whose real overlap
+            // with it is ~0.7: `testsrc2`'s red bar came back oval.
+            let iou_rect = fill_ratio;
+            let ell_union = a.area + a.ell_total - a.ell_hit;
+            let iou_ellipse = if ell_union > 0 {
+                a.ell_hit as f32 / ell_union as f32
             } else {
+                0.0
+            };
+            let best = iou_rect.max(iou_ellipse);
+            let kind = if best >= PRIMITIVE_MIN_IOU {
+                if iou_rect >= iou_ellipse {
+                    ShapeKind::Rect
+                } else {
+                    ShapeKind::Ellipse
+                }
+            } else if a.area >= MIN_PATH_AREA {
                 ShapeKind::Path
+            } else {
+                // Too small to trace and fitting neither primitive (a
+                // diagonal loader tick): the ellipse, which overclaims
+                // the bbox least — what v0.4–v0.12 did here too.
+                ShapeKind::Ellipse
             };
             let color = if a.int_count > 0 {
                 Color::rgb(
@@ -438,11 +625,12 @@ pub fn extract_contour(
     near: (f32, f32),
     max_seed_dist: f32,
     min_component_area: u32,
+    seg: Segmentation,
 ) -> Option<Vec<(f32, f32)>> {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let mask = foreground_mask(frame, bg);
-    let labels = label_components_4(&mask, w, h);
+    let labels = label(frame, &mask, w, h, seg);
 
     // Component sizes, so the seed search can skip noise specks.
     let mut label_area = std::collections::HashMap::<u32, u32>::new();
@@ -574,6 +762,10 @@ struct BlobAcc {
     int_g: u64,
     int_b: u64,
     int_count: u64,
+    /// Lattice points of the bbox-inscribed ellipse, and how many of them
+    /// belong to the blob — the ellipse's overlap with the actual pixels.
+    ell_total: u32,
+    ell_hit: u32,
 }
 
 impl BlobAcc {
@@ -597,6 +789,8 @@ impl BlobAcc {
             int_g: 0,
             int_b: 0,
             int_count: 0,
+            ell_total: 0,
+            ell_hit: 0,
         }
     }
 }
@@ -604,6 +798,149 @@ impl BlobAcc {
 // --------------------------------------------------------------------
 // Connected components (4-neighbourhood, two-pass union-find)
 // --------------------------------------------------------------------
+
+/// v0.13: label *regions*, not components.
+///
+/// Through v0.12 a blob was a connected component of the foreground
+/// mask, which is colour-blind: touching regions of different colours —
+/// the six bars of `testsrc2`, a red card on a green panel — fused into
+/// one blob with one averaged colour. Now two 4-adjacent foreground
+/// pixels share a label only when their colours are within
+/// `REGION_JOIN_SQ` of each other.
+///
+/// Neighbour-to-neighbour joining chains through smooth gradients (a
+/// shaded ball stays one region), and splits at edges. What it would
+/// also do is turn every anti-aliased edge into a fringe of thin
+/// in-between regions, so a second pass hands each thin region — one
+/// with no pixel whose four neighbours all share its label — to the
+/// solid region it shares the most border with. A thin region touching
+/// no solid region (a hairline on background) keeps its own label.
+fn label_regions(f: &VideoFrame, mask: &[bool], w: usize, h: usize) -> Vec<u32> {
+    let close = |a: usize, b: usize| {
+        let d = |c: usize| f.pixels[a * 4 + c] as i32 - f.pixels[b * 4 + c] as i32;
+        (d(0) * d(0) + d(1) * d(1) + d(2) * d(2)) as u32 <= REGION_JOIN_SQ
+    };
+    let mut labels = vec![0u32; w * h];
+    let mut uf = UnionFind::new();
+    let mut next: u32 = 1;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if !mask[i] {
+                continue;
+            }
+            let left = if x > 0 && mask[i - 1] && close(i, i - 1) {
+                labels[i - 1]
+            } else {
+                0
+            };
+            let up = if y > 0 && mask[i - w] && close(i, i - w) {
+                labels[i - w]
+            } else {
+                0
+            };
+            match (left, up) {
+                (0, 0) => {
+                    labels[i] = next;
+                    uf.make_set(next);
+                    next += 1;
+                }
+                (a, 0) => labels[i] = a,
+                (0, b) => labels[i] = b,
+                (a, b) => {
+                    labels[i] = a.min(b);
+                    if a != b {
+                        uf.union(a, b);
+                    }
+                }
+            }
+        }
+    }
+    for l in labels.iter_mut() {
+        if *l != 0 {
+            *l = uf.find(*l);
+        }
+    }
+    // A codec-blurred edge is a fringe several regions deep: the outer
+    // band touches only the inner band, which is thin too. Repeat until
+    // nothing moves (bounded — each pass only ever reduces the number of
+    // thin regions).
+    // A codec-blurred edge is a fringe several regions deep: the outer
+    // band touches only the inner band, which is thin too. Repeat until
+    // nothing moves (bounded — each pass only ever reduces the number of
+    // thin regions).
+    for _ in 0..ABSORB_MAX_PASSES {
+        if !absorb_thin_regions(&mut labels, w, h) {
+            break;
+        }
+    }
+    labels
+}
+
+/// One fringe-absorption pass: every thin region (no pixel whose four
+/// neighbours all share its label) joins the solid region it shares the
+/// most border with. Returns whether anything changed.
+///
+/// A stricter rule — absorb only when the thin region's colour is a
+/// blend of its two sides — was tried and measured worse: H.264 chroma
+/// subsampling shifts fringe colours off the blend line, so codec edges
+/// stopped being absorbed and `vac_control` regrew 16 fringe shapes.
+fn absorb_thin_regions(labels: &mut [u32], w: usize, h: usize) -> bool {
+    use std::collections::HashMap;
+    let same_all_4 = |labels: &[u32], i: usize| {
+        let (x, y) = (i % w, i / w);
+        let l = labels[i];
+        (x == 0 || labels[i - 1] == l)
+            && (x + 1 == w || labels[i + 1] == l)
+            && (y == 0 || labels[i - w] == l)
+            && (y + 1 == h || labels[i + w] == l)
+    };
+    let mut solid: HashMap<u32, bool> = HashMap::new();
+    for i in 0..w * h {
+        let l = labels[i];
+        if l == 0 {
+            continue;
+        }
+        let e = solid.entry(l).or_insert(false);
+        if !*e && same_all_4(labels, i) {
+            *e = true;
+        }
+    }
+    let mut border: HashMap<(u32, u32), u32> = HashMap::new();
+    for i in 0..w * h {
+        let l = labels[i];
+        if l == 0 || solid[&l] {
+            continue;
+        }
+        let (x, y) = (i % w, i / w);
+        let mut visit = |j: usize| {
+            let m = labels[j];
+            if m != 0 && m != l && solid[&m] {
+                *border.entry((l, m)).or_insert(0) += 1;
+            }
+        };
+        if x > 0 { visit(i - 1); }
+        if x + 1 < w { visit(i + 1); }
+        if y > 0 { visit(i - w); }
+        if y + 1 < h { visit(i + w); }
+    }
+    let mut target: HashMap<u32, (u32, u32)> = HashMap::new();
+    for (&(l, m), &n) in &border {
+        let e = target.entry(l).or_insert((m, n));
+        if n > e.1 || (n == e.1 && m < e.0) {
+            *e = (m, n);
+        }
+    }
+    if target.is_empty() {
+        return false;
+    }
+    for l in labels.iter_mut() {
+        if let Some(&(m, _)) = target.get(l) {
+            *l = m;
+        }
+    }
+    true
+}
 
 fn label_components_4(mask: &[bool], w: usize, h: usize) -> Vec<u32> {
     let mut labels = vec![0u32; w * h];
@@ -685,7 +1022,7 @@ mod tests {
         let f = synth_frame(160, 120, (20, 20, 20), (255, 0, 0), |x, y| {
             (60..110).contains(&x) && (40..70).contains(&y)
         });
-        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20));
+        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20), Segmentation::Components);
         assert_eq!(blobs.len(), 1, "expected exactly one blob, got {blobs:?}");
         let b = blobs[0];
         assert_eq!(b.kind, ShapeKind::Rect, "fill_ratio={}", b.fill_ratio);
@@ -703,7 +1040,7 @@ mod tests {
             let dy = y as i32 - 60;
             dx * dx + dy * dy <= 30 * 30
         });
-        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20));
+        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20), Segmentation::Components);
         assert_eq!(blobs.len(), 1, "expected exactly one blob");
         let b = blobs[0];
         assert_eq!(b.kind, ShapeKind::Ellipse, "fill_ratio={}", b.fill_ratio);
@@ -720,7 +1057,7 @@ mod tests {
             let dy = (y as f32 - 60.0) / 15.0;
             dx * dx + dy * dy <= 1.0
         });
-        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20));
+        let blobs = detect_blobs(&f, Color::rgb(20, 20, 20), Segmentation::Components);
         assert_eq!(blobs.len(), 1);
         let b = blobs[0];
         assert_eq!(b.kind, ShapeKind::Ellipse);
@@ -735,7 +1072,7 @@ mod tests {
             ((20..60).contains(&x) && (20..70).contains(&y))
                 || ((130..170).contains(&x) && (20..70).contains(&y))
         });
-        let blobs = detect_blobs(&f, Color::rgb(10, 10, 10));
+        let blobs = detect_blobs(&f, Color::rgb(10, 10, 10), Segmentation::Components);
         assert_eq!(blobs.len(), 2);
         for b in &blobs {
             assert_eq!(b.kind, ShapeKind::Rect, "fill_ratio={}", b.fill_ratio);
@@ -758,7 +1095,7 @@ mod tests {
         let f = synth_frame(160, 120, (20, 20, 20), (0, 200, 255), inside);
         let bg = Color::rgb(20, 20, 20);
 
-        let blobs = detect_blobs(&f, bg);
+        let blobs = detect_blobs(&f, bg, Segmentation::Components);
         assert_eq!(blobs.len(), 1, "expected one blob, got {blobs:?}");
         let b = blobs[0];
         assert_eq!(b.kind, ShapeKind::Path, "fill_ratio={}", b.fill_ratio);
@@ -768,7 +1105,7 @@ mod tests {
             b.fill_ratio
         );
 
-        let contour = extract_contour(&f, bg, (b.cx, b.cy), b.rx.max(b.ry), (b.area / 4).max(1))
+        let contour = extract_contour(&f, bg, (b.cx, b.cy), b.rx.max(b.ry), (b.area / 4).max(1), Segmentation::Components)
             .expect("triangle contour");
         let simplified = pac_decompiler::simplify::rdp(&contour, 2.0);
         assert!(
@@ -851,7 +1188,7 @@ mod tests {
         let f = synth_frame_transparent(32, 32, (60, 60, 60), |x, y| {
             (14..18).contains(&x) && (4..12).contains(&y)
         });
-        let blobs = detect_blobs(&f, Color::rgb(255, 255, 255));
+        let blobs = detect_blobs(&f, Color::rgb(255, 255, 255), Segmentation::Components);
         assert_eq!(
             blobs.len(),
             1,
@@ -893,5 +1230,144 @@ impl UnionFind {
                 self.parent[ra as usize] = rb;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    //! v0.13: colour-aware segmentation and the border background rule.
+    use super::*;
+
+    /// A frame painted by `paint(x, y) -> Option<rgb>`, background `bg`.
+    fn frame(w: u32, h: u32, bg: [u8; 3], paint: impl Fn(u32, u32) -> Option<[u8; 3]>) -> VideoFrame {
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let c = paint(x, y).unwrap_or(bg);
+                pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        VideoFrame {
+            width: w,
+            height: h,
+            pixels,
+            delay_ms: 33,
+        }
+    }
+
+    const DARK: [u8; 3] = [20, 20, 28];
+    const RED: [u8; 3] = [224, 72, 72];
+    const GREEN: [u8; 3] = [72, 192, 96];
+
+    #[test]
+    fn regions_split_touching_colours_where_components_fuse_them() {
+        // A red block and a green block sharing an edge.
+        let f = frame(80, 50, DARK, |x, y| match (x, y) {
+            (10..=39, 10..=39) => Some(RED),
+            (40..=69, 10..=39) => Some(GREEN),
+            _ => None,
+        });
+        let bg = Color::rgb(DARK[0], DARK[1], DARK[2]);
+        let fused = detect_blobs(&f, bg, Segmentation::Components);
+        assert_eq!(fused.len(), 1, "components are colour-blind");
+
+        let mut split = detect_blobs(&f, bg, Segmentation::Regions);
+        split.sort_by(|a, b| a.cx.partial_cmp(&b.cx).unwrap());
+        assert_eq!(split.len(), 2, "regions separate the two colours");
+        assert_eq!((split[0].color.r, split[0].color.g), (RED[0], RED[1]));
+        assert_eq!((split[1].color.r, split[1].color.g), (GREEN[0], GREEN[1]));
+        assert_eq!(split[0].area, 900);
+        assert_eq!(split[1].area, 900);
+    }
+
+    #[test]
+    fn an_antialiased_fringe_is_absorbed_not_emitted() {
+        // A red disc with a one-pixel ring of half-blended colour — what a
+        // rasteriser leaves at the edge.
+        let blend = [
+            ((RED[0] as u16 + DARK[0] as u16) / 2) as u8,
+            ((RED[1] as u16 + DARK[1] as u16) / 2) as u8,
+            ((RED[2] as u16 + DARK[2] as u16) / 2) as u8,
+        ];
+        let f = frame(64, 64, DARK, |x, y| {
+            let d = ((x as f32 - 32.0).powi(2) + (y as f32 - 32.0).powi(2)).sqrt();
+            if d <= 15.0 {
+                Some(RED)
+            } else if d <= 16.0 {
+                Some(blend)
+            } else {
+                None
+            }
+        });
+        let blobs = detect_blobs(&f, Color::rgb(DARK[0], DARK[1], DARK[2]), Segmentation::Regions);
+        assert_eq!(blobs.len(), 1, "the fringe must join the disc: {blobs:?}");
+    }
+
+    #[test]
+    fn a_smooth_gradient_stays_one_region() {
+        // 120 px from red to blue: each step is far below the join
+        // threshold even though the ends are completely different.
+        let f = frame(140, 30, DARK, |x, y| {
+            (10..130).contains(&x).then(|| {
+                let t = (x - 10) as f32 / 119.0;
+                let _ = y;
+                [
+                    (220.0 * (1.0 - t) + 40.0 * t) as u8,
+                    60,
+                    (40.0 * (1.0 - t) + 220.0 * t) as u8,
+                ]
+            })
+        });
+        let blobs = detect_blobs(&f, Color::rgb(DARK[0], DARK[1], DARK[2]), Segmentation::Regions);
+        assert_eq!(blobs.len(), 1, "{blobs:?}");
+    }
+
+    #[test]
+    fn the_border_rule_picks_the_dominant_border_colour() {
+        // Top band red, the rest dark. Two corners are red and two dark,
+        // so the per-channel median lands on red: a colour that is in the
+        // frame, but covers a third of it and none of its lower border.
+        let f = frame(100, 60, DARK, |_, y| (y < 20).then_some(RED));
+        let corners = estimate_background(&f);
+        let border = estimate_background_border(&f);
+        assert_eq!((corners.r, corners.g, corners.b), (RED[0], RED[1], RED[2]));
+        assert_eq!((border.r, border.g, border.b), (DARK[0], DARK[1], DARK[2]));
+    }
+
+    #[test]
+    fn the_corner_median_can_name_a_colour_absent_from_the_frame() {
+        // Top-left red, top-right green, rest dark: the channels median
+        // independently to (72, 72, 72), which appears nowhere.
+        let f = frame(100, 60, DARK, |x, y| match (x < 50, y < 20) {
+            (true, true) => Some(RED),
+            (false, true) => Some(GREEN),
+            _ => None,
+        });
+        let present = |c: Color| {
+            f.pixels
+                .chunks(4)
+                .any(|p| p[0] == c.r && p[1] == c.g && p[2] == c.b)
+        };
+        let corners = estimate_background(&f);
+        let border = estimate_background_border(&f);
+        assert!(!present(corners), "corner median {corners:?} is not in the frame");
+        assert!(present(border));
+        assert_eq!((border.r, border.g, border.b), (DARK[0], DARK[1], DARK[2]));
+    }
+
+    #[test]
+    fn a_transparent_border_means_a_white_background() {
+        // Light ticks touching the edge of an otherwise transparent canvas
+        // (the `real_loader` spinner) must not be voted the background.
+        let mut f = frame(40, 40, [0, 0, 0], |x, y| {
+            ((18..22).contains(&x) && y < 12).then_some([230, 230, 230])
+        });
+        for p in f.pixels.chunks_mut(4) {
+            if p[0] == 0 {
+                p[3] = 0;
+            }
+        }
+        let bg = estimate_background_border(&f);
+        assert_eq!((bg.r, bg.g, bg.b), (255, 255, 255));
     }
 }

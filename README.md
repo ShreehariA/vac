@@ -1380,3 +1380,60 @@ and that was most of their 6× ink overclaim. The fragmentation itself is still
 open (`docs/frontier.md`). v0.12 stopped the fragments from outliving
 themselves, not from existing. `mandelbrot.mp4` moved 0.7235 → 0.7227, inside
 tolerance.
+
+## v0.13 — Colour, decided by measurement
+
+v0.9's first fidelity run showed `testsrc2`, a test card of six vivid colour
+bars, coming back as a flat grey field (residual 15063, about 123 of 255 off
+per channel). `vac verify --dump`, new in this release, writes source |
+reconstruction | ink-map triptychs, and the triptych showed two causes. Blob
+detection was colour-blind: a blob was a connected component of "not
+background", so touching bars fused. And the background guess was a
+per-channel median of four corners, which can name a colour that appears
+nowhere in the frame.
+
+Four changes, each kept only if it measured better:
+
+1. **Region labelling.** Two neighbouring pixels share a region only if their
+   colours are close. Neighbour-to-neighbour joining chains through smooth
+   gradients and splits at edges. Anti-aliased and codec-blurred edges would
+   otherwise turn into thin fringe regions, so fringes are absorbed into the
+   solid region they border most, repeating until nothing moves.
+   - *Tried and rejected:* absorbing only fringes whose colour is a blend of
+     their two sides. H.264 chroma subsampling shifts fringe colours off the
+     blend line, and `vac_control` regrew 16 fringe shapes.
+2. **Border-mode background.** The colour covering most of the frame's
+   border. A mostly transparent border means a white background: voting
+   among the few opaque pixels crowned the `real_loader` spinner's tick
+   colour, and 9 of its 12 ticks vanished.
+3. **Primitive choice by measured fit.** Each blob's rect and inscribed
+   ellipse are scored by IoU against its actual pixels. The better fit wins,
+   and below 0.88 the outline is traced as a path. The fill-ratio bands this
+   replaces called a bar notched by a caption box an *ellipse*.
+4. **Measured selection.** Regions and the border rule help some clips and
+   hurt others: on the Mandelbrot zoom, regions shatter the picture into 289
+   shapes and 261 KB of source while scoring *worse*. So no rule is
+   hard-coded. The facade decompiles every combination, re-renders each,
+   scores it against the source, and keeps the best reconstruction, the way
+   a video encoder makes a rate–distortion mode decision. When two
+   candidates trade off, relative changes in residual and ink IoU are
+   weighed equally, so a 10% IoU loss is never bought with a 1% residual
+   gain.
+
+| clip | chosen | ink IoU | residual |
+|---|---|---|---|
+| `testsrc2.mp4` | regions + corners | 0.840 → **0.984** | 15063 → **1711** |
+| `real_double_pendulum.gif` | regions + border | 0.174 → **0.410** | 2456 → 1199 |
+| `real_newtons_cradle.gif` | regions + corners | 0.605 → 0.641 | 706 → 543 |
+| `mandelbrot.mp4` | components + border | 0.723 → 0.765 | 4508 → 4186 |
+| `two_tone.vac` (new fixture) | regions + border | 0.49 → **0.991** | 6676 → **83** |
+
+No corpus row regressed. `vac verify` reports which candidate won, and
+`--segmentation` and `--background` pin either knob.
+
+**Found along the way** (`docs/frontier.md`):
+- VAC has no rotation, so a pendulum rod is drawn frozen at one angle.
+- Gradients have no primitive.
+- The ink metric is blind on transparent canvases: `real_loader`'s IoU
+  measures only its three highlighted ticks. That fix changes the ruler, so
+  it gets its own commit.

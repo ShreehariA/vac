@@ -177,7 +177,8 @@ pub fn build_document(
     // moving object gets, and drops out of the animate path for free.
     if let Some(l) = layer {
         let plate = l.plate();
-        let mut blobs = crate::detect::detect_blobs(&plate, l.bg);
+        let seg = detections.first().map(|d| d.segmentation).unwrap_or_default();
+        let mut blobs = crate::detect::detect_blobs(&plate, l.bg, seg);
         blobs.sort_by(|a, b| {
             b.area
                 .cmp(&a.area)
@@ -188,6 +189,7 @@ pub fn build_document(
             t_ms: 0,
             bg: l.bg,
             blobs: blobs.clone(),
+            segmentation: seg,
         }];
         let plate_frames = [plate];
         for (idx, blob) in blobs.iter().enumerate() {
@@ -732,14 +734,15 @@ fn trace_track_outline(
     let (_, rep_b) = track.samples[rep];
     let fidx = *track.frame_indices.get(rep)?;
     let frame = frames.get(fidx)?;
-    let bg = detections.get(fidx)?.bg;
+    let det = detections.get(fidx)?;
 
     let contour = crate::detect::extract_contour(
         frame,
-        bg,
+        det.bg,
         (rep_b.cx, rep_b.cy),
         rep_b.rx.max(rep_b.ry).max(4.0),
         (rep_b.area / 4).max(1),
+        det.segmentation,
     )?;
     let simplified = pac_decompiler::simplify::rdp(&contour, PATH_RDP_EPSILON_PX);
     if simplified.len() < 3 {
@@ -1287,6 +1290,7 @@ mod tests {
                 t_ms: t,
                 bg: Color::rgb(0x1a, 0x1a, 0x2e),
                 blobs: vec![blob_full(xr, 100.0, red), blob_full(xy, 260.0, yellow)],
+                segmentation: crate::detect::Segmentation::Components,
             });
         }
 
@@ -1348,6 +1352,7 @@ mod tests {
                 t_ms: t,
                 bg: Color::rgb(0x1a, 0x1a, 0x2e),
                 blobs,
+                segmentation: crate::detect::Segmentation::Components,
             });
         }
 
@@ -1398,6 +1403,7 @@ mod tests {
                 t_ms: t,
                 bg: Color::rgb(0x1a, 0x1a, 0x2e),
                 blobs,
+                segmentation: crate::detect::Segmentation::Components,
             });
         }
 

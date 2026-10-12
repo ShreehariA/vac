@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use vac::DocumentExt;
 
 #[derive(Parser, Debug)]
@@ -35,6 +35,47 @@ use vac::DocumentExt;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// The measured-search knobs shared by `verify` and `--dump`.
+#[derive(Clone, Copy, Debug)]
+struct Knobs {
+    segmentation: vac::Segmentation,
+    background: vac::Background,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum SegArg {
+    Auto,
+    Components,
+    Regions,
+}
+
+impl From<SegArg> for vac::Segmentation {
+    fn from(a: SegArg) -> Self {
+        match a {
+            SegArg::Auto => vac::Segmentation::Auto,
+            SegArg::Components => vac::Segmentation::Components,
+            SegArg::Regions => vac::Segmentation::Regions,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum BgArg {
+    Auto,
+    Corners,
+    Border,
+}
+
+impl From<BgArg> for vac::Background {
+    fn from(a: BgArg) -> Self {
+        match a {
+            BgArg::Auto => vac::Background::Auto,
+            BgArg::Corners => vac::Background::Corners,
+            BgArg::Border => vac::Background::Border,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -58,6 +99,15 @@ enum Cmd {
         /// layering pass actually changed.
         #[arg(long)]
         no_static_layer: bool,
+        /// How foreground pixels are grouped into shapes. `auto` (the
+        /// default) decompiles both ways, re-renders each, and keeps the
+        /// one that reconstructs the video better.
+        #[arg(long, value_enum, default_value_t = SegArg::Auto)]
+        segmentation: SegArg,
+        /// Which rule picks the background colour. `auto` (the default)
+        /// tries both and keeps the better reconstruction.
+        #[arg(long, value_enum, default_value_t = BgArg::Auto)]
+        background: BgArg,
     },
     /// Measure how much of a video survives the round trip through
     /// `.vac` source: decompile it, re-render the result, and compare
@@ -82,6 +132,23 @@ enum Cmd {
         /// Skip static-scene layering. Ignored when `--ab` is set.
         #[arg(long)]
         no_static_layer: bool,
+        /// How foreground pixels are grouped into shapes. `auto` (the
+        /// default) decompiles both ways, re-renders each, and keeps the
+        /// one that reconstructs the video better.
+        #[arg(long, value_enum, default_value_t = SegArg::Auto)]
+        segmentation: SegArg,
+        /// Which rule picks the background colour. `auto` (the default)
+        /// tries both and keeps the better reconstruction.
+        #[arg(long, value_enum, default_value_t = BgArg::Auto)]
+        background: BgArg,
+        /// Write PNG triptychs — source | reconstruction | ink map — of
+        /// the worst-IoU frame, the worst-PSNR frame and the middle frame
+        /// into this directory. In the ink map, white is ink both agree
+        /// on, red is source ink the reconstruction missed, blue is ink
+        /// the reconstruction invented, and grey marks pixels the source
+        /// left transparent, which are not scored.
+        #[arg(long, value_name = "DIR")]
+        dump: Option<PathBuf>,
     },
 }
 
@@ -93,11 +160,15 @@ fn main() -> Result<()> {
             input,
             output,
             no_static_layer,
+            segmentation,
+            background,
         } => run_decompile(
             &input,
             output.as_deref(),
             &vac::DecompileOptions {
                 static_layer: !no_static_layer,
+                segmentation: segmentation.into(),
+                background: background.into(),
             },
         ),
         Cmd::Verify {
@@ -105,15 +176,34 @@ fn main() -> Result<()> {
             json,
             ab,
             no_static_layer,
-        } => run_verify(&input, json, ab, !no_static_layer),
+            segmentation,
+            background,
+            dump,
+        } => {
+            let knobs = Knobs {
+                segmentation: segmentation.into(),
+                background: background.into(),
+            };
+            run_verify(&input, json, ab, !no_static_layer, knobs)?;
+            match dump {
+                Some(dir) => run_dump(&input, &dir, !no_static_layer, knobs),
+                None => Ok(()),
+            }
+        }
     }
 }
 
-fn run_verify(input: &Path, json: bool, ab: bool, static_layer: bool) -> Result<()> {
+fn run_verify(
+    input: &Path,
+    json: bool,
+    ab: bool,
+    static_layer: bool,
+    knobs: Knobs,
+) -> Result<()> {
     if ab {
-        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true })
+        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background })
             .with_context(|| format!("verifying {} with layering", input.display()))?;
-        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false })
+        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background })
             .with_context(|| format!("verifying {} without layering", input.display()))?;
         if json {
             println!("{{");
@@ -127,7 +217,7 @@ fn run_verify(input: &Path, json: bool, ab: bool, static_layer: bool) -> Result<
         return Ok(());
     }
 
-    let v = vac::verify(input, &vac::DecompileOptions { static_layer })
+    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background })
         .with_context(|| format!("verifying {}", input.display()))?;
     if json {
         println!("{{");
@@ -173,6 +263,8 @@ fn print_report(input: &Path, v: &vac::Verification) {
     );
     println!();
     println!("  structure — not fidelity, but what it cost");
+    println!("    segmentation  {:?}", v.segmentation);
+    println!("    background    {:?}", v.background);
     println!("    shapes        {}", v.shapes);
     println!("    animate       {}", v.animate_blocks);
     println!("    keyframes     {}", v.keyframes);
@@ -238,7 +330,8 @@ fn json_body(v: &vac::Verification) -> String {
         "{{ \"frames\": {}, \"ink_iou\": {:.6}, \"worst_iou\": {:.6}, \"worst_iou_frame\": {}, \
          \"residual\": {:.6}, \"psnr_db\": {:.4}, \"worst_psnr_db\": {:.4}, \
          \"missing_ink\": {:.6}, \"spurious_ink\": {:.6}, \
-         \"shapes\": {}, \"animate_blocks\": {}, \"keyframes\": {}, \"vac_bytes\": {} }}",
+         \"shapes\": {}, \"animate_blocks\": {}, \"keyframes\": {}, \"vac_bytes\": {}, \
+         \"segmentation\": \"{:?}\", \"background\": \"{:?}\" }}",
         f.frames_compared,
         f.ink_iou,
         f.worst_iou,
@@ -252,6 +345,8 @@ fn json_body(v: &vac::Verification) -> String {
         v.animate_blocks,
         v.keyframes,
         v.vac_bytes,
+        v.segmentation,
+        v.background,
     )
 }
 
@@ -315,5 +410,73 @@ fn run_decompile(
         doc.scenes.len(),
         if doc.scenes.len() == 1 { "" } else { "s" },
     );
+    Ok(())
+}
+
+fn run_dump(input: &Path, dir: &Path, static_layer: bool, knobs: Knobs) -> Result<()> {
+    let frames = vac::load_video_frames(input)
+        .with_context(|| format!("loading {}", input.display()))?;
+    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background })?;
+    let fid = vac::measure(&frames, &doc)?;
+    let recon = vac::render_aligned(&frames, &doc)?;
+    let bg = vac::ink_background(&frames);
+    let opts = vac::CompareOptions::default();
+    std::fs::create_dir_all(dir)?;
+    let stem = input
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "clip".into());
+
+    let mut picks = vec![
+        ("worst_iou", fid.worst_iou_frame),
+        ("worst_psnr", fid.worst_psnr_frame),
+        ("mid", frames.len() / 2),
+    ];
+    picks.dedup_by_key(|p| p.1);
+    for (label, i) in picks {
+        let (src, rec) = (&frames[i], &recon[i]);
+        let (w, h) = (src.width, src.height);
+        let mut out = image::RgbImage::new(w * 3 + 8, h);
+        for y in 0..h {
+            for x in 0..w {
+                let k = ((y * w + x) * 4) as usize;
+                let s = &src.pixels[k..k + 4];
+                let r = &rec.rgba[k..k + 4];
+                out.put_pixel(x, y, image::Rgb([s[0], s[1], s[2]]));
+                out.put_pixel(w + 4 + x, y, image::Rgb([r[0], r[1], r[2]]));
+                // Pixels the source never drew are not scored at all;
+                // show them as neutral grey rather than as ink verdicts.
+                let ink = if s[3] < 128 {
+                    [70, 70, 76]
+                } else {
+                    match (vac::is_ink(s, bg, &opts), vac::is_ink(r, bg, &opts)) {
+                    (true, true) => [235, 235, 235],
+                    (true, false) => [230, 50, 50],
+                    (false, true) => [60, 110, 240],
+                    (false, false) => [24, 24, 28],
+                    }
+                };
+                out.put_pixel(2 * w + 8 + x, y, image::Rgb(ink));
+            }
+        }
+        let score = &fid.frames[i];
+        let path = dir.join(format!("{stem}_{label}_f{i:04}.png"));
+        // Small clips (a 32 px loader) are unreadable at 1:1; scale up
+        // with nearest-neighbour so every source pixel stays a crisp block.
+        let k = (480 / w.max(1)).clamp(1, 12);
+        let out = if k > 1 {
+            image::imageops::resize(&out, out.width() * k, out.height() * k, image::imageops::FilterType::Nearest)
+        } else {
+            out
+        };
+        out.save(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        eprintln!(
+            "  wrote {}  (IoU {:.4}, psnr {:.2} dB)",
+            path.display(),
+            score.ink_iou,
+            score.psnr_db
+        );
+    }
     Ok(())
 }

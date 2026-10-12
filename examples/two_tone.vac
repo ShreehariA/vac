@@ -1,0 +1,41 @@
+// Fixture (v0.13): touching regions of different colour.
+//
+// Through v0.12 a blob was a connected component of "not background",
+// which is colour-blind: the four bars fused into one blob, and the
+// two halves of the card fused into one shape of their averaged colour.
+// v0.13 separates regions by colour, and the facade keeps that
+// segmentation only if it measurably reconstructs better.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #14141c
+
+  let bar_a = rect(0, 0, 120, 140)
+  bar_a.fill = #e04848
+  let bar_b = rect(120, 0, 120, 140)
+  bar_b.fill = #48c060
+  let bar_c = rect(240, 0, 120, 140)
+  bar_c.fill = #4870e0
+  let bar_d = rect(360, 0, 120, 140)
+  bar_d.fill = #e0c040
+
+  let left = rect(40, 200, 60, 70)
+  left.fill = #f0f0f0
+  let right = rect(100, 200, 60, 70)
+  right.fill = #f08020
+
+  animate left {
+    0ms -> position(40, 200)
+    3s  -> position(300, 200)
+    easing: linear
+  }
+  animate right {
+    0ms -> position(100, 200)
+    3s  -> position(360, 200)
+    easing: linear
+  }
+}
