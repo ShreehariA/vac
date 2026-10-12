@@ -43,6 +43,7 @@ struct Knobs {
     segmentation: vac::Segmentation,
     background: vac::Background,
     quality: f32,
+    plate: vac::Plate,
 }
 
 fn parse_quality(s: &str) -> std::result::Result<f32, String> {
@@ -69,6 +70,23 @@ impl From<SegArg> for vac::Segmentation {
             SegArg::Components => vac::Segmentation::Components,
             SegArg::Regions => vac::Segmentation::Regions,
             SegArg::Edges => vac::Segmentation::Edges,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum PlateArg {
+    Auto,
+    Vector,
+    Raster,
+}
+
+impl From<PlateArg> for vac::Plate {
+    fn from(a: PlateArg) -> Self {
+        match a {
+            PlateArg::Auto => vac::Plate::Auto,
+            PlateArg::Vector => vac::Plate::Vector,
+            PlateArg::Raster => vac::Plate::Raster,
         }
     }
 }
@@ -125,6 +143,11 @@ enum Cmd {
         /// (larger, more faithful source), lower fewer and coarser.
         #[arg(long, default_value_t = 50.0, value_parser = parse_quality)]
         quality: f32,
+        /// How the static scene is written. `auto` (the default) keeps
+        /// vector shapes unless a raster plate — one JPEG `image()` of the
+        /// scenery, movers drawn on top — reconstructs at least 3 dB better.
+        #[arg(long, value_enum, default_value_t = PlateArg::Auto)]
+        plate: PlateArg,
         /// Rate control: instead of a fixed quality, find the smallest
         /// source whose reconstruction reaches this PSNR (dB).
         #[arg(long, value_name = "DB", conflicts_with = "quality")]
@@ -167,6 +190,11 @@ enum Cmd {
         /// (larger, more faithful source), lower fewer and coarser.
         #[arg(long, default_value_t = 50.0, value_parser = parse_quality)]
         quality: f32,
+        /// How the static scene is written. `auto` (the default) keeps
+        /// vector shapes unless a raster plate — one JPEG `image()` of the
+        /// scenery, movers drawn on top — reconstructs at least 3 dB better.
+        #[arg(long, value_enum, default_value_t = PlateArg::Auto)]
+        plate: PlateArg,
         /// Write PNG triptychs — source | reconstruction | ink map — of
         /// the worst-IoU frame, the worst-PSNR frame and the middle frame
         /// into this directory. In the ink map, white is ink both agree
@@ -194,6 +222,7 @@ fn main() -> Result<()> {
             segmentation,
             background,
             quality,
+            plate,
             target_psnr,
         } => run_decompile(
             &input,
@@ -203,6 +232,7 @@ fn main() -> Result<()> {
                 segmentation: segmentation.into(),
                 background: background.into(),
                 quality,
+                plate: plate.into(),
             },
             target_psnr,
         ),
@@ -214,6 +244,7 @@ fn main() -> Result<()> {
             segmentation,
             background,
             quality,
+            plate,
             dump,
             vac: given,
         } => {
@@ -221,6 +252,7 @@ fn main() -> Result<()> {
                 segmentation: segmentation.into(),
                 background: background.into(),
                 quality,
+                plate: plate.into(),
             };
             if let Some(file) = &given {
                 let doc = vac::read(file).with_context(|| format!("reading {}", file.display()))?;
@@ -257,9 +289,9 @@ fn run_verify(
     knobs: Knobs,
 ) -> Result<()> {
     if ab {
-        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })
+        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate })
             .with_context(|| format!("verifying {} with layering", input.display()))?;
-        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })
+        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate })
             .with_context(|| format!("verifying {} without layering", input.display()))?;
         if json {
             println!("{{");
@@ -273,7 +305,7 @@ fn run_verify(
         return Ok(());
     }
 
-    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })
+    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate })
         .with_context(|| format!("verifying {}", input.display()))?;
     if json {
         println!("{{");
@@ -321,6 +353,7 @@ fn print_report(input: &Path, v: &vac::Verification) {
     println!("  structure — not fidelity, but what it cost");
     println!("    segmentation  {:?}", v.segmentation);
     println!("    background    {:?}", v.background);
+    println!("    plate         {:?}", v.plate);
     println!("    shapes        {}", v.shapes);
     println!("    animate       {}", v.animate_blocks);
     println!("    keyframes     {}", v.keyframes);
@@ -387,7 +420,7 @@ fn json_body(v: &vac::Verification) -> String {
          \"residual\": {:.6}, \"psnr_db\": {:.4}, \"worst_psnr_db\": {:.4}, \
          \"missing_ink\": {:.6}, \"spurious_ink\": {:.6}, \
          \"shapes\": {}, \"animate_blocks\": {}, \"keyframes\": {}, \"vac_bytes\": {}, \
-         \"segmentation\": \"{:?}\", \"background\": \"{:?}\" }}",
+         \"segmentation\": \"{:?}\", \"background\": \"{:?}\", \"plate\": \"{:?}\" }}",
         f.frames_compared,
         f.ink_iou,
         f.worst_iou,
@@ -403,6 +436,7 @@ fn json_body(v: &vac::Verification) -> String {
         v.vac_bytes,
         v.segmentation,
         v.background,
+        v.plate,
     )
 }
 
@@ -491,7 +525,7 @@ fn run_decompile(
 fn run_dump(input: &Path, dir: &Path, static_layer: bool, knobs: Knobs) -> Result<()> {
     let frames = vac::load_video_frames(input)
         .with_context(|| format!("loading {}", input.display()))?;
-    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })?;
+    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate })?;
     dump_frames(input, dir, &frames, &doc)
 }
 

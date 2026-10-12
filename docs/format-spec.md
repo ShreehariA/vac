@@ -134,6 +134,16 @@ panel.fill = gradient(linear, #203a6a at 40,85, #7fb0f0 at 440,85)
 
 Colours pad beyond both stops. Strokes take a colour or `none` only.
 
+**Raster images (v1.6).** `image(x, y, w, h, "data:image/jpeg;base64,...")`
+stretches an embedded image over a box. It is positioned like a rect (anchor
+top-left, rotation about its centre) and takes `position`, `scale`,
+`rotate` and `opacity` keyframes like any shape. The decompiler uses it only
+as a measured escape hatch: when the best all-vector reconstruction of a clip
+is under 30 dB and a raster plate of the static scene reconstructs at least
+twice as well, the scenery becomes one `plate = image(...)` with the moving
+shapes still written as code on top. The source stays one self-contained
+file.
+
 **Stroke width (v1.4).** `shape.stroke_width = 3` sets the stroke width in
 pixels, in declared coordinates (it scales with the shape). The stroke is
 centred on the outline, half inside and half outside. Unset, strokes are

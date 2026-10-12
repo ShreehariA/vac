@@ -10,6 +10,7 @@
 //! the writer can emit.
 
 pub mod ast;
+pub mod base64;
 pub mod parser;
 pub mod writer;
 

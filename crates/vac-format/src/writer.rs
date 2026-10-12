@@ -114,6 +114,14 @@ fn fmt_shape(s: &Shape) -> String {
                 fmt_num(*ry)
             )
         }
+        Shape::Image { x, y, w, h, src } => format!(
+            "image({}, {}, {}, {}, \"{}\")",
+            fmt_num(*x),
+            fmt_num(*y),
+            fmt_num(*w),
+            fmt_num(*h),
+            src
+        ),
         Shape::Path(segs) => {
             let body = segs
                 .iter()
@@ -307,6 +315,15 @@ mod tests {
         let out = write(&doc);
         assert!(out.contains("rotate(-12.5), position(1, 2)"), "{out}");
         assert!(out.contains("rotate(90)"), "{out}");
+        assert_eq!(crate::parse(&out).unwrap(), doc);
+    }
+
+    #[test]
+    fn image_round_trips() {
+        let src = "canvas 10x10 @10fps\nscene s {\n  duration 1s\n  let p = image(0, 0, 10, 10, \"data:image/png;base64,Zm9v\")\n}\n";
+        let doc = crate::parse(src).unwrap();
+        let out = write(&doc);
+        assert!(out.contains("image(0, 0, 10, 10, \"data:image/png;base64,Zm9v\")"), "{out}");
         assert_eq!(crate::parse(&out).unwrap(), doc);
     }
 }

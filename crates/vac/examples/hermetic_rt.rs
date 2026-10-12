@@ -8,7 +8,13 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: hermetic_rt <file.vac>");
     let doc = vac::read(&path).expect("read");
     let frames = vac::rendered_to_video_frames(&vac::render(&doc).expect("render"), doc.canvas.fps);
-    let recovered = vac::decompile_frames(frames.clone(), &vac::DecompileOptions::default()).expect("decompile");
+    let plate = match std::env::var("VAC_PLATE").as_deref() {
+        Ok("raster") => vac::Plate::Raster,
+        Ok("vector") => vac::Plate::Vector,
+        _ => vac::Plate::Auto,
+    };
+    let opts = vac::DecompileOptions { plate, ..Default::default() };
+    let recovered = vac::decompile_frames(frames.clone(), &opts).expect("decompile");
     let fid = vac::measure(&frames, &recovered).expect("measure");
     println!("{}", vac::to_string(&recovered));
     eprintln!("{fid}");

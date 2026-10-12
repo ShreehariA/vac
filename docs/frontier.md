@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v1.5, default quality 50) and is
+table re-measured 2026-10-12 at v1.6, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -30,25 +30,17 @@ scores the reverse.
 
 ---
 
-## 1. Gradients beyond two stops, and textures
+## 1. Fractals and full-frame motion
 
-**Status: partly fixed in v1.2. Corpus rows: `mandelbrot.mp4`,
-`real_newtons_cradle.gif`.**
+**Status: open. Corpus row: `mandelbrot.mp4`.**
 
-v1.2 added two-stop linear and radial gradient fills (see Fixed). They
-describe a lit ball or a fading panel. They cannot describe a fractal's
-colour bands or a photograph's texture. On those clips the fitted gradient
-leaves 33–55 levels of RMS error, and accepting it as a smear cost the
-Mandelbrot 0.05 ink IoU, so the fitter now rejects it and those regions stay
-flat.
-
-| | ink IoU | worst | residual |
-|---|---|---|---|
-| `mandelbrot.mp4` | 0.764 | 0.396 | 4165.4 |
-| `real_newtons_cradle.gif` | 0.642 | 0.637 | 525.0 |
-
-What would move these: multi-stop gradients, or the planned `raster()`
-escape hatch for what no vector primitive can say, chosen by measurement.
+v1.2 gradients describe lit and fading surfaces, and v1.6's raster plate
+covers static scenery no vector can describe (photographs, textures). What
+remains is content that is neither vector-shaped nor static. The Mandelbrot
+zoom changes every pixel every frame, so there is no static plate to keep
+(a plate scores 12.7 dB against the vector 11.9 dB, short of the bar) and no
+shape to track. A codec for it would need per-frame raster or a description
+of the fractal itself.
 
 ---
 
@@ -221,6 +213,18 @@ always true; only one of them was measurable.
   memory on the double pendulum went 2.2 GB → **1.0 GB**, and the corpus run
   90 s → 26 s.
 
+- **v1.6 — a raster plate, chosen by measurement.** A new `image()`
+  primitive embeds a JPEG data URI. When the best all-vector reconstruction
+  is under 30 dB, the search also builds a raster plate: the clip's median
+  frame as one `image()`, with every pixel matching it stripped from the
+  frames, so only true movers remain as code on top. It is kept when it
+  reconstructs at least twice as well by the selection rule's own measure.
+  Four clips take it: `real_bouncing_ball` 26.0 → **40.9 dB**,
+  `real_newtons_cradle` 21.5 → **29.4 dB** (IoU 0.64 → **0.92**, and *fewer*
+  bytes), `testsrc2` 17.3 → **22.2 dB** (255 KB → **94 KB**), `real_pendulum`
+  20.1 → **22.2 dB** (IoU 0.44 → **0.63**). Flat content never takes a plate.
+  `shaded.vac`'s gradients, already 39.5 dB as code, stay code.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -228,17 +232,17 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
+| `testsrc2.mp4` | 0.9951 | 0.9858 | 394.3 | 22.17 | 0.4% | 110 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
-| `testsrc2.mp4` | 0.9857 | 0.9757 | 1214.8 | 17.29 | 1.3% | 202 |
+| `real_bouncing_ball.gif` | 0.9883 | 0.9845 | 5.3 | 40.86 | 0.8% | 2 |
 | `outlined_ui.mp4` | 0.9839 | 0.9689 | 28.8 | 33.54 | 1.1% | 4 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `real_bouncing_ball.gif` | 0.8978 | 0.8958 | 164.3 | 25.97 | 11.2% | 3 |
+| `real_newtons_cradle.gif` | 0.9190 | 0.9017 | 75.4 | 29.36 | 5.7% | 48 |
 | `mandelbrot.mp4` | 0.7639 | 0.3961 | 4163.2 | 11.94 | 13.7% | 43 |
 | `real_loader.gif` | 0.7318 | 0.7115 | 173.2 | 25.75 | 9.8% | 16 |
-| `real_newtons_cradle.gif` | 0.6400 | 0.6345 | 455.3 | 21.55 | 45.4% | 232 |
+| `real_pendulum.gif` | 0.6256 | 0.5270 | 393.5 | 22.18 | 12.2% | 41 |
 | `real_double_pendulum.gif` | 0.4918 | 0.3389 | 697.2 | 19.70 | 24.6% | 454 |
-| `real_pendulum.gif` | 0.4353 | 0.3286 | 634.6 | 20.11 | 11.6% | 48 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread

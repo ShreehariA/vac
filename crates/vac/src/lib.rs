@@ -47,7 +47,7 @@ pub use vac_format::{
 // Re-export the underlying error types so callers can pattern-match if they
 // want to, without taking direct dependencies on the sub-crates.
 pub use vac_compiler::CompileError;
-pub use vac_decompiler::{Background, DecompileError, Options as DecompileOptions, Segmentation};
+pub use vac_decompiler::{Background, DecompileError, Options as DecompileOptions, Plate, Segmentation};
 
 // --------------------------------------------------------------------
 // Errors
@@ -229,6 +229,8 @@ struct Chosen {
     segmentation: Segmentation,
     /// The background rule actually used.
     background: Background,
+    /// How the static scene was written.
+    plate: Plate,
     /// The chosen candidate's fidelity, when `Auto` had to measure it.
     fidelity: Option<Fidelity>,
 }
@@ -251,7 +253,7 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
         Background::Corners => &[Background::Corners],
         Background::Border => &[Background::Border],
     };
-    if segs.len() * bgs.len() == 1 {
+    if segs.len() * bgs.len() == 1 && opts.plate != Plate::Auto {
         let cand_opts = DecompileOptions {
             segmentation: segs[0],
             background: bgs[0],
@@ -261,6 +263,7 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
             document: vac_decompiler::decompile_frames(frames.to_vec(), &cand_opts)?,
             segmentation: segs[0],
             background: bgs[0],
+            plate: opts.plate,
             fidelity: None,
         });
     }
@@ -285,7 +288,7 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
                     .map(|&segmentation| {
                         let prepared = &prepared;
                         scope.spawn(move || -> Result<(Document, Fidelity)> {
-                            let doc = vac_decompiler::finish(prepared, segmentation, opts.quality);
+                            let doc = vac_decompiler::finish(prepared, segmentation, opts.quality, Plate::Vector);
                             let fid = measure(frames, &doc)?;
                             Ok((doc, fid))
                         })
@@ -312,12 +315,65 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
                 document: doc,
                 segmentation,
                 background,
+                plate: Plate::Vector,
                 fidelity: Some(fid),
             });
         }
     }
-    Ok(best.expect("at least one candidate"))
+    let best = best.expect("at least one candidate");
+    // v1.6: the raster plate is an escape hatch, not a peer. It is tried on
+    // the winning vector candidate's segmentation and background, and kept
+    // only when it reconstructs *clearly* better — the source stays vector
+    // unless measurement says vectors cannot describe the scenery.
+    if opts.plate == Plate::Vector {
+        return Ok(best);
+    }
+    // Vectors that already describe the scene well keep it: a JPEG would
+    // always shave a little more error off (it halved `shaded.vac`'s
+    // residual at 39.5 dB) at the cost of readable, editable source.
+    if opts.plate == Plate::Auto
+        && best.fidelity.as_ref().is_some_and(|f| f.psnr_db >= RASTER_ONLY_BELOW_PSNR_DB)
+    {
+        return Ok(best);
+    }
+    let Some(prepared) = vac_decompiler::prepare_raster(frames.to_vec(), best.background)? else {
+        return Ok(best);
+    };
+    let doc = vac_decompiler::finish(&prepared, best.segmentation, opts.quality, Plate::Raster);
+    let has_plate = doc
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .any(|st| matches!(st, Statement::Let { shape: Shape::Image { .. }, .. }));
+    if !has_plate {
+        return Ok(best);
+    }
+    let fid = measure(frames, &doc)?;
+    let vector = best.fidelity.as_ref().expect("measured");
+    let keep_raster = opts.plate == Plate::Raster || improvement(&fid, vector) >= RASTER_MIN_GAIN;
+    Ok(if keep_raster {
+        Chosen {
+            document: doc,
+            segmentation: best.segmentation,
+            background: best.background,
+            plate: Plate::Raster,
+            fidelity: Some(fid),
+        }
+    } else {
+        best
+    })
 }
+
+/// How much better a raster plate must reconstruct than the best vector
+/// candidate to be kept (v1.6), in the selection rule's own currency —
+/// `ln(residual ratio) + ln(IoU ratio)`. `ln 2`: twice as good, which with
+/// IoU unchanged is a 3 dB PSNR gain. Measured as PSNR alone, the bar threw
+/// out `real_pendulum`'s plate, which lifts its ink IoU 0.435 → 0.647 and
+/// its PSNR 2.4 dB.
+const RASTER_MIN_GAIN: f64 = std::f64::consts::LN_2;
+/// A raster plate is only considered when the best vector reconstruction
+/// is below this PSNR — when vectors measurably fail to describe the scene.
+const RASTER_ONLY_BELOW_PSNR_DB: f64 = 30.0;
 
 /// The outcome of rate control: the smallest source found that meets a
 /// fidelity target, or the most faithful one if none does.
@@ -427,6 +483,15 @@ pub fn decompile_to_target(
 /// How many measured-search candidates may decompile at once.
 const MAX_CONCURRENT_CANDIDATES: usize = 3;
 
+/// How much better `b` reconstructs than `a`: `ln(residual_a / residual_b)
+/// + ln(iou_b / iou_a)` — positive when better. The currency
+/// [`reconstructs_better`] weighs trade-offs in.
+pub fn improvement(b: &Fidelity, a: &Fidelity) -> f64 {
+    let (ra, rb) = (a.residual.max(1e-9), b.residual.max(1e-9));
+    let (ia, ib) = (a.ink_iou.max(1e-9), b.ink_iou.max(1e-9));
+    (ra / rb).ln() + (ib / ia).ln()
+}
+
 /// Whether reconstruction `b` beats `a`.
 ///
 /// A candidate at least as good on both residual and ink IoU (and
@@ -443,7 +508,7 @@ pub fn reconstructs_better(b: &Fidelity, a: &Fidelity) -> bool {
     if ra <= rb && ia >= ib {
         return false;
     }
-    (ra / rb).ln() + (ib / ia).ln() > 0.0
+    improvement(b, a) > 0.0
 }
 
 /// Reinterpret rendered frames as decoder frames. Both sides are
@@ -587,6 +652,9 @@ pub struct Verification {
     pub segmentation: Segmentation,
     /// The background rule the decompile used.
     pub background: Background,
+    /// How the static scene was written — under `Auto`, what measurement
+    /// picked.
+    pub plate: Plate,
     /// Frames decoded from the source.
     pub source_frames: usize,
     /// Size of the emitted `.vac` source, in bytes. The "rate" axis.
@@ -612,6 +680,7 @@ pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verifi
         source_frames,
         chosen.segmentation,
         chosen.background,
+        chosen.plate,
     ))
 }
 
@@ -623,12 +692,23 @@ pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verific
     let frames = load_video_frames(path)?;
     let source_frames = frames.len();
     let fidelity = measure(&frames, &doc)?;
+    let plate = if doc
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .any(|st| matches!(st, Statement::Let { shape: Shape::Image { .. }, .. }))
+    {
+        Plate::Raster
+    } else {
+        Plate::Vector
+    };
     Ok(summarise(
         doc,
         fidelity,
         source_frames,
         Segmentation::Auto,
         Background::Auto,
+        plate,
     ))
 }
 
@@ -638,6 +718,7 @@ fn summarise(
     source_frames: usize,
     segmentation: Segmentation,
     background: Background,
+    plate: Plate,
 ) -> Verification {
     let text = vac_format::write(&doc);
     let mut shapes = 0usize;
@@ -660,6 +741,7 @@ fn summarise(
         document: doc,
         segmentation,
         background,
+        plate,
         source_frames,
         vac_bytes: text.len(),
         shapes,

@@ -460,6 +460,43 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.6 — scenery no vector primitive can describe.**
+///
+/// `textured.vac`'s background is a smooth, detailed texture. Vectors
+/// approximate it with one flat rect (15.3 dB). The measured search now
+/// also tries a raster plate — the median frame as one JPEG `image()` —
+/// and keeps it when it reconstructs at least twice as well, with the
+/// moving shapes still written as code on top. Flat scenery must never
+/// take a plate.
+#[test]
+fn textured_scenery_takes_a_raster_plate_and_flat_scenery_does_not() {
+    let images = |d: &Document| {
+        d.scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .filter(|st| matches!(st, Statement::Let { shape: vac::Shape::Image { .. }, .. }))
+            .count()
+    };
+    let (_, recovered, fid) = hermetic("textured.vac");
+    assert_eq!(images(&recovered), 1, "textured.vac should take one raster plate");
+    let vector_shapes: Vec<&vac::Shape> = recovered
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .filter_map(|st| match st {
+            Statement::Let { shape, .. } if !matches!(shape, vac::Shape::Image { .. }) => Some(shape),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(vector_shapes.len(), 1, "only the ball should remain as code: {vector_shapes:?}");
+    assert!(matches!(vector_shapes[0], vac::Shape::Ellipse { rx, .. } if (rx - 26.0).abs() <= 1.0));
+    assert!(fid.psnr_db > 40.0, "textured.vac PSNR {:.2}", fid.psnr_db);
+    for flat in ["two_balls.vac", "two_tone.vac", "panel.vac", "shaded.vac", "outlined.vac"] {
+        let (_, recovered, _) = hermetic(flat);
+        assert_eq!(images(&recovered), 0, "{flat}: flat scenery must stay vector");
+    }
+}
+
 /// **FIXED in v1.4 — outlines come back as strokes.**
 ///
 /// Through v1.3 the decompiler wrote `stroke = none` for everything: an

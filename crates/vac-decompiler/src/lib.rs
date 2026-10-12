@@ -63,6 +63,24 @@ pub struct Options {
     /// exactly; higher keeps more keyframes and finer outlines, lower
     /// fewer and coarser. See [`track::Tolerances`].
     pub quality: f32,
+    /// How the static scene is written (v1.6): as vector shapes, or as one
+    /// raster `image()` with the moving shapes drawn on top of it.
+    pub plate: Plate,
+}
+
+/// How the static scene is written (v1.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Plate {
+    /// Background, ground and scenery as vector shapes — VAC's default.
+    #[default]
+    Vector,
+    /// The clip's temporal-median frame as one JPEG `image()`: the escape
+    /// hatch for scenery no vector primitive can describe.
+    Raster,
+    /// Decide by measurement — resolved by the `vac` facade, which keeps
+    /// the raster plate only when it reconstructs clearly better. On its
+    /// own the decompiler treats it as `Vector`.
+    Auto,
 }
 
 impl Default for Options {
@@ -72,6 +90,7 @@ impl Default for Options {
             segmentation: Segmentation::Auto,
             background: Background::Auto,
             quality: track::DEFAULT_QUALITY,
+            plate: Plate::Auto,
         }
     }
 }
@@ -126,8 +145,13 @@ pub fn decompile_frames(
     frames: Vec<frames::VideoFrame>,
     opts: &Options,
 ) -> Result<Document, DecompileError> {
+    if opts.plate == Plate::Raster {
+        if let Some(prepared) = prepare_raster(frames.clone(), opts.background)? {
+            return Ok(finish(&prepared, opts.segmentation, opts.quality, Plate::Raster));
+        }
+    }
     let prepared = prepare(frames, opts.static_layer, opts.background)?;
-    Ok(finish(&prepared, opts.segmentation, opts.quality))
+    Ok(finish(&prepared, opts.segmentation, opts.quality, opts.plate))
 }
 
 /// The background-dependent half of a decompile: the static layer, the
@@ -182,9 +206,42 @@ pub fn prepare(
     })
 }
 
+/// [`prepare`] for a raster plate (v1.6): the median frame is the plate,
+/// and every pixel matching it is stripped from every frame, so detection
+/// sees only what moves. `None` when the clip has no median (too short,
+/// or frames of different sizes).
+pub fn prepare_raster(
+    mut frames: Vec<frames::VideoFrame>,
+    background: Background,
+) -> Result<Option<Prepared>, DecompileError> {
+    if frames.is_empty() {
+        return Err(DecompileError::Other("no frames in input".into()));
+    }
+    let Some(median) = layer::median_frame(&frames) else {
+        return Ok(None);
+    };
+    let bg = detect::background_of(&median, background);
+    layer::strip_plate(&mut frames, &median, bg);
+    Ok(Some(Prepared {
+        frames,
+        scene: None,
+        ground: Some((median, bg)),
+        background,
+    }))
+}
+
 /// Detect, track and emit, on frames already prepared.
-pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32) -> Document {
+pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32, plate: Plate) -> Document {
     let tol = track::Tolerances::from_quality(quality);
+    // A raster plate is the raw temporal median — the scene with its
+    // movers removed — as a JPEG, when the clip has one.
+    let raster = match plate {
+        Plate::Raster => prepared
+            .ground
+            .as_ref()
+            .and_then(|(m, _)| raster_data_uri(m, tol.raster_quality)),
+        Plate::Vector | Plate::Auto => None,
+    };
     let detections = detect::detect_all(
         &prepared.frames,
         segmentation,
@@ -197,5 +254,16 @@ pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32) -> 
         prepared.scene.as_ref(),
         prepared.ground.as_ref().map(|(m, bg)| (m, *bg)),
         &tol,
+        raster,
     )
+}
+
+/// A frame as a `data:image/jpeg;base64,` URI at the given JPEG quality.
+fn raster_data_uri(f: &frames::VideoFrame, quality: u8) -> Option<String> {
+    let rgb: Vec<u8> = f.pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let mut buf = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality)
+        .encode(&rgb, f.width, f.height, image::ExtendedColorType::Rgb8)
+        .ok()?;
+    Some(format!("data:image/jpeg;base64,{}", vac_format::base64::encode(&buf)))
 }

@@ -186,7 +186,7 @@ fn assert_well_formed(sample: &str, doc: &Document) {
 
 fn assert_shape_finite(sample: &str, name: &str, shape: &Shape) {
     match shape {
-        Shape::Rect { x, y, w, h } => {
+        Shape::Rect { x, y, w, h } | Shape::Image { x, y, w, h, .. } => {
             assert!(
                 x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite(),
                 "{sample}/{name}: non-finite rect"
@@ -283,7 +283,7 @@ fn repeated_round_trips_reach_a_fixed_point() {
             .flat_map(|s| &s.statements)
             .filter_map(|st| match st {
                 Statement::Let { name, shape } if name != "bg" => Some(match shape {
-                    Shape::Rect { w, h, .. } => (*w, *h),
+                    Shape::Rect { w, h, .. } | Shape::Image { w, h, .. } => (*w, *h),
                     Shape::Ellipse { rx, ry, .. } => (*rx, *ry),
                     Shape::Path(p) => (p.len() as f32, 0.0),
                 }),

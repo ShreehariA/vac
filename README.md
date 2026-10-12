@@ -1723,3 +1723,42 @@ emit), which each segmentation candidate runs concurrently on the shared,
 read-only frames. Measurement renders frame by frame instead of holding the
 whole reconstruction. On the 220-frame double pendulum, peak memory went
 2.2 GB → **1.0 GB**, and the corpus run went 90 s → 26 s.
+
+## v1.6 — A raster plate, when vectors fail
+
+Some scenery is not shapes: a photographed desk, a lit sphere's soft
+falloff, a test card's noise. A cheap experiment showed how much that cost.
+A raw image of a clip's static scene alone, with nothing moving on it, beat
+VAC's entire reconstruction on most real clips: 36 dB against 26 dB on the
+bouncing ball.
+
+v1.6 adds `image(x, y, w, h, "data:image/jpeg;base64,...")` and uses it as a
+**measured escape hatch, not a default**:
+
+- It is only considered when the best all-vector reconstruction is under
+  30 dB, meaning vectors measurably fail.
+- The plate is the clip's median frame, JPEG-encoded at a quality the dial
+  sets.
+- Every pixel that matches the plate is stripped from the frames, so only
+  true movers remain, and they're still written as code on top. The first
+  version reused the static layer's mask instead. Its bleeding-core test
+  read a texture as a growing shape, and a full-canvas rect got tracked over
+  the plate.
+- It is kept only if it reconstructs at least **twice as well** in the
+  selection rule's currency (`ln` residual ratio + `ln` IoU ratio, which is
+  3 dB at unchanged IoU). A PSNR-only bar threw out the pendulum's plate,
+  which lifts its IoU by half.
+
+| clip | vector | raster plate + vector movers |
+|---|---|---|
+| `real_bouncing_ball.gif` | 26.0 dB, IoU 0.898 | **40.9 dB**, IoU **0.988**, 2 shapes |
+| `real_newtons_cradle.gif` | 21.5 dB, IoU 0.640, 60 KB | **29.4 dB**, IoU **0.919**, **56 KB** |
+| `testsrc2.mp4` | 17.3 dB, 255 KB | **22.2 dB**, **94 KB** |
+| `real_pendulum.gif` | 20.1 dB, IoU 0.435 | **22.2 dB**, IoU **0.626** |
+| `textured.vac` (new fixture) | 15.3 dB | **45.7 dB**, plate + the ball |
+
+Two clips get *better and smaller* at once: describing a photograph as flat
+patches had cost more bytes than the JPEG does. Flat content never takes a
+plate (motion graphics, the outlines clip, every flat fixture), and neither
+does `shaded.vac`, whose gradients are already 39.5 dB as code. The
+Mandelbrot zoom has no static scene to keep, so it stays vector.

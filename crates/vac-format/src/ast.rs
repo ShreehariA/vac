@@ -48,6 +48,12 @@ pub enum Shape {
     /// format, whose decompiler pipeline (Moore contour tracing → RDP
     /// → Schneider Bezier fitting) produces these segments.
     Path(Vec<PathSeg>),
+    /// A raster image stretched over `(x, y, w, h)` (v1.6): the escape
+    /// hatch for what no vector primitive can say — a photograph, a
+    /// texture. `src` is a `data:image/...;base64,` URI, so a `.vac` file
+    /// stays one self-contained document. Positioned like a rect (anchor
+    /// top-left, rotation about its centre).
+    Image { x: f32, y: f32, w: f32, h: f32, src: String },
 }
 
 /// Point in canvas pixels.  Shared by `.vac` paths and the `.pac`

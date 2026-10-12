@@ -73,6 +73,9 @@ pub struct Tolerances {
     /// it costs, falls under this (per-channel MSE per byte). 0 keeps every
     /// shape, which is what quality ≥ 50 does.
     pub min_mse_per_byte: f64,
+    /// JPEG quality of a raster plate (v1.6): 80 at quality 50, rising to
+    /// 95 at 100 and falling to 50 at 0.
+    pub raster_quality: u8,
 }
 
 impl Tolerances {
@@ -110,6 +113,14 @@ impl Tolerances {
             // loader tick is small but high-contrast (~2 MSE/byte), a
             // Newton's-cradle fragment is ~0.0002.
             min_mse_per_byte: MSE_PER_BYTE_SCALE * (m * m - 1.0).max(0.0) as f64,
+            raster_quality: {
+                let q = quality.clamp(0.0, 100.0);
+                if q >= 50.0 {
+                    (80.0 + (q - 50.0) * 0.3).round() as u8
+                } else {
+                    (50.0 + q * 0.6).round() as u8
+                }
+            },
         }
     }
 }
@@ -222,6 +233,7 @@ pub fn build_document(
     layer: Option<&StaticLayer>,
     ground: Option<(&VideoFrame, Color)>,
     tol: &Tolerances,
+    raster: Option<String>,
 ) -> Document {
     let canvas = Canvas {
         width: frames[0].width,
@@ -274,20 +286,37 @@ pub fn build_document(
         d(c.r, bg.r).powi(2) + d(c.g, bg.g).powi(2) + d(c.b, bg.b).powi(2)
     };
 
-    statements.push(Statement::Let {
-        name: "bg".into(),
-        shape: Shape::Rect {
-            x: 0.0,
-            y: 0.0,
-            w: canvas.width as f32,
-            h: canvas.height as f32,
-        },
-    });
-    statements.push(Statement::Assign {
-        target: "bg".into(),
-        property: Property::Fill,
-        value: Value::Color(bg_color),
-    });
+    // v1.6: a raster plate stands in for the whole static scene — the
+    // background, ground and scenery — and the moving shapes are drawn on
+    // top of it as usual.
+    let rastered = raster.is_some();
+    if let Some(src) = raster {
+        statements.push(Statement::Let {
+            name: "plate".into(),
+            shape: Shape::Image {
+                x: 0.0,
+                y: 0.0,
+                w: canvas.width as f32,
+                h: canvas.height as f32,
+                src,
+            },
+        });
+    } else {
+        statements.push(Statement::Let {
+            name: "bg".into(),
+            shape: Shape::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: canvas.width as f32,
+                h: canvas.height as f32,
+            },
+        });
+        statements.push(Statement::Assign {
+            target: "bg".into(),
+            property: Property::Fill,
+            value: Value::Color(bg_color),
+        });
+    }
 
     // v0.8: the persistent scene is emitted first, so it renders behind
     // everything that moves — which is where it was measured.  Each
@@ -300,7 +329,7 @@ pub fn build_document(
     // `real_double_pendulum` a 13-level error over 420 000 pixels. They are
     // found in the raw temporal median, kept only when large and
     // rect-shaped, and drawn first, behind everything else.
-    if let Some((raw, ground_bg)) = ground {
+    if let Some((raw, ground_bg)) = ground.filter(|_| !rastered) {
         let gmask = crate::detect::ground_mask(raw, ground_bg);
         let canvas_px = (canvas.width * canvas.height) as f32;
         let mut ground: Vec<Blob> = crate::detect::detect_blobs_masked(
@@ -341,7 +370,7 @@ pub fn build_document(
         }
     }
 
-    if let Some(l) = layer {
+    if let Some(l) = layer.filter(|_| !rastered) {
         let plate = l.plate();
         let seg = detections.first().map(|d| d.segmentation).unwrap_or_default();
         let mut blobs = crate::detect::detect_blobs_with(&plate, l.bg, seg, tol.min_blob_area);

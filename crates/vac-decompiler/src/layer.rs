@@ -425,6 +425,27 @@ fn plate_visible(frame: &[u8], median: &[u8], i: usize) -> bool {
 /// turn) strides across hundreds of megabytes per pixel and spends all
 /// its time in cache misses; banding keeps the working set to a few
 /// megabytes.
+/// Strip from every frame each pixel that shows `plate` there (v1.6) — the
+/// raster-plate counterpart of [`StaticLayer::strip`]. Under a raster plate
+/// the plate *is* the static scene, so whatever still differs from it is a
+/// mover; no static mask is needed (and a texture is never mistaken for
+/// the growing core the static mask's bleeding test rejects).
+pub fn strip_plate(frames: &mut [VideoFrame], plate: &VideoFrame, bg: Color) {
+    for f in frames.iter_mut() {
+        if f.width != plate.width || f.height != plate.height {
+            continue;
+        }
+        for i in 0..(f.width * f.height) as usize {
+            if plate_visible(&f.pixels, &plate.pixels, i) {
+                f.pixels[i * 4] = bg.r;
+                f.pixels[i * 4 + 1] = bg.g;
+                f.pixels[i * 4 + 2] = bg.b;
+                f.pixels[i * 4 + 3] = 255;
+            }
+        }
+    }
+}
+
 /// The per-pixel temporal median of a clip as a frame — the scene with
 /// its movers removed — or `None` for clips too short to have one or with
 /// inconsistent frame sizes. The static layer builds on the same median;

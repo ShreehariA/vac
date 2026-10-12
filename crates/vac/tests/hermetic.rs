@@ -89,7 +89,7 @@ fn animate_count(doc: &Document) -> usize {
 /// Anchor point of a shape, in the coordinate `position()` drives.
 fn anchor(shape: &Shape) -> (f32, f32) {
     match shape {
-        Shape::Rect { x, y, .. } => (*x, *y),
+        Shape::Rect { x, y, .. } | Shape::Image { x, y, .. } => (*x, *y),
         Shape::Ellipse { cx, cy, .. } => (*cx, *cy),
         Shape::Path(segs) => {
             vac_format::path_anchor(segs)
@@ -139,6 +139,7 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("sliding_rect.vac", 1.0000, 0.00),
     ("spin.vac", 0.9268, 23.83),
     ("static_and_moving.vac", 0.9998, 0.01),
+    ("textured.vac", 0.9998, 1.76),
     ("triangle.vac", 0.9747, 17.07),
     ("two_balls.vac", 0.9997, 0.02),
     ("two_tone.vac", 0.9999, 0.58),

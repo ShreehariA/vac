@@ -34,12 +34,19 @@ struct ShapeState {
     opacity: f32,
     /// Clockwise degrees about the shape's centre (v0.14).
     rotation: f32,
+    /// Decoded pixels of an `image()` shape (v1.6), premultiplied.
+    image: Option<std::sync::Arc<Pixmap>>,
 }
 
 impl ShapeState {
     fn new(base: Shape) -> Self {
+        let image = match &base {
+            Shape::Image { src, .. } => decode_image(src).map(std::sync::Arc::new),
+            _ => None,
+        };
         ShapeState {
             base,
+            image,
             fill: Some(Color::rgb(0, 0, 0)),
             fill_gradient: None,
             stroke_width: 2.0,
@@ -295,7 +302,45 @@ fn first_opacity(k: &Keyframe) -> Option<f32> {
     })
 }
 
+/// Decode an `image()` source — a `data:image/...;base64,` URI — into a
+/// premultiplied pixmap. `None` for anything else: an undecodable image
+/// draws nothing rather than failing the render.
+fn decode_image(src: &str) -> Option<Pixmap> {
+    let bytes = vac_format::base64::decode_data_uri(src)?;
+    let rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut px = rgba.into_raw();
+    for p in px.chunks_mut(4) {
+        let a = p[3] as u16;
+        for c in &mut p[..3] {
+            *c = ((*c as u16 * a + 127) / 255) as u8;
+        }
+    }
+    Pixmap::from_vec(px, tiny_skia::IntSize::from_wh(w, h)?)
+}
+
 fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
+    if let Shape::Image { x, y, w, h, .. } = &state.base {
+        let Some(img) = &state.image else { return };
+        // Image pixels → its declared box, then the same chain every shape
+        // takes: rotate about the centre, anchor at the top-left, scale,
+        // move to `position`.
+        let scale = state.scale.max(0.0);
+        let pos = state.position.unwrap_or((*x, *y));
+        let to_box = Transform::from_scale(*w / img.width() as f32, *h / img.height() as f32)
+            .post_translate(*x, *y);
+        let shape = Transform::from_rotate_at(state.rotation, *x + *w * 0.5, *y + *h * 0.5)
+            .post_translate(-*x, -*y)
+            .post_scale(scale, scale)
+            .post_translate(pos.0, pos.1);
+        let paint = tiny_skia::PixmapPaint {
+            opacity: state.opacity.clamp(0.0, 1.0),
+            blend_mode: tiny_skia::BlendMode::SourceOver,
+            quality: tiny_skia::FilterQuality::Bilinear,
+        };
+        pixmap.draw_pixmap(0, 0, img.as_ref().as_ref(), &paint, to_box.post_concat(shape), None);
+        return;
+    }
     let (path, anchor, centre) = match &state.base {
         Shape::Rect { x, y, w, h } => {
             let pb = PathBuilder::from_rect(
@@ -307,6 +352,7 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
         Shape::Ellipse { cx, cy, rx, ry } => {
             (build_ellipse_path(*cx, *cy, *rx, *ry), (*cx, *cy), (*cx, *cy))
         }
+        Shape::Image { .. } => unreachable!("drawn above"),
         Shape::Path(segs) => {
             let Some(path) = build_path(segs) else {
                 return;
@@ -466,6 +512,7 @@ mod tests {
             scale: 1.0,
             opacity: 1.0,
             rotation: 0.0,
+            image: None,
         };
         apply_animation(&base, Some(anim), t)
     }
@@ -532,6 +579,26 @@ mod tests {
         assert!(r(1) < 10, "start {}", r(1));
         assert!(r(98) > 245, "end {}", r(98));
         assert!((r(50) as i32 - 128).abs() < 8, "middle {}", r(50));
+    }
+
+    /// A 2×1 image (red | blue) stretched over a 100×20 box: the left
+    /// half renders red, the right half blue — and moving it moves it.
+    #[test]
+    fn an_image_is_stretched_over_its_box_and_moves_with_it() {
+        let src = "canvas 100x20 @10fps\nscene s {\n  duration 200ms\n  let bg = rect(0, 0, 100, 20)\n  bg.fill = #000000\n  let pic = image(0, 0, 100, 20, \"URI\")\n  animate pic {\n    0ms -> position(0, 0)\n    100ms -> position(50, 0)\n    easing: linear\n  }\n}\n".replace("URI", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAADUlEQVR42mP4zwAE/wEHAAH/PX2MSQAAAABJRU5ErkJggg==");
+        let doc = vac_format::parse(&src).unwrap();
+        let frames = render_document(&doc).unwrap();
+        let px = |f: &RenderedFrame, x: u32| {
+            let i = ((10 * 100 + x) * 4) as usize;
+            (f.rgba[i], f.rgba[i + 2])
+        };
+        let (r, b) = px(&frames[0], 10);
+        assert!(r > 200 && b < 50, "left quarter should be red: {r},{b}");
+        let (r, b) = px(&frames[0], 90);
+        assert!(b > 200 && r < 50, "right quarter should be blue: {r},{b}");
+        // At 100 ms it has moved 50 px right: x=10 is now uncovered.
+        let (r, b) = px(&frames[1], 10);
+        assert!(r < 20 && b < 20, "moved image should leave x=10 black: {r},{b}");
     }
 
     #[test]

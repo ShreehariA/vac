@@ -67,6 +67,8 @@ enum Token {
     /// `800x600`.
     Dimension(u32, u32),
     HexColor(Color),
+    /// A double-quoted string (v1.6, for `image()` sources).
+    Str(String),
 
     LBrace,
     RBrace,
@@ -187,6 +189,25 @@ impl<'a> Lexer<'a> {
         if let Some(tok) = single {
             self.bump();
             return Ok(Spanned { tok, span });
+        }
+
+        // A double-quoted string. No escapes: the only strings VAC writes
+        // are data URIs, whose alphabet has no quotes or backslashes.
+        if c == b'"' {
+            self.bump();
+            let mut out = Vec::new();
+            loop {
+                match self.bump() {
+                    Some(b'"') => break,
+                    Some(b'\n') | None => {
+                        return Err(ParseError::syntax(span, "unterminated string".to_string()));
+                    }
+                    Some(b) => out.push(b),
+                }
+            }
+            let text = String::from_utf8(out)
+                .map_err(|_| ParseError::syntax(span, "string is not UTF-8".to_string()))?;
+            return Ok(Spanned { tok: Token::Str(text), span });
         }
 
         // Arrow `->` or a negative-number prefix.
@@ -579,6 +600,28 @@ impl Parser {
     fn parse_shape_expr(&mut self) -> Result<Shape, ParseError> {
         let (kind, span) = self.expect_ident()?;
         self.expect(&Token::LParen)?;
+        if kind == "image" {
+            let x = self.expect_number()?;
+            self.expect(&Token::Comma)?;
+            let y = self.expect_number()?;
+            self.expect(&Token::Comma)?;
+            let w = self.expect_number()?;
+            self.expect(&Token::Comma)?;
+            let h = self.expect_number()?;
+            self.expect(&Token::Comma)?;
+            let s = self.bump();
+            let src = match s.tok {
+                Token::Str(t) => t,
+                other => {
+                    return Err(ParseError::syntax(
+                        s.span,
+                        format!("image() takes (x, y, w, h, \"src\"), got {other:?} for src"),
+                    ))
+                }
+            };
+            self.expect(&Token::RParen)?;
+            return Ok(Shape::Image { x, y, w, h, src });
+        }
         if kind == "path" {
             let segs = self.parse_path_segs(span)?;
             self.expect(&Token::RParen)?;
@@ -620,7 +663,7 @@ impl Parser {
             }
             other => Err(ParseError::syntax(
                 span,
-                format!("unknown shape primitive `{other}` (expected rect, ellipse or path)"),
+                format!("unknown shape primitive `{other}` (expected rect, ellipse, path or image)"),
             )),
         }
     }

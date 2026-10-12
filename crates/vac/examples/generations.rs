@@ -24,6 +24,7 @@ fn main() {
                     vac::Shape::Rect { w, h, .. } => format!("rect {w}x{h}"),
                     vac::Shape::Ellipse { rx, ry, .. } => format!("ellipse {rx}x{ry}"),
                     vac::Shape::Path(p) => format!("path {}", p.len()),
+                    vac::Shape::Image { w, h, .. } => format!("image {w}x{h}"),
                 }),
                 _ => None,
             })
