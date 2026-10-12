@@ -1476,3 +1476,50 @@ diagonal ticks.
 
 No corpus row regressed. `testsrc2`'s residual is now **11.2× lower than
 v0.12's 15063**: the colour slice's 10× target, met across v0.13 and v0.14.
+
+## v1.0 — A codec, with a curve
+
+Since v0.9 VAC has been able to measure how good a reconstruction is. v1.0
+spends that measurement on the claim the project was built toward: **VAC is
+a lossy video codec whose compressed form is human-readable source code**,
+with a published, measured rate–distortion trade-off.
+
+- **`--quality 0..100`.** One dial scales every lossy tolerance in the
+  decompiler. 50 is the default and reproduces v0.14 byte for byte. Each
+  knob moves only in the direction it was *measured* to trade bytes for
+  fidelity. Keyframe simplification scales both ways, because that's where
+  the bytes go. Outline detail only coarsens, because finer outlines
+  measured worse: an outline traced from one frame overfits it.
+- **Shape-level rate–distortion pruning.** Below quality 50, a shape is
+  dropped when the clip error it removes, per byte of source it costs,
+  falls under a threshold the dial sets. The first version scaled the
+  minimum blob area instead, and at quality 0 it deleted every tick of the
+  `real_loader` spinner (IoU 0.69 → 0.00). The test that pins this fails on
+  that code.
+- **`--target-psnr DB`.** Rate control: probe the dial, bisect, and keep the
+  fewest-bytes reconstruction that meets the target. The curve isn't
+  assumed monotone; it's measured.
+- **A free improvement found by the sweep.** The Bézier fit tolerance drops
+  1.5 → 0.75 px. Across the whole corpus that costs 47 bytes and improved
+  every row it moved.
+
+Selected points (full curves in `docs/rate-distortion.md`):
+
+| clip | point | `.vac` bytes | vs source video | PSNR |
+|---|---|---|---|---|
+| `slide_in_card.mp4` | default | 391 | 19.5× smaller | 43.4 dB |
+| `vac_control.mp4` | default | 564 | 33.5× smaller | 38.5 dB |
+| `motion_graphics.mp4` | default / q100 | 781 / 4,255 | 16× / 3× smaller | 39.5 / 43.2 dB |
+| `testsrc2.mp4` | q0 / default | 29,494 / 216,127 | 10.6× / 1.4× smaller | 16.5 / 16.8 dB |
+| `real_newtons_cradle.gif` | q0 / default | 11,103 / 51,139 | 27× / 5.8× smaller | 19.5 / 20.9 dB |
+
+Two things that table says honestly:
+
+- On flat-shaded motion graphics, the readable source is an order of
+  magnitude smaller than the H.264 it came from, at 38–44 dB.
+- On a noisy test card or a photograph, the default spends a lot of bytes
+  for little fidelity, and the dial shows that. On `testsrc2`, quality 0
+  is 7× smaller than the default for 0.4 dB.
+
+The distortion axis also still has the gaps listed in `docs/frontier.md`:
+gradients, strokes, and dotted strokes.

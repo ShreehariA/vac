@@ -290,6 +290,111 @@ fn decompile_chosen(frames: Vec<VideoFrame>, opts: &DecompileOptions) -> Result<
     Ok(best.expect("at least one candidate"))
 }
 
+/// The outcome of rate control: the smallest source found that meets a
+/// fidelity target, or the most faithful one if none does.
+#[derive(Debug, Clone)]
+pub struct RateControlled {
+    pub document: Document,
+    pub fidelity: Fidelity,
+    /// The quality the search settled on.
+    pub quality: f32,
+    /// Size of the emitted source, bytes.
+    pub vac_bytes: usize,
+    /// Whether `fidelity.psnr_db` reaches the target.
+    pub met: bool,
+    /// Every quality tried, as `(quality, bytes, psnr_db)` — the slice of
+    /// the rate–distortion curve the search actually measured.
+    pub probes: Vec<(f32, usize, f64)>,
+}
+
+/// Rate control (v1.0): the smallest `.vac` whose reconstruction reaches
+/// `target_psnr_db`.
+///
+/// The quality dial is probed at 0, 25, 50, 75 and 100, then refined by
+/// bisection between the cheapest probe that meets the target and its
+/// next-lower neighbour. Among all probes that meet the target the one
+/// with the fewest source bytes wins — measured, not assumed, because the
+/// curve is not guaranteed monotone (a different segmentation can win the
+/// measured search at a different quality). If nothing meets the target,
+/// the most faithful probe is returned with `met: false`.
+pub fn decompile_to_target(
+    frames: Vec<VideoFrame>,
+    opts: &DecompileOptions,
+    target_psnr_db: f64,
+) -> Result<RateControlled> {
+    let mut probes: Vec<(f32, Document, Fidelity, usize)> = Vec::new();
+    let probe = |q: f32, probes: &mut Vec<(f32, Document, Fidelity, usize)>| -> Result<()> {
+        if probes.iter().any(|p| (p.0 - q).abs() < 0.01) {
+            return Ok(());
+        }
+        let o = DecompileOptions { quality: q, ..*opts };
+        let chosen = decompile_chosen(frames.clone(), &o)?;
+        let fid = match chosen.fidelity {
+            Some(f) => f,
+            None => measure(&frames, &chosen.document)?,
+        };
+        let bytes = vac_format::write(&chosen.document).len();
+        probes.push((q, chosen.document, fid, bytes));
+        Ok(())
+    };
+    for q in [0.0, 25.0, 50.0, 75.0, 100.0] {
+        probe(q, &mut probes)?;
+    }
+    let meets = |p: &(f32, Document, Fidelity, usize)| p.2.psnr_db >= target_psnr_db;
+    // Refine: bisect between the cheapest passing quality and the highest
+    // failing quality below it.
+    for _ in 0..3 {
+        let Some(pass_q) = probes
+            .iter()
+            .filter(|p| meets(p))
+            .min_by(|a, b| a.3.cmp(&b.3).then(a.0.total_cmp(&b.0)))
+            .map(|p| p.0)
+        else {
+            break;
+        };
+        let Some(fail_q) = probes
+            .iter()
+            .filter(|p| !meets(p) && p.0 < pass_q)
+            .map(|p| p.0)
+            .max_by(|a, b| a.total_cmp(b))
+        else {
+            break;
+        };
+        if pass_q - fail_q < 3.0 {
+            break;
+        }
+        probe((pass_q + fail_q) * 0.5, &mut probes)?;
+    }
+    let summary: Vec<(f32, usize, f64)> = {
+        let mut v: Vec<_> = probes.iter().map(|p| (p.0, p.3, p.2.psnr_db)).collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    };
+    let best = match probes
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| meets(p))
+        .min_by(|a, b| a.1 .3.cmp(&b.1 .3).then(a.1 .0.total_cmp(&b.1 .0)))
+    {
+        Some((i, _)) => i,
+        None => probes
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1 .2.psnr_db.total_cmp(&b.1 .2.psnr_db))
+            .map(|(i, _)| i)
+            .expect("probed at least once"),
+    };
+    let (quality, document, fidelity, vac_bytes) = probes.swap_remove(best);
+    Ok(RateControlled {
+        met: fidelity.psnr_db >= target_psnr_db,
+        document,
+        fidelity,
+        quality,
+        vac_bytes,
+        probes: summary,
+    })
+}
+
 /// Whether reconstruction `b` beats `a`.
 ///
 /// A candidate at least as good on both residual and ink IoU (and

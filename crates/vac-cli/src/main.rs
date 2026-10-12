@@ -42,6 +42,16 @@ struct Cli {
 struct Knobs {
     segmentation: vac::Segmentation,
     background: vac::Background,
+    quality: f32,
+}
+
+fn parse_quality(s: &str) -> std::result::Result<f32, String> {
+    let q: f32 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if (0.0..=100.0).contains(&q) {
+        Ok(q)
+    } else {
+        Err(format!("quality must be between 0 and 100, got {q}"))
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -108,6 +118,15 @@ enum Cmd {
         /// tries both and keeps the better reconstruction.
         #[arg(long, value_enum, default_value_t = BgArg::Auto)]
         background: BgArg,
+        /// The rate–distortion dial, 0–100. 50 (the default) is VAC's
+        /// standard output; higher keeps more keyframes and finer outlines
+        /// (larger, more faithful source), lower fewer and coarser.
+        #[arg(long, default_value_t = 50.0, value_parser = parse_quality)]
+        quality: f32,
+        /// Rate control: instead of a fixed quality, find the smallest
+        /// source whose reconstruction reaches this PSNR (dB).
+        #[arg(long, value_name = "DB", conflicts_with = "quality")]
+        target_psnr: Option<f64>,
     },
     /// Measure how much of a video survives the round trip through
     /// `.vac` source: decompile it, re-render the result, and compare
@@ -141,6 +160,11 @@ enum Cmd {
         /// tries both and keeps the better reconstruction.
         #[arg(long, value_enum, default_value_t = BgArg::Auto)]
         background: BgArg,
+        /// The rate–distortion dial, 0–100. 50 (the default) is VAC's
+        /// standard output; higher keeps more keyframes and finer outlines
+        /// (larger, more faithful source), lower fewer and coarser.
+        #[arg(long, default_value_t = 50.0, value_parser = parse_quality)]
+        quality: f32,
         /// Write PNG triptychs — source | reconstruction | ink map — of
         /// the worst-IoU frame, the worst-PSNR frame and the middle frame
         /// into this directory. In the ink map, white is ink both agree
@@ -162,6 +186,8 @@ fn main() -> Result<()> {
             no_static_layer,
             segmentation,
             background,
+            quality,
+            target_psnr,
         } => run_decompile(
             &input,
             output.as_deref(),
@@ -169,7 +195,9 @@ fn main() -> Result<()> {
                 static_layer: !no_static_layer,
                 segmentation: segmentation.into(),
                 background: background.into(),
+                quality,
             },
+            target_psnr,
         ),
         Cmd::Verify {
             input,
@@ -178,11 +206,13 @@ fn main() -> Result<()> {
             no_static_layer,
             segmentation,
             background,
+            quality,
             dump,
         } => {
             let knobs = Knobs {
                 segmentation: segmentation.into(),
                 background: background.into(),
+                quality,
             };
             run_verify(&input, json, ab, !no_static_layer, knobs)?;
             match dump {
@@ -201,9 +231,9 @@ fn run_verify(
     knobs: Knobs,
 ) -> Result<()> {
     if ab {
-        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background })
+        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })
             .with_context(|| format!("verifying {} with layering", input.display()))?;
-        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background })
+        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })
             .with_context(|| format!("verifying {} without layering", input.display()))?;
         if json {
             println!("{{");
@@ -217,7 +247,7 @@ fn run_verify(
         return Ok(());
     }
 
-    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background })
+    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })
         .with_context(|| format!("verifying {}", input.display()))?;
     if json {
         println!("{{");
@@ -389,14 +419,33 @@ fn run_decompile(
     input: &Path,
     output: Option<&Path>,
     opts: &vac::DecompileOptions,
+    target_psnr: Option<f64>,
 ) -> Result<()> {
     let out_path: PathBuf = output
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| input.with_extension("vac"));
 
     eprintln!("decompiling {} ...", input.display());
-    let doc = vac::read_video_with(input, opts)
-        .with_context(|| format!("decompiling {}", input.display()))?;
+    let doc = match target_psnr {
+        None => vac::read_video_with(input, opts)
+            .with_context(|| format!("decompiling {}", input.display()))?,
+        Some(target) => {
+            let frames = vac::load_video_frames(input)
+                .with_context(|| format!("loading {}", input.display()))?;
+            let rc = vac::decompile_to_target(frames, opts, target)?;
+            for (q, bytes, psnr) in &rc.probes {
+                eprintln!("  probe quality {q:5.1}  {bytes:8} bytes  {psnr:6.2} dB");
+            }
+            eprintln!(
+                "  {} quality {:.1}: {} bytes at {:.2} dB (target {target:.2} dB)",
+                if rc.met { "✓ met at" } else { "✗ not reachable; best is" },
+                rc.quality,
+                rc.vac_bytes,
+                rc.fidelity.psnr_db
+            );
+            rc.document
+        }
+    };
 
     doc.to_vac(&out_path)
         .with_context(|| format!("writing {}", out_path.display()))?;
@@ -416,7 +465,7 @@ fn run_decompile(
 fn run_dump(input: &Path, dir: &Path, static_layer: bool, knobs: Knobs) -> Result<()> {
     let frames = vac::load_video_frames(input)
         .with_context(|| format!("loading {}", input.display()))?;
-    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background })?;
+    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality })?;
     let fid = vac::measure(&frames, &doc)?;
     let recon = vac::render_aligned(&frames, &doc)?;
     let bg = vac::ink_background(&frames);

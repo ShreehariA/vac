@@ -1,0 +1,59 @@
+# VAC rate–distortion curves (v1.0).
+#
+# Regenerate: cargo test --release -p vac --test rate_distortion -- --ignored
+#
+# Each row is one clip decompiled at one quality (0–100; 50 is the default).
+# vac_bytes is the RATE: the size of the human-readable .vac source.
+# residual / psnr_db / ink_iou are the DISTORTION of its reconstruction.
+# source_bytes is the input video file, for scale.
+input	quality	vac_bytes	source_bytes	residual	psnr_db	ink_iou	shapes	keyframes
+mandelbrot.mp4	0	5151	721002	4226.57	11.87	0.7581	21	48
+mandelbrot.mp4	25	10011	721002	4149.46	11.95	0.7673	28	108
+mandelbrot.mp4	50	19417	721002	4166.06	11.93	0.7640	43	230
+mandelbrot.mp4	75	21155	721002	4170.28	11.93	0.7637	43	267
+mandelbrot.mp4	100	22978	721002	4168.92	11.93	0.7641	43	309
+motion_graphics.mp4	0	781	12672	7.37	39.46	0.9762	4	9
+motion_graphics.mp4	25	781	12672	7.37	39.46	0.9762	4	9
+motion_graphics.mp4	50	781	12672	7.37	39.46	0.9762	4	9
+motion_graphics.mp4	75	781	12672	7.37	39.46	0.9762	4	9
+motion_graphics.mp4	100	4255	12672	3.13	43.18	0.9802	4	117
+real_bouncing_ball.gif	0	2890	86671	425.13	21.85	0.8654	3	53
+real_bouncing_ball.gif	25	1269	86671	425.34	21.84	0.8654	3	27
+real_bouncing_ball.gif	50	1616	86671	419.91	21.90	0.8686	3	36
+real_bouncing_ball.gif	75	2263	86671	419.63	21.90	0.8688	3	56
+real_bouncing_ball.gif	100	2682	86671	419.57	21.90	0.8688	3	69
+real_double_pendulum.gif	0	42768	3455007	1105.28	17.70	0.3928	100	716
+real_double_pendulum.gif	25	82077	3455007	1113.27	17.66	0.4230	146	1448
+real_double_pendulum.gif	50	169318	3455007	1033.80	17.99	0.4630	378	3029
+real_double_pendulum.gif	75	183505	3455007	1032.22	17.99	0.4637	378	3381
+real_double_pendulum.gif	100	193359	3455007	1032.16	17.99	0.4637	378	3622
+real_loader.gif	0	2745	3208	348.54	22.71	0.6615	16	21
+real_loader.gif	25	3007	3208	279.21	23.67	0.6750	16	26
+real_loader.gif	50	3366	3208	228.27	24.55	0.6908	16	33
+real_loader.gif	75	3740	3208	218.21	24.74	0.6930	16	40
+real_loader.gif	100	3740	3208	218.21	24.74	0.6930	16	40
+real_newtons_cradle.gif	0	11103	297216	734.47	19.47	0.6149	81	34
+real_newtons_cradle.gif	25	24432	297216	595.07	20.39	0.6345	137	129
+real_newtons_cradle.gif	50	51139	297216	525.38	20.93	0.6419	202	466
+real_newtons_cradle.gif	75	52695	297216	525.00	20.93	0.6419	202	502
+real_newtons_cradle.gif	100	53731	297216	524.79	20.93	0.6419	202	526
+real_pendulum.gif	0	15629	253278	925.55	18.47	0.2945	33	252
+real_pendulum.gif	25	24291	253278	725.46	19.52	0.3722	45	393
+real_pendulum.gif	50	27411	253278	646.12	20.03	0.4309	48	436
+real_pendulum.gif	75	27964	253278	645.12	20.03	0.4313	48	451
+real_pendulum.gif	100	27997	253278	645.14	20.03	0.4313	48	452
+slide_in_card.mp4	0	391	7616	2.96	43.42	0.9918	2	5
+slide_in_card.mp4	25	391	7616	2.96	43.42	0.9918	2	5
+slide_in_card.mp4	50	391	7616	2.96	43.42	0.9918	2	5
+slide_in_card.mp4	75	879	7616	2.91	43.49	0.9916	2	20
+slide_in_card.mp4	100	1273	7616	2.52	44.12	0.9922	2	32
+testsrc2.mp4	0	29494	311979	1473.91	16.45	0.9869	96	469
+testsrc2.mp4	25	162702	311979	1368.95	16.77	0.9870	174	3227
+testsrc2.mp4	50	216127	311979	1349.65	16.83	0.9871	202	4374
+testsrc2.mp4	75	242133	311979	1341.23	16.86	0.9871	202	5058
+testsrc2.mp4	100	261545	311979	1340.33	16.86	0.9871	202	5593
+vac_control.mp4	0	564	18897	9.10	38.54	0.9596	3	6
+vac_control.mp4	25	564	18897	9.10	38.54	0.9596	3	6
+vac_control.mp4	50	564	18897	9.10	38.54	0.9596	3	6
+vac_control.mp4	75	564	18897	9.10	38.54	0.9596	3	6
+vac_control.mp4	100	564	18897	9.10	38.54	0.9596	3	6

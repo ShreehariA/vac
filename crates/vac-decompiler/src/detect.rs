@@ -139,7 +139,7 @@ const FG_THRESHOLD_SQ: u32 = 24 * 24 * 3;
 
 /// A blob with fewer than this many pixels is treated as detection noise
 /// and discarded (smaller than a 3x3 cluster).
-const MIN_BLOB_AREA: u32 = 9;
+pub(crate) const MIN_BLOB_AREA: u32 = 9;
 
 /// A rect or ellipse must overlap a blob's pixels at least this well
 /// (IoU) to stand for it; below, the outline is traced as a path.
@@ -174,12 +174,17 @@ const ABSORB_MAX_PASSES: usize = 4;
 pub(crate) const MIN_OPAQUE_ALPHA: u8 = 128;
 
 /// Run detection across all frames.
-pub fn detect_all(frames: &[VideoFrame], seg: Segmentation, model: Background) -> Vec<Detection> {
+pub fn detect_all(
+    frames: &[VideoFrame],
+    seg: Segmentation,
+    model: Background,
+    min_area: u32,
+) -> Vec<Detection> {
     let mut out = Vec::with_capacity(frames.len());
     let mut t_ms: u32 = 0;
     for (i, f) in frames.iter().enumerate() {
         let bg = background_of(f, model);
-        let mut blobs = detect_blobs(f, bg, seg);
+        let mut blobs = detect_blobs_with(f, bg, seg, min_area);
         blobs.sort_by(|a, b| b.area.cmp(&a.area).then_with(|| cmp_position(a, b)));
         out.push(Detection {
             frame_index: i,
@@ -392,7 +397,14 @@ pub(crate) fn foreground_mask(f: &VideoFrame, bg: Color) -> Vec<bool> {
     mask
 }
 
+#[cfg(test)]
 pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<Blob> {
+    detect_blobs_with(f, bg, seg, MIN_BLOB_AREA)
+}
+
+/// [`detect_blobs`] with an explicit minimum blob area — the one detector
+/// tolerance the quality dial (v1.0) scales.
+pub(crate) fn detect_blobs_with(f: &VideoFrame, bg: Color, seg: Segmentation, min_area: u32) -> Vec<Blob> {
     let w = f.width as usize;
     let h = f.height as usize;
 
@@ -419,7 +431,7 @@ pub(crate) fn detect_blobs(f: &VideoFrame, bg: Color, seg: Segmentation) -> Vec<
     // makes the output reproducible.
     let mut kept_labels: Vec<u32> = counts
         .iter()
-        .filter_map(|(&l, &c)| if c >= MIN_BLOB_AREA { Some(l) } else { None })
+        .filter_map(|(&l, &c)| if c >= min_area { Some(l) } else { None })
         .collect();
     kept_labels.sort_unstable();
     if kept_labels.is_empty() {

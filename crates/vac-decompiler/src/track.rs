@@ -48,6 +48,88 @@ use crate::layer::StaticLayer;
 /// straight-line interpolation between segment endpoints are noise.
 const RDP_TOLERANCE_PX: f32 = 2.0;
 
+/// Every lossy simplification the decompiler makes, scaled together by one
+/// quality dial (v1.0). Quality 50 reproduces the constants VAC used
+/// through v0.14 exactly; each 25 points above halves every tolerance,
+/// each 25 below doubles it. That single scalar is what turns the
+/// decompiler into a codec with a rate–distortion curve: fewer keyframes
+/// and coarser outlines cost fidelity and save source bytes, and
+/// `vac verify` measures both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tolerances {
+    /// Keyframe simplification (temporal RDP), pixels.
+    pub keyframe_px: f32,
+    /// Outline polygon simplification (closed-loop RDP), pixels.
+    pub outline_px: f32,
+    /// Bézier fitting error, pixels.
+    pub curve_px: f32,
+    /// Opacity keyframe simplification, 0–255 levels.
+    pub opacity_levels: f32,
+    /// Smallest blob (pixels) emitted as a shape at all — the detector's
+    /// noise floor, deliberately *not* scaled by quality (see below).
+    pub min_blob_area: u32,
+    /// Shape-level rate–distortion pruning (v1.0): below quality 50, a
+    /// shape is dropped when the clip error it removes, per byte of source
+    /// it costs, falls under this (per-channel MSE per byte). 0 keeps every
+    /// shape, which is what quality ≥ 50 does.
+    pub min_mse_per_byte: f64,
+}
+
+impl Tolerances {
+    /// Tolerances for a quality in `[0, 100]` (clamped).
+    ///
+    /// Each knob is scaled only in the direction it was *measured* to trade
+    /// rate for distortion across the corpus (`docs/rate-distortion.md`):
+    ///
+    /// - keyframe and opacity tolerances scale both ways — keyframes are
+    ///   where the bytes go, and finer keyframing buys real fidelity;
+    /// - outline simplification and the minimum blob area only coarsen
+    ///   below 50: finer outlines cost bytes *and* fidelity (an outline
+    ///   traced at one frame overfits it), and blobs under 9 px are noise;
+    /// - curve fitting is held at 0.75 px from 50 up, which measured
+    ///   nearly free (+47 bytes over the whole corpus) and strictly better
+    ///   than v0.14's 1.5.
+    pub fn from_quality(quality: f32) -> Self {
+        let m = 2f32.powf((50.0 - quality.clamp(0.0, 100.0)) / 25.0);
+        let coarser = m.max(1.0);
+        Tolerances {
+            keyframe_px: RDP_TOLERANCE_PX * m,
+            outline_px: PATH_RDP_EPSILON_PX * coarser,
+            curve_px: PATH_CURVE_EPSILON_PX * coarser,
+            opacity_levels: OPACITY_RDP_TOLERANCE * m,
+            // The minimum blob area is the detector's noise floor, not a
+            // fidelity knob: lowering it at high quality only admitted
+            // dashed-line specks as dozens of extra fragment tracks, and
+            // `real_pendulum` got *worse* (residual 657 → 756 at q75 with
+            // 48 → 116 shapes). It may only rise, to save bytes.
+            min_blob_area: crate::detect::MIN_BLOB_AREA,
+            // Scaling the *area* floor was tried first and was a cliff, not
+            // a trade: at quality 0 it rose to 144 px and deleted every tick
+            // of the 32 px `real_loader` spinner (IoU 0.69 → 0.00). What a
+            // shape is worth is the error it removes per byte it costs: a
+            // loader tick is small but high-contrast (~2 MSE/byte), a
+            // Newton's-cradle fragment is ~0.0002.
+            min_mse_per_byte: MSE_PER_BYTE_SCALE * (m * m - 1.0).max(0.0) as f64,
+        }
+    }
+}
+
+impl Default for Tolerances {
+    fn default() -> Self {
+        Tolerances::from_quality(DEFAULT_QUALITY)
+    }
+}
+
+/// The quality the CLI and the facade use unless told otherwise.
+pub const DEFAULT_QUALITY: f32 = 50.0;
+
+/// Pruning threshold scale: quality 25 drops shapes worth under 9e-4 MSE
+/// per byte, quality 0 under 4.5e-3. Swept 1e-4 / 3e-4 / 1e-3 on the
+/// corpus; 3e-4 is the strongest setting under which no clip's curve
+/// turns pathological (at 1e-3 `real_pendulum` at quality 0 jumps from
+/// residual 926 to 1113 while saving only 4 KB).
+const MSE_PER_BYTE_SCALE: f64 = 3e-4;
+
 /// Easing classifier only switches off `Linear` when an alternative
 /// fits at least this much better (lower SSE).
 const EASING_IMPROVEMENT_RATIO: f64 = 0.90;
@@ -104,9 +186,11 @@ const STATIONARY_MAX_DEV_PX: f32 = 2.5;
 /// same default as PAC's `--epsilon`).
 const PATH_RDP_EPSILON_PX: f32 = 2.0;
 
-/// Schneider Bezier fitting max-deviation tolerance, in pixels (v0.6 —
-/// same default as PAC's `--curve-eps`).
-const PATH_CURVE_EPSILON_PX: f32 = 1.5;
+/// Schneider Bezier fitting max-deviation tolerance, in pixels. 1.5 from
+/// v0.6 (PAC's `--curve-eps` default) until v1.0's quality sweep measured
+/// 0.75 as nearly free — +47 bytes over the whole corpus — and better on
+/// every row it moved.
+const PATH_CURVE_EPSILON_PX: f32 = 0.75;
 
 /// Cap on how much more area a filled path outline may claim than the
 /// blob's measured pixel count (v0.7).  Filling the outer contour is
@@ -136,6 +220,7 @@ pub fn build_document(
     frames: &[VideoFrame],
     detections: &[Detection],
     layer: Option<&StaticLayer>,
+    tol: &Tolerances,
 ) -> Document {
     let canvas = Canvas {
         width: frames[0].width,
@@ -154,6 +239,39 @@ pub fn build_document(
         .unwrap_or(0);
 
     let mut statements = Vec::new();
+
+    // v1.0 shape pruning: what one shape's statements cost in source
+    // bytes, and whether the error it removes pays for them.
+    let pixels_frames = (canvas.width as f64) * (canvas.height as f64) * frames.len().max(1) as f64;
+    let empty_len = vac_format::write(&Document {
+        canvas: canvas.clone(),
+        scenes: vec![Scene {
+            name: "main".into(),
+            duration_ms: 0,
+            statements: Vec::new(),
+        }],
+    })
+    .len();
+    let cost_bytes = |stmts: &[Statement]| -> f64 {
+        let len = vac_format::write(&Document {
+            canvas: canvas.clone(),
+            scenes: vec![Scene {
+                name: "main".into(),
+                duration_ms: 0,
+                statements: stmts.to_vec(),
+            }],
+        })
+        .len();
+        len.saturating_sub(empty_len).max(1) as f64
+    };
+    let worth_it = |stmts: &[Statement], removed_sq_err: f64| -> bool {
+        tol.min_mse_per_byte <= 0.0
+            || removed_sq_err / (3.0 * pixels_frames) >= tol.min_mse_per_byte * cost_bytes(stmts)
+    };
+    let contrast_sq = |c: Color, bg: Color| -> f64 {
+        let d = |a: u8, b: u8| a as f64 - b as f64;
+        d(c.r, bg.r).powi(2) + d(c.g, bg.g).powi(2) + d(c.b, bg.b).powi(2)
+    };
 
     statements.push(Statement::Let {
         name: "bg".into(),
@@ -178,7 +296,7 @@ pub fn build_document(
     if let Some(l) = layer {
         let plate = l.plate();
         let seg = detections.first().map(|d| d.segmentation).unwrap_or_default();
-        let mut blobs = crate::detect::detect_blobs(&plate, l.bg, seg);
+        let mut blobs = crate::detect::detect_blobs_with(&plate, l.bg, seg, tol.min_blob_area);
         blobs.sort_by(|a, b| {
             b.area
                 .cmp(&a.area)
@@ -192,6 +310,7 @@ pub fn build_document(
             segmentation: seg,
         }];
         let plate_frames = [plate];
+        let mut n = 0usize;
         for (idx, blob) in blobs.iter().enumerate() {
             let scenery = Track {
                 id: idx,
@@ -200,13 +319,23 @@ pub fn build_document(
                 last_seen_frame: 0,
                 active: false,
             };
+            let mut stmts = Vec::new();
             emit_shape(
-                &mut statements,
-                &format!("static_{idx}"),
+                &mut stmts,
+                &format!("static_{n}"),
                 &scenery,
                 &plate_frames,
                 &plate_dets,
+                tol,
             );
+            // Scenery is on screen for the whole clip.
+            let removed = blob.area as f64
+                * contrast_sq(blob.color, l.bg)
+                * frames.len() as f64;
+            if worth_it(&stmts, removed) {
+                statements.extend(stmts);
+                n += 1;
+            }
         }
     }
 
@@ -222,14 +351,30 @@ pub fn build_document(
             .then_with(|| a.samples[0].0.cmp(&b.samples[0].0))
     });
 
-    for (idx, track) in tracks.iter().enumerate() {
+    let mut n = 0usize;
+    for track in &tracks {
+        let mut stmts = Vec::new();
         emit_shape(
-            &mut statements,
-            &format!("shape_{idx}"),
+            &mut stmts,
+            &format!("shape_{n}"),
             track,
             frames,
             detections,
+            tol,
         );
+        let removed: f64 = track
+            .samples
+            .iter()
+            .zip(&track.frame_indices)
+            .map(|((_, b), &fi)| {
+                let bg = detections.get(fi).map(|d| d.bg).unwrap_or(bg_color);
+                b.area as f64 * contrast_sq(b.color, bg)
+            })
+            .sum();
+        if worth_it(&stmts, removed) {
+            statements.extend(stmts);
+            n += 1;
+        }
     }
 
     Document {
@@ -283,6 +428,7 @@ fn emit_shape(
     track: &Track,
     frames: &[VideoFrame],
     detections: &[Detection],
+    tol: &Tolerances,
 ) {
     let name = name.to_string();
     // Majority-vote the shape kind across all samples of the track.
@@ -336,7 +482,7 @@ fn emit_shape(
     // falls back to the ellipse primitive rather than being dropped.
     let mut path_segs: Option<Vec<PathSeg>> = None;
     if kind == ShapeKind::Path {
-        path_segs = trace_track_outline(track, frames, detections, (base_cx, base_cy));
+        path_segs = trace_track_outline(track, frames, detections, (base_cx, base_cy), tol);
         if path_segs.is_none() {
             kind = ShapeKind::Ellipse;
             // The component was too sprawling for a filled outline (or
@@ -588,21 +734,21 @@ fn emit_shape(
     let unclipped: Vec<(u32, Blob)> = track.samples.iter().map(|(t, b)| (*t, unclip(b))).collect();
     let blobs = &unclipped;
 
-    let mut keep = simplify_trajectory(blobs, RDP_TOLERANCE_PX);
+    let mut keep = simplify_trajectory(blobs, tol.keyframe_px);
     let times: Vec<f32> = blobs.iter().map(|(t, _)| *t as f32).collect();
     if let Some(sc) = &scales {
         // Tolerance in pixels of radius, like position.
         let extent: Vec<f32> = sc.iter().map(|s| s * (rx + ry) / 2.0).collect();
-        keep.extend(rdp_1d(&times, &extent, RDP_TOLERANCE_PX));
+        keep.extend(rdp_1d(&times, &extent, tol.keyframe_px));
     }
     if let Some((al, _)) = &opacity {
         let levels: Vec<f32> = al.iter().map(|a| a * 255.0).collect();
-        keep.extend(rdp_1d(&times, &levels, OPACITY_RDP_TOLERANCE));
+        keep.extend(rdp_1d(&times, &levels, tol.opacity_levels));
     }
     if let Some(rot) = &rotation {
         // Tolerance in pixels at the shape's tip, like position.
         let reach = rx.max(ry).max(1.0);
-        let tol_deg = (RDP_TOLERANCE_PX / reach).to_degrees();
+        let tol_deg = (tol.keyframe_px / reach).to_degrees();
         keep.extend(rdp_1d(&times, rot, tol_deg));
     }
     if !keep.contains(&0) {
@@ -831,6 +977,7 @@ fn trace_track_outline(
     frames: &[VideoFrame],
     detections: &[Detection],
     declare_at: (f32, f32),
+    tol: &Tolerances,
 ) -> Option<Vec<PathSeg>> {
     let rep = representative_sample(track);
     let (_, rep_b) = track.samples[rep];
@@ -846,7 +993,7 @@ fn trace_track_outline(
         (rep_b.area / 4).max(1),
         det.segmentation,
     )?;
-    let simplified = pac_decompiler::simplify::rdp(&contour, PATH_RDP_EPSILON_PX);
+    let simplified = pac_decompiler::simplify::rdp(&contour, tol.outline_px);
     if simplified.len() < 3 {
         return None;
     }
@@ -875,7 +1022,7 @@ fn trace_track_outline(
     let dy = declare_at.1 - rep_b.cy;
     let moved: Vec<(f32, f32)> = simplified.iter().map(|p| (p.0 + dx, p.1 + dy)).collect();
 
-    let segs = pac_decompiler::curves::fit_closed(&moved, PATH_CURVE_EPSILON_PX);
+    let segs = pac_decompiler::curves::fit_closed(&moved, tol.curve_px);
     if segs.len() < 2 {
         return None;
     }
@@ -1556,7 +1703,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[]);
+        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[], &Tolerances::default());
 
         assert!(
             !statements
@@ -1592,7 +1739,7 @@ mod tests {
             .collect();
 
         let mut statements = Vec::new();
-        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[]);
+        emit_shape(&mut statements, "shape_0", &track_from(samples), &[], &[], &Tolerances::default());
 
         assert!(
             statements

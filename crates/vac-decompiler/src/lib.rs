@@ -49,7 +49,7 @@ use vac_format::Document;
 /// Knobs for the decompiler. `Default` is what the CLI and the `vac`
 /// facade use; the flags exist so a regression can be measured against
 /// the previous version's behaviour with the same binary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
     /// Measure and strip the persistent scene before tracking (v0.8).
     /// Off reproduces the v0.7 single-layer pipeline exactly.
@@ -58,6 +58,10 @@ pub struct Options {
     pub segmentation: Segmentation,
     /// Which rule picks each frame's background colour (v0.13).
     pub background: Background,
+    /// The rate–distortion dial, 0–100 (v1.0). 50 reproduces v0.14
+    /// exactly; higher keeps more keyframes and finer outlines, lower
+    /// fewer and coarser. See [`track::Tolerances`].
+    pub quality: f32,
 }
 
 impl Default for Options {
@@ -66,11 +70,13 @@ impl Default for Options {
             static_layer: true,
             segmentation: Segmentation::Auto,
             background: Background::Auto,
+            quality: track::DEFAULT_QUALITY,
         }
     }
 }
 
 pub use detect::{Background, Segmentation};
+pub use track::Tolerances;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecompileError {
@@ -130,6 +136,8 @@ pub fn decompile_frames(
     if let Some(l) = &scene {
         l.strip(&mut frames);
     }
-    let detections = detect::detect_all(&frames, opts.segmentation, opts.background);
-    Ok(track::build_document(&frames, &detections, scene.as_ref()))
+    let tol = track::Tolerances::from_quality(opts.quality);
+    let detections =
+        detect::detect_all(&frames, opts.segmentation, opts.background, tol.min_blob_area);
+    Ok(track::build_document(&frames, &detections, scene.as_ref(), &tol))
 }
