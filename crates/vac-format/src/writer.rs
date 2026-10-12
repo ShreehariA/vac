@@ -144,6 +144,23 @@ fn fmt_path_seg(seg: &PathSeg) -> String {
 fn fmt_value(v: &Value) -> String {
     match v {
         Value::Color(c) => fmt_color(c),
+        Value::Gradient(Gradient::Linear { c0, p0, c1, p1 }) => format!(
+            "gradient(linear, {} at {},{}, {} at {},{})",
+            fmt_color(c0),
+            fmt_num(p0.x),
+            fmt_num(p0.y),
+            fmt_color(c1),
+            fmt_num(p1.x),
+            fmt_num(p1.y)
+        ),
+        Value::Gradient(Gradient::Radial { c0, center, c1, radius }) => format!(
+            "gradient(radial, {} at {},{}, {} radius {})",
+            fmt_color(c0),
+            fmt_num(center.x),
+            fmt_num(center.y),
+            fmt_color(c1),
+            fmt_num(*radius)
+        ),
         Value::None => "none".to_string(),
     }
 }

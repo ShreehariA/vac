@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v1.1, default quality 50) and is
+table re-measured 2026-10-12 at v1.2, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -40,25 +40,25 @@ shape comes back as a bare fill.
 
 ---
 
-## 2. Smooth gradients have no primitive
+## 2. Gradients beyond two stops, and textures
 
-**Status: open. Corpus rows: `mandelbrot.mp4`, `real_newtons_cradle.gif`.**
+**Status: partly fixed in v1.2. Corpus rows: `mandelbrot.mp4`,
+`real_newtons_cradle.gif`.**
 
-Every fill in VAC is one flat colour. The Mandelbrot zoom is radial colour
-ramps on a pink radial background; the Newton's cradle is a greyscale
-photograph. Each is approximated by flat patches, and v0.13's measured
-search shows how little the choice of patches matters: colour-aware regions
-shatter the Mandelbrot into 289 shapes and 261 KB of source while making it
-*worse* (IoU 0.67), so the search keeps the coarse decomposition.
+v1.2 added two-stop linear and radial gradient fills (see Fixed). They
+describe a lit ball or a fading panel. They cannot describe a fractal's
+colour bands or a photograph's texture. On those clips the fitted gradient
+leaves 33–55 levels of RMS error, and accepting it as a smear cost the
+Mandelbrot 0.05 ink IoU, so the fitter now rejects it and those regions stay
+flat.
 
 | | ink IoU | worst | residual |
 |---|---|---|---|
-| `mandelbrot.mp4` | 0.765 | 0.396 | 4186.4 |
-| `real_newtons_cradle.gif` | 0.641 | 0.635 | 542.7 |
+| `mandelbrot.mp4` | 0.764 | 0.396 | 4165.4 |
+| `real_newtons_cradle.gif` | 0.642 | 0.637 | 525.0 |
 
-PAC already fits linear gradients (`pac_decompiler::gradient`). A `gradient`
-fill in the language is the obvious next primitive; the planned `raster()`
-escape hatch is the fallback for what no vector primitive can say.
+What would move these: multi-stop gradients, or the planned `raster()`
+escape hatch for what no vector primitive can say, chosen by measurement.
 
 ---
 
@@ -173,6 +173,18 @@ always true; only one of them was measurable.
     dark. That fringe was counted as "ink" but painted the wrong colour.
     Residual is the measure that sees colour, and it improved 26%.
 
+- **v1.2 — gradient fills.** `gradient(linear, #c0 at x,y, #c1 at x,y)` (the
+  same syntax as PAC) and `gradient(radial, #c0 at x,y, #c1 radius r)`, in
+  the shape's declared coordinates, so the shading moves, scales and turns
+  with it. Each shape's interior pixels are fitted with a flat fill, a
+  least-squares linear model, and a radial model whose centre is found by
+  coarse-to-fine grid search. A gradient is kept only if it removes at least
+  60% of the flat error and leaves at most 25 levels RMS. The first version
+  accepted any gain over 35%, and the Mandelbrot clip lost 0.05 ink IoU to
+  gradients smeared over its fractal. `real_bouncing_ball` 21.9 → **25.0 dB**,
+  IoU 0.869 → **0.885** (now above v0.12's 0.876). `shaded.vac` (new)
+  residual 390 → **21**. No row regressed.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -181,15 +193,15 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
 | `slide_in_card.mp4` | 0.9918 | 0.8792 | 3.0 | 43.42 | 0.3% | 2 |
-| `testsrc2.mp4` | 0.9871 | 0.9771 | 1347.6 | 16.84 | 1.2% | 202 |
+| `testsrc2.mp4` | 0.9871 | 0.9771 | 1347.2 | 16.84 | 1.2% | 202 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9620 | 0.9493 | 3.0 | 43.35 | 0.5% | 3 |
-| `real_bouncing_ball.gif` | 0.8686 | 0.8662 | 419.9 | 21.90 | 14.0% | 3 |
-| `mandelbrot.mp4` | 0.7640 | 0.3963 | 4166.1 | 11.93 | 13.7% | 43 |
+| `real_bouncing_ball.gif` | 0.8852 | 0.8830 | 203.7 | 25.04 | 11.8% | 3 |
+| `mandelbrot.mp4` | 0.7639 | 0.3962 | 4165.4 | 11.93 | 13.7% | 43 |
 | `real_loader.gif` | 0.6998 | 0.6706 | 240.7 | 24.32 | 10.3% | 16 |
-| `real_newtons_cradle.gif` | 0.6419 | 0.6369 | 525.3 | 20.93 | 46.9% | 202 |
+| `real_newtons_cradle.gif` | 0.6418 | 0.6369 | 525.0 | 20.93 | 46.9% | 202 |
 | `real_double_pendulum.gif` | 0.4347 | 0.2947 | 766.5 | 19.29 | 39.4% | 379 |
-| `real_pendulum.gif` | 0.4298 | 0.3268 | 646.4 | 20.03 | 11.8% | 48 |
+| `real_pendulum.gif` | 0.4297 | 0.3267 | 645.8 | 20.03 | 11.8% | 48 |
 
 The two clips at the top are VAC's own output and ffmpeg `drawbox` rectangles —
 flat-shaded content of exactly the kind the detector was built for. The spread

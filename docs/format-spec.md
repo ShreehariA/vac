@@ -122,6 +122,17 @@ v0.1 transforms:
 | `opacity(o)` | `[0, 1]` | multiplies fill/stroke alpha |
 | `rotate(deg)` | degrees, clockwise | turns the shape about its **centre** (rect/ellipse centre, path centroid), independent of the `position` anchor — added v0.14 |
 
+**Gradient fills (v1.2).** `fill` takes a colour, `none`, or a two-stop
+gradient in the shape's declared coordinates, so it moves, scales and turns
+with the shape:
+
+```
+ball.fill = gradient(radial, #fff2c0 at 76,216, #b05010 radius 52)
+panel.fill = gradient(linear, #203a6a at 40,85, #7fb0f0 at 440,85)
+```
+
+Colours pad beyond both stops. Strokes take a colour or `none` only.
+
 v0.1 easings: `linear`, `ease-in`, `ease-out`, `ease-in-out`.
 
 **Each transform kind is its own channel (v0.11).** For transform kind `V`,

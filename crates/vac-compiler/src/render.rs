@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 use vac_format::{
-    Animation, Color, Document, Keyframe, Property, Scene, Shape, Statement,
+    Animation, Color, Document, Gradient, Keyframe, Property, Scene, Shape, Statement,
     Transform as VTransform, Value,
 };
 
@@ -22,6 +22,8 @@ pub struct RenderedFrame {
 struct ShapeState {
     base: Shape,
     fill: Option<Color>,
+    /// A gradient fill (v1.2); when set it takes the place of `fill`.
+    fill_gradient: Option<Gradient>,
     stroke: Option<Color>,
     /// Absolute world position (anchor point) — overrides the shape's
     /// declared position when set by an `animate` block.
@@ -37,6 +39,7 @@ impl ShapeState {
         ShapeState {
             base,
             fill: Some(Color::rgb(0, 0, 0)),
+            fill_gradient: None,
             stroke: None,
             position: None,
             scale: 1.0,
@@ -81,9 +84,24 @@ fn render_scene(doc: &Document, scene: &Scene) -> Result<Vec<RenderedFrame>, Com
                     CompileError::Render(format!("assign to undeclared shape `{target}`"))
                 })?;
                 match (property, value) {
-                    (Property::Fill, Value::Color(c)) => st.fill = Some(*c),
-                    (Property::Fill, Value::None) => st.fill = None,
+                    (Property::Fill, Value::Color(c)) => {
+                        st.fill = Some(*c);
+                        st.fill_gradient = None;
+                    }
+                    (Property::Fill, Value::Gradient(g)) => {
+                        st.fill = None;
+                        st.fill_gradient = Some(*g);
+                    }
+                    (Property::Fill, Value::None) => {
+                        st.fill = None;
+                        st.fill_gradient = None;
+                    }
                     (Property::Stroke, Value::Color(c)) => st.stroke = Some(*c),
+                    (Property::Stroke, Value::Gradient(_)) => {
+                        return Err(CompileError::Render(format!(
+                            "`{target}.stroke`: gradient strokes are not supported"
+                        )))
+                    }
                     (Property::Stroke, Value::None) => st.stroke = None,
                 }
             }
@@ -249,10 +267,51 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState) {
         .post_scale(scale, scale)
         .post_translate(pos.0, pos.1);
 
-    if let Some(fill) = state.fill {
+    let opacity = state.opacity.clamp(0.0, 1.0);
+    if let Some(g) = &state.fill_gradient {
+        // The shader lives in the shape's declared coordinates; fill_path
+        // applies `transform` to path and shader alike, so the shading
+        // moves, scales and turns with the shape.
+        let stop = |pos: f32, c: &Color| {
+            tiny_skia::GradientStop::new(
+                pos,
+                tiny_skia::Color::from_rgba8(c.r, c.g, c.b, (c.a as f32 * opacity) as u8),
+            )
+        };
+        let shader = match g {
+            Gradient::Linear { c0, p0, c1, p1 } => tiny_skia::LinearGradient::new(
+                tiny_skia::Point::from_xy(p0.x, p0.y),
+                tiny_skia::Point::from_xy(p1.x, p1.y),
+                vec![stop(0.0, c0), stop(1.0, c1)],
+                tiny_skia::SpreadMode::Pad,
+                Transform::identity(),
+            ),
+            Gradient::Radial { c0, center, c1, radius } => tiny_skia::RadialGradient::new(
+                tiny_skia::Point::from_xy(center.x, center.y),
+                tiny_skia::Point::from_xy(center.x, center.y),
+                *radius,
+                vec![stop(0.0, c0), stop(1.0, c1)],
+                tiny_skia::SpreadMode::Pad,
+                Transform::identity(),
+            ),
+        };
         let mut paint = Paint::default();
         paint.anti_alias = true;
-        let a = (fill.a as f32 * state.opacity.clamp(0.0, 1.0)) as u8;
+        match shader {
+            Some(sh) => paint.shader = sh,
+            // Degenerate (coincident points, zero radius): the first stop.
+            None => {
+                let c = match g {
+                    Gradient::Linear { c0, .. } | Gradient::Radial { c0, .. } => c0,
+                };
+                paint.set_color_rgba8(c.r, c.g, c.b, (c.a as f32 * opacity) as u8);
+            }
+        }
+        pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
+    } else if let Some(fill) = state.fill {
+        let mut paint = Paint::default();
+        paint.anti_alias = true;
+        let a = (fill.a as f32 * opacity) as u8;
         paint.set_color_rgba8(fill.r, fill.g, fill.b, a);
         pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
     }
@@ -339,6 +398,7 @@ mod tests {
         let base = ShapeState {
             base: Shape::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
             fill: None,
+            fill_gradient: None,
             stroke: None,
             position: None,
             scale: 1.0,
@@ -395,6 +455,21 @@ mod tests {
         let lit = |x: u32, y: u32| f.rgba[((y * 100 + x) * 4) as usize] > 128;
         assert!(lit(50, 32) && lit(50, 68), "vertical extent after rotation");
         assert!(!lit(32, 50) && !lit(68, 50), "horizontal extent gone after rotation");
+    }
+
+    /// A horizontal linear gradient renders dark at its start, light at
+    /// its end, and in between at the midpoint — and moves with its shape.
+    #[test]
+    fn a_linear_gradient_fill_is_rendered_in_shape_coordinates() {
+        let doc = vac_format::parse(
+            "canvas 100x20 @10fps\nscene s {\n  duration 100ms\n  let bg = rect(0, 0, 100, 20)\n  bg.fill = gradient(linear, #000000 at 0,0, #ffffff at 100,0)\n}\n",
+        )
+        .unwrap();
+        let f = &render_document(&doc).unwrap()[0];
+        let r = |x: u32| f.rgba[((10 * 100 + x) * 4) as usize];
+        assert!(r(1) < 10, "start {}", r(1));
+        assert!(r(98) > 245, "end {}", r(98));
+        assert!((r(50) as i32 - 128).abs() < 8, "middle {}", r(50));
     }
 
     #[test]

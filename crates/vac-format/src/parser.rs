@@ -728,10 +728,79 @@ impl Parser {
                 self.bump();
                 Ok(Value::None)
             }
+            Token::Ident(ref name) if name == "gradient" => {
+                self.bump();
+                Ok(Value::Gradient(self.parse_gradient_args(s.span)?))
+            }
             other => Err(ParseError::syntax(
                 s.span,
-                format!("expected color or `none`, got {other:?}"),
+                format!("expected color, gradient(...) or `none`, got {other:?}"),
             )),
+        }
+    }
+
+    /// `(linear, #c0 at x,y, #c1 at x,y)` or `(radial, #c0 at x,y, #c1 radius r)`.
+    fn parse_gradient_args(&mut self, span: Span) -> Result<Gradient, ParseError> {
+        self.expect(&Token::LParen)?;
+        let (kind, kspan) = self.expect_ident()?;
+        self.expect(&Token::Comma)?;
+        let c0 = self.expect_color()?;
+        self.expect_word("at")?;
+        let x0 = self.expect_number()?;
+        self.expect(&Token::Comma)?;
+        let y0 = self.expect_number()?;
+        self.expect(&Token::Comma)?;
+        let c1 = self.expect_color()?;
+        let g = match kind.as_str() {
+            "linear" => {
+                self.expect_word("at")?;
+                let x1 = self.expect_number()?;
+                self.expect(&Token::Comma)?;
+                let y1 = self.expect_number()?;
+                Gradient::Linear {
+                    c0,
+                    p0: Point::new(x0, y0),
+                    c1,
+                    p1: Point::new(x1, y1),
+                }
+            }
+            "radial" => {
+                self.expect_word("radius")?;
+                let radius = self.expect_number()?;
+                Gradient::Radial {
+                    c0,
+                    center: Point::new(x0, y0),
+                    c1,
+                    radius,
+                }
+            }
+            other => {
+                return Err(ParseError::syntax(
+                    kspan,
+                    format!("unknown gradient `{other}` (expected linear or radial)"),
+                ))
+            }
+        };
+        self.expect(&Token::RParen).map_err(|_| {
+            ParseError::syntax(span, "gradient(...) is missing its closing `)`".to_string())
+        })?;
+        Ok(g)
+    }
+
+    fn expect_color(&mut self) -> Result<Color, ParseError> {
+        let s = self.bump();
+        match s.tok {
+            Token::HexColor(c) => Ok(c),
+            other => Err(ParseError::syntax(s.span, format!("expected a #colour, got {other:?}"))),
+        }
+    }
+
+    fn expect_word(&mut self, word: &str) -> Result<(), ParseError> {
+        let (got, span) = self.expect_ident()?;
+        if got == word {
+            Ok(())
+        } else {
+            Err(ParseError::syntax(span, format!("expected `{word}`, got `{got}`")))
         }
     }
 

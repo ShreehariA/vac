@@ -40,8 +40,8 @@ use std::path::Path;
 
 // Re-export the AST and friends so callers only need `use vac::*`.
 pub use vac_format::{
-    Animation, Canvas, Color, Document, Easing, Keyframe, ParseError, PathSeg, Point, Property,
-    Scene, Shape, Statement, Transform, Value,
+    Animation, Canvas, Color, Document, Easing, Gradient, Keyframe, ParseError, PathSeg, Point,
+    Property, Scene, Shape, Statement, Transform, Value,
 };
 
 // Re-export the underlying error types so callers can pattern-match if they

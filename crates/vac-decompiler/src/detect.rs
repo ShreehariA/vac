@@ -824,7 +824,95 @@ pub fn extract_contour(
         }
     }
     let (_, target, seed_x, seed_y) = best?;
+    trace_component(frame, &labels, w, h, target, seed_x, seed_y)
+}
 
+/// The labelled component nearest `near` in `frame`, found exactly as
+/// [`extract_contour`] finds it: `(labels, target label)`.
+fn find_component(
+    frame: &VideoFrame,
+    bg: Color,
+    near: (f32, f32),
+    max_seed_dist: f32,
+    min_component_area: u32,
+    seg: Segmentation,
+) -> Option<(Vec<u32>, u32)> {
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let mask = foreground_mask(frame, bg);
+    let labels = label(frame, &mask, w, h, seg);
+    let mut label_area = std::collections::HashMap::<u32, u32>::new();
+    for &l in &labels {
+        if l != 0 {
+            *label_area.entry(l).or_insert(0) += 1;
+        }
+    }
+    let r = max_seed_dist.ceil().max(1.0) as i32;
+    let cx = near.0.round() as i32;
+    let cy = near.1.round() as i32;
+    let mut best: Option<(f32, u32)> = None;
+    for y in (cy - r).max(0)..=(cy + r).min(h as i32 - 1) {
+        for x in (cx - r).max(0)..=(cx + r).min(w as i32 - 1) {
+            let l = labels[y as usize * w + x as usize];
+            if l == 0 || label_area.get(&l).copied().unwrap_or(0) < min_component_area {
+                continue;
+            }
+            let d = (x as f32 - near.0).powi(2) + (y as f32 - near.1).powi(2);
+            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                best = Some((d, l));
+            }
+        }
+    }
+    let (_, target) = best?;
+    Some((labels, target))
+}
+
+/// The *interior* pixels — all four neighbours in the same component, so
+/// no anti-aliased edge — of the component nearest `near`, as
+/// `(x, y, rgb)`. What a gradient is fitted to (v1.2).
+pub fn interior_pixels(
+    frame: &VideoFrame,
+    bg: Color,
+    near: (f32, f32),
+    max_seed_dist: f32,
+    min_component_area: u32,
+    seg: Segmentation,
+) -> Option<Vec<(f32, f32, [f32; 3])>> {
+    let (labels, target) = find_component(frame, bg, near, max_seed_dist, min_component_area, seg)?;
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let mut out = Vec::new();
+    for y in 1..h.saturating_sub(1) {
+        for x in 1..w.saturating_sub(1) {
+            let i = y * w + x;
+            if labels[i] != target
+                || labels[i - 1] != target
+                || labels[i + 1] != target
+                || labels[i - w] != target
+                || labels[i + w] != target
+            {
+                continue;
+            }
+            let p = i * 4;
+            out.push((
+                x as f32,
+                y as f32,
+                [frame.pixels[p] as f32, frame.pixels[p + 1] as f32, frame.pixels[p + 2] as f32],
+            ));
+        }
+    }
+    Some(out)
+}
+
+fn trace_component(
+    frame: &VideoFrame,
+    labels: &[u32],
+    w: usize,
+    h: usize,
+    target: u32,
+    seed_x: usize,
+    seed_y: usize,
+) -> Option<Vec<(f32, f32)>> {
     // Full bbox + area of the chosen component (the tracer's start
     // pixel must be the component's true topmost-leftmost pixel).
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
@@ -856,7 +944,7 @@ pub fn extract_contour(
         seed_y: seed_y as u32,
         label: target,
     };
-    pac_decompiler::contour::trace_outer_contour(&labels, frame.width, frame.height, &region)
+    pac_decompiler::contour::trace_outer_contour(labels, frame.width, frame.height, &region)
 }
 
 /// Coverage-weighted position variances `(var_x, var_y)` of one blob.

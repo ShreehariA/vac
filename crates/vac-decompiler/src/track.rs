@@ -824,6 +824,46 @@ fn emit_shape(
         ShapeKind::Path => Shape::Path(path_segs.take().expect("checked above")),
     };
 
+    // v1.2: a gradient fill, fitted to the interior pixels of the
+    // representative sample and shifted into declared coordinates. Only
+    // for shapes whose look one frame can stand for: a rotating, scaling
+    // or fading track would need its shading re-expressed per channel.
+    let gradient: Option<vac_format::Gradient> = (|| {
+        if rotated || scales.is_some() || opacity.is_some() {
+            return None;
+        }
+        let rep = representative_sample(track);
+        let (_, rb) = track.samples[rep];
+        let fi = *track.frame_indices.get(rep)?;
+        let frame = frames.get(fi)?;
+        let det = detections.get(fi)?;
+        let px = crate::detect::interior_pixels(
+            frame,
+            det.bg,
+            (rb.cx, rb.cy),
+            rb.rx.max(rb.ry).max(4.0),
+            (rb.area / 4).max(1),
+            det.segmentation,
+        )?;
+        let fit = crate::gradient::fit(&px)?;
+        let (dx, dy) = ((base_cx - rb.cx).round(), (base_cy - rb.cy).round());
+        let mv = |p: vac_format::Point| vac_format::Point::new(p.x + dx, p.y + dy);
+        Some(match fit.gradient {
+            vac_format::Gradient::Linear { c0, p0, c1, p1 } => vac_format::Gradient::Linear {
+                c0,
+                p0: mv(p0),
+                c1,
+                p1: mv(p1),
+            },
+            vac_format::Gradient::Radial { c0, center, c1, radius } => vac_format::Gradient::Radial {
+                c0,
+                center: mv(center),
+                c1,
+                radius,
+            },
+        })
+    })();
+
     statements.push(Statement::Let {
         name: name.clone(),
         shape,
@@ -831,7 +871,10 @@ fn emit_shape(
     statements.push(Statement::Assign {
         target: name.clone(),
         property: Property::Fill,
-        value: Value::Color(color),
+        value: match gradient {
+            Some(g) => Value::Gradient(g),
+            None => Value::Color(color),
+        },
     });
     statements.push(Statement::Assign {
         target: name.clone(),

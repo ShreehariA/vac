@@ -1574,3 +1574,43 @@ The double pendulum's IoU drop is a recorded trade-off. Its 1.3 px
 anti-aliased plot lines are now declared at their measured width instead of
 painting their light fringe solid dark. That fringe counted as ink, but in
 the wrong colour, and residual, which sees colour, improved 26%.
+
+## v1.2 — Gradients
+
+Through v1.1 every fill was one flat colour, so a lit ball came back as its
+average grey. v1.2 adds two-stop gradient fills, using PAC's syntax for the
+linear form:
+
+```vac
+ball.fill  = gradient(radial, #fff2c0 at 76,216, #b05010 radius 52)
+panel.fill = gradient(linear, #203a6a at 40,85, #7fb0f0 at 440,85)
+```
+
+Gradient points live in the shape's declared coordinates. The renderer
+applies the shape's transform to the shader too, so the shading moves,
+scales and turns with the shape.
+
+For each shape, the decompiler fits its interior pixels (anti-aliased edges
+excluded) three ways:
+
+- **flat:** one colour, as before;
+- **linear:** a least-squares colour plane per channel, reduced to the
+  dominant common direction and two stops;
+- **radial:** colour against distance from a centre found by
+  coarse-to-fine grid search, because a lit ball's highlight is rarely at
+  its centre.
+
+A gradient is kept only if it *describes* the region: at least 60% of the
+flat error removed and at most 25 levels RMS left. The first version kept
+any gain over 35%. On the Mandelbrot clip it laid a green-to-pink radial
+smear over the fractal, which improved residual but cost 0.05 ink IoU. A
+fractal or a photograph isn't a two-stop gradient, and the fitter now says
+so.
+
+| | PSNR | ink IoU | residual |
+|---|---|---|---|
+| `shaded.vac` (new) | 22.2 → **34.9 dB** | 0.995 → 0.995 | 390 → **21** |
+| `real_bouncing_ball.gif` | 21.9 → **25.0 dB** | 0.869 → **0.885** | 420 → **204** |
+
+The bouncing ball had drifted slightly below v0.12 over the earlier
+releases (0.876 → 0.869). It's now well above it. No corpus row regressed.

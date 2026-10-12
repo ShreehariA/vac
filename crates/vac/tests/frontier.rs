@@ -359,6 +359,46 @@ fn a_panel_near_the_background_is_recovered() {
     assert!(fid.residual < 2.0, "panel.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.2 — shaded fills.** Through v1.1 every fill was one flat
+/// colour, so `shaded.vac`'s lit ball and fading panel came back as their
+/// means. A gradient is now fitted to each shape's interior and kept only
+/// when it describes the region (removes ≥60% of the flat error, leaves
+/// ≤25 levels RMS). The recovered stops are checked against the source's.
+#[test]
+fn shaded_fills_are_recovered_as_gradients() {
+    let (_, recovered, fid) = hermetic("shaded.vac");
+    println!("{}\n{fid}", vac::to_string(&recovered));
+    let fills: Vec<vac::Gradient> = recovered
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .filter_map(|st| match st {
+            Statement::Assign { property: vac::Property::Fill, value: vac::Value::Gradient(g), .. } => Some(*g),
+            _ => None,
+        })
+        .collect();
+    let close = |a: vac::Color, b: (u8, u8, u8)| {
+        (a.r as i32 - b.0 as i32).abs() <= 8 && (a.g as i32 - b.1 as i32).abs() <= 8 && (a.b as i32 - b.2 as i32).abs() <= 8
+    };
+    let linear = fills.iter().find_map(|g| match g {
+        vac::Gradient::Linear { c0, p0, c1, p1 } => Some((*c0, *p0, *c1, *p1)),
+        _ => None,
+    });
+    let (c0, p0, c1, p1) = linear.expect("the panel should come back as a linear gradient");
+    assert!(close(c0, (0x20, 0x3a, 0x6a)) && close(c1, (0x7f, 0xb0, 0xf0)), "{c0:?} → {c1:?}");
+    assert!((p0.x - 40.0).abs() <= 3.0 && (p1.x - 440.0).abs() <= 3.0, "{p0:?} → {p1:?}");
+    let radial = fills.iter().find_map(|g| match g {
+        vac::Gradient::Radial { c0, center, .. } => Some((*c0, *center)),
+        _ => None,
+    });
+    let (rc0, centre) = radial.expect("the ball should come back as a radial gradient");
+    assert!(close(rc0, (0xff, 0xf2, 0xc0)), "{rc0:?}");
+    // The ball is declared at its first position, (90, 230); the
+    // highlight sits 14 px up and left of its centre.
+    assert!((centre.x - 76.0).abs() <= 3.0 && (centre.y - 216.0).abs() <= 3.0, "{centre:?}");
+    assert!(fid.residual < 40.0, "shaded.vac residual {:.2}", fid.residual);
+}
+
 /// **DEFECT — strokes are never recovered.**
 ///
 /// `emit_shape` writes `stroke = none` unconditionally, and the renderer

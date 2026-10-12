@@ -1,0 +1,28 @@
+// Fixture (v1.2): shaded fills.
+//
+// A lit ball (radial gradient, highlight off-centre) rolls across a
+// panel that fades left to right (linear gradient). Through v1.1 every
+// fill was one flat colour and both came back as their means.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #101418
+
+  let panel = rect(40, 30, 400, 110)
+  panel.fill = gradient(linear, #203a6a at 40,85, #7fb0f0 at 440,85)
+  panel.stroke = none
+
+  let ball = ellipse(90, 230, 40, 40)
+  ball.fill = gradient(radial, #fff2c0 at 76,216, #b05010 radius 52)
+  ball.stroke = none
+
+  animate ball {
+    0ms -> position(90, 230)
+    3s  -> position(390, 230)
+    easing: linear
+  }
+}

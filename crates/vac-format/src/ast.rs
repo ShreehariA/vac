@@ -164,8 +164,27 @@ impl Property {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
     Color(Color),
+    /// A two-stop gradient fill (v1.2), in the shape's declared
+    /// coordinates — it moves, scales and turns with the shape.
+    Gradient(Gradient),
     /// Explicit "no value", e.g. `stroke = none`.
     None,
+}
+
+/// Two-stop gradients. The linear form is PAC's, so the two siblings
+/// read the same:
+///
+/// ```text
+/// gradient(linear, #c0 at x0,y0, #c1 at x1,y1)
+/// gradient(radial, #c0 at cx,cy, #c1 radius r)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gradient {
+    /// `c0` at `p0` blending to `c1` at `p1`, padded beyond both.
+    Linear { c0: Color, p0: Point, c1: Color, p1: Point },
+    /// `c0` at `center` blending to `c1` at distance `radius`, padded
+    /// beyond it.
+    Radial { c0: Color, center: Point, c1: Color, radius: f32 },
 }
 
 /// 32-bit RGBA color. Alpha defaults to 0xFF when written from RGB hex.

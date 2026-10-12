@@ -39,6 +39,7 @@
 pub mod detect;
 pub mod frames;
 pub mod frames_mp4;
+pub mod gradient;
 pub mod layer;
 pub mod track;
 
