@@ -112,7 +112,7 @@ fn anchor(shape: &Shape) -> (f32, f32) {
 // That is the "test that cannot fail" failure mode this whole tier
 // exists to eliminate, so the floors are per-fixture and tight.
 //
-// Values measured 2026-08-22. The tolerance below absorbs platform
+// Values re-measured 2026-10-13 at v1.9. The tolerance below absorbs platform
 // rasteriser differences — `tiny-skia` picks SIMD backends by target
 // feature, so f32 rasterisation is not guaranteed bit-identical between
 // an aarch64 laptop and an x86_64 CI runner — and nothing more.
@@ -128,22 +128,22 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("crossing.vac", 0.9794, 1.03),
     ("diagonal.vac", 0.9995, 0.03),
     ("fade.vac", 1.0000, 0.01),
-    ("grow.vac", 0.9699, 18.61),
+    ("grow.vac", 0.9769, 13.11),
     ("late_entry.vac", 1.0000, 0.00),
     ("occlusion.vac", 0.9999, 0.01),
-    ("outlined.vac", 0.9880, 5.70),
+    ("outlined.vac", 1.0000, 1.08),
     ("panel.vac", 0.9982, 0.01),
     ("pop_in.vac", 0.9999, 0.04),
     ("round_trip_two.vac", 0.9935, 2.07),
-    ("shaded.vac", 0.9975, 7.20),
+    ("shaded.vac", 0.9999, 0.47),
     ("sliding_rect.vac", 1.0000, 0.00),
-    ("spin.vac", 0.9268, 23.83),
+    ("spin.vac", 0.9932, 1.12),
     ("sprite.vac", 0.9715, 14.63),
     ("static_and_moving.vac", 0.9998, 0.01),
-    ("textured.vac", 0.9998, 1.76),
-    ("triangle.vac", 0.9747, 17.07),
+    ("textured.vac", 0.9999, 1.51),
+    ("triangle.vac", 0.9855, 7.18),
     ("two_balls.vac", 0.9997, 0.02),
-    ("two_tone.vac", 0.9999, 0.26),
+    ("two_tone.vac", 1.0000, 0.26),
 ];
 
 fn baseline_for(sample: &str) -> (f64, f64) {

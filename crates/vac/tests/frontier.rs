@@ -460,6 +460,95 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.9 — the fit is whatever reconstructs best.**
+///
+/// Through v1.8 every shape's geometry was estimated from its blob and
+/// then final: `outlined.vac`'s 3 px ring came back with radius 49.8 for
+/// 50 and gave up 5.7 dB. Refinement nudges each shape's size, position
+/// and stroke width to wherever the reconstruction measures best.
+///
+/// Mechanism: `outlined.vac`'s own source is a perfect reconstruction of
+/// its render. Knock three of its numbers off — the ring's radius, the
+/// moving frame's keyframes, the card border's width — and refinement must
+/// put each back to within a tenth of a pixel, from the pixels alone.
+#[test]
+fn refinement_moves_each_number_to_where_the_pixels_agree() {
+    let source = vac::read(examples_dir().join("outlined.vac")).expect("read fixture");
+    let frames = vac::rendered_to_video_frames(&vac::render(&source).expect("render"), source.canvas.fps);
+    let mut off = source.clone();
+    for st in &mut off.scenes[0].statements {
+        match st {
+            Statement::Let { name, shape: vac::Shape::Ellipse { rx, ry, .. } } if name == "ring" => {
+                *rx -= 0.4;
+                *ry -= 0.4;
+            }
+            Statement::Assign { target, property: vac::Property::StrokeWidth, value: vac::Value::Number(w) }
+                if target == "border" =>
+            {
+                *w -= 0.6;
+            }
+            Statement::Animate(a) if a.target == "frame" => {
+                for k in &mut a.keyframes {
+                    for t in &mut k.transforms {
+                        if let Transform::Position(x, y) = t {
+                            *x += 0.7;
+                            *y -= 0.3;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let before = vac::measure(&frames, &off).unwrap();
+    let r = vac::refine(&frames, off).expect("refine");
+    let mut moved = r.refined.clone();
+    moved.sort();
+    assert_eq!(moved, ["border", "frame", "ring"], "exactly the three knocked-off shapes move");
+    let near = |a: f32, b: f32| (a - b).abs() <= 0.1;
+    for st in &r.document.scenes[0].statements {
+        match st {
+            Statement::Let { name, shape: vac::Shape::Ellipse { rx, ry, .. } } if name == "ring" => {
+                assert!(near(*rx, 50.0) && near(*ry, 50.0), "ring radius back to 50: {rx} x {ry}");
+            }
+            Statement::Assign { target, property: vac::Property::StrokeWidth, value: vac::Value::Number(w) }
+                if target == "border" =>
+            {
+                assert!(near(*w, 4.0), "border width back to 4: {w}");
+            }
+            Statement::Animate(a) if a.target == "frame" => {
+                let pos: Vec<(f32, f32)> = a
+                    .keyframes
+                    .iter()
+                    .flat_map(|k| &k.transforms)
+                    .filter_map(|t| match t {
+                        Transform::Position(x, y) => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(near(pos[0].0, 40.0) && near(pos[0].1, 40.0), "frame keyframes back to (40, 40): {pos:?}");
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        r.fidelity.psnr_db > before.psnr_db + 10.0,
+        "refinement must recover the reconstruction: {:.2} -> {:.2} dB",
+        before.psnr_db,
+        r.fidelity.psnr_db
+    );
+
+    // And the decompiler's own estimate of the ring, through a real
+    // round trip, now lands on 50.
+    let (_, recovered, fid) = hermetic("outlined.vac");
+    let ring = recovered.scenes[0].statements.iter().find_map(|st| match st {
+        Statement::Let { shape: vac::Shape::Ellipse { rx, .. }, .. } => Some(*rx),
+        _ => None,
+    });
+    assert!(ring.is_some_and(|r| near(r, 50.0)), "recovered ring radius {ring:?}");
+    assert!(fid.psnr_db > 46.0, "outlined.vac PSNR {:.2} (v1.8: 40.57)", fid.psnr_db);
+}
+
 /// **FIXED in v1.8 — a mover no flat fill describes keeps its own pixels.**
 ///
 /// `sprite.vac` slides a smooth, many-coloured tile across a flat

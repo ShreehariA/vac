@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.8, default quality 50) and is
+table re-measured 2026-10-13 at v1.9, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -57,8 +57,10 @@ had blamed static dashes blinking under a sweeping arm).
 |---|---|---|---|---|
 | `real_pendulum.gif`, v0.9 | 0.158 | 0.101 | 2122.7 | **230.1%** |
 | `real_pendulum.gif`, v1.7 | 0.622 | 0.518 | 357.5 | 6.6% |
+| `real_pendulum.gif`, v1.9 | 0.640 | 0.541 | 334.8 | 5.0% |
 | `real_double_pendulum.gif`, v0.9 | 0.071 | 0.039 | 8425.9 | **616.6%** |
 | `real_double_pendulum.gif`, v1.7 | 0.498 | 0.355 | 560.5 | 9.7% |
+| `real_double_pendulum.gif`, v1.9 | 0.594 | 0.402 | 464.2 | 8.3% |
 
 At v0.9 the double pendulum painted **more than six times** the ink its
 source had. The v1.7 audit takes out every fragment that made the picture
@@ -72,21 +74,6 @@ headline win: 45 → 19 animate blocks, 1159 → 186 keyframes, 54 KB → 25 KB.
 of that is true. It is also entirely a *compression* result. Measured on the
 other axis, the same clip reconstructs at an ink IoU of 0.07. Both facts were
 always true; only one of them was measurable.
-
----
-
-## 3. Vector shapes are fitted once, never refined
-
-**Status: open. Fixture: `outlined.vac`.**
-
-Every shape's geometry is estimated from its detected blob and then kept.
-Nothing checks the estimate against the reconstruction. On `outlined.vac`
-the 3 px gold ring comes back with radius 49.8 instead of 50. On a thin,
-high-contrast stroke that 0.2 px costs **5.7 dB**: a PNG copy of the ring
-reconstructs at 46.3 dB where the fitted vector manages 40.6 dB. v1.8's
-sprite pass deliberately refuses that trade, since the error is the fit's
-to fix. A fix would measure each shape's parameters against the
-reconstruction, the way the audit already measures each shape's presence.
 
 ---
 
@@ -275,6 +262,19 @@ reconstruction, the way the audit already measures each shape's presence.
   The same slice found that twelve of the hermetic tier's twenty recorded
   floors were never asserted; one test now walks every fixture.
 
+- **v1.9 — the fit is whatever reconstructs best.** (Was open item 3.)
+  Every shape's geometry used to be estimated from its blob and then final.
+  On `outlined.vac` the 3 px ring came back with radius 49.8 for 50, which
+  cost 5.7 dB. Each shape's size, position and stroke width are now nudged
+  by coordinate descent in 0.5 / 0.2 / 0.1 px steps, scored like the audit,
+  and a nudge is kept only when the clip reconstructs better. The ring
+  lands on 50.0: `outlined.vac` 40.57 → **47.80 dB** at IoU **1.0000**.
+  `spin.vac` residual 23.83 → **1.12** (IoU 0.927 → 0.993); `real_loader`
+  25.75 → **28.32 dB**, IoU 0.732 → **0.864**; `real_double_pendulum` IoU
+  0.505 → **0.594**; `motion_graphics` 39.46 → **41.76 dB**. The test knocks
+  three numbers off a perfect reconstruction and refinement has to put each
+  back to within 0.1 px from the pixels alone.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -282,17 +282,17 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
-| `testsrc2.mp4` | 0.9951 | 0.9858 | 387.9 | 22.24 | 0.4% | 64 |
+| `testsrc2.mp4` | 0.9951 | 0.9859 | 374.0 | 22.40 | 0.4% | 64 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
-| `real_bouncing_ball.gif` | 0.9899 | 0.9851 | 2.6 | 44.05 | 0.7% | 2 |
-| `outlined_ui.mp4` | 0.9839 | 0.9689 | 28.8 | 33.54 | 1.1% | 4 |
-| `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
+| `real_bouncing_ball.gif` | 0.9900 | 0.9858 | 2.4 | 44.36 | 0.6% | 2 |
+| `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
+| `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `real_newtons_cradle.gif` | 0.9192 | 0.9017 | 74.8 | 29.39 | 5.7% | 47 |
-| `mandelbrot.mp4` | 0.7658 | 0.3961 | 4148.6 | 11.95 | 12.8% | 33 |
-| `real_loader.gif` | 0.7318 | 0.7115 | 173.2 | 25.75 | 9.8% | 16 |
-| `real_pendulum.gif` | 0.6215 | 0.5180 | 357.5 | 22.60 | 6.6% | 27 |
-| `real_double_pendulum.gif` | 0.5052 | 0.3555 | 532.8 | 20.87 | 8.9% | 419 |
+| `real_newtons_cradle.gif` | 0.9203 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
+| `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
+| `mandelbrot.mp4` | 0.7695 | 0.3976 | 4087.2 | 12.02 | 12.5% | 33 |
+| `real_pendulum.gif` | 0.6398 | 0.5409 | 334.8 | 22.88 | 5.0% | 27 |
+| `real_double_pendulum.gif` | 0.5943 | 0.4017 | 464.2 | 21.46 | 8.3% | 419 |
 
 Flat-shaded content of exactly the kind the detector was built for, meaning
 VAC's own output and ffmpeg `drawbox` rectangles, reconstructs at 33–47 dB. The

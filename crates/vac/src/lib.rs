@@ -235,6 +235,8 @@ struct Chosen {
     fidelity: Option<Fidelity>,
     /// Shapes the audit (v1.7) measured and took out.
     audited_out: usize,
+    /// Shapes whose geometry the refinement (v1.9) moved.
+    refined: usize,
     /// Shapes drawn as sprites of their own pixels (v1.8).
     sprites: usize,
 }
@@ -247,7 +249,7 @@ struct Chosen {
 /// content classifier decides; the reconstruction does.
 fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let chosen = choose(frames, opts)?;
-    if !opts.audit && !opts.sprites {
+    if !opts.audit && !opts.refine && !opts.sprites {
         return Ok(chosen);
     }
     let fidelity = match chosen.fidelity {
@@ -263,16 +265,23 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
             removed: Vec::new(),
         }
     };
-    let (document, fidelity, sprites) = if opts.sprites {
-        let sp = sprites_measured(frames, a.document, a.fidelity, opts.quality)?;
-        (sp.document, sp.fidelity, sp.sprites.len())
+    let (document, fidelity, refined) = if opts.refine {
+        let r = refine_measured(frames, a.document, a.fidelity)?;
+        (r.document, r.fidelity, r.refined.len())
     } else {
         (a.document, a.fidelity, 0)
+    };
+    let (document, fidelity, sprites) = if opts.sprites {
+        let sp = sprites_measured(frames, document, fidelity, opts.quality)?;
+        (sp.document, sp.fidelity, sp.sprites.len())
+    } else {
+        (document, fidelity, 0)
     };
     Ok(Chosen {
         document,
         fidelity: Some(fidelity),
         audited_out: a.removed.len(),
+        refined,
         sprites,
         ..chosen
     })
@@ -303,6 +312,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
             plate: opts.plate,
             fidelity: None,
             audited_out: 0,
+            refined: 0,
             sprites: 0,
         });
     }
@@ -357,6 +367,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
                 plate: Plate::Vector,
                 fidelity: Some(fid),
                 audited_out: 0,
+                refined: 0,
                 sprites: 0,
             });
         }
@@ -400,6 +411,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
             plate: Plate::Raster,
             fidelity: Some(fid),
             audited_out: 0,
+            refined: 0,
             sprites: 0,
         }
     } else {
@@ -568,6 +580,354 @@ fn audit_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity) -> Result
         fidelity: pfid,
         removed,
     })
+}
+
+/// What the refinement pass (v1.9) did to a document.
+#[derive(Debug, Clone)]
+pub struct Refined {
+    pub document: Document,
+    pub fidelity: Fidelity,
+    /// The shapes whose geometry moved.
+    pub refined: Vec<String>,
+}
+
+/// The fit is whatever reconstructs best (v1.9).
+///
+/// Every shape's geometry is *estimated* from its detected blob — a radius
+/// from coverage, a position from a centroid — and through v1.8 the
+/// estimate was final. Nothing checked it against the reconstruction, and
+/// on a thin, high-contrast stroke a fifth of a pixel is decibels:
+/// `outlined.vac`'s ring came back with radius 49.8 for 50 and gave up
+/// 5.7 dB. Here each shape's size, position and stroke width are nudged,
+/// by coordinate descent in steps of 0.5, 0.2 and 0.1 px, and a nudge is
+/// kept when the clip reconstructs better — scored like the audit, from
+/// small renders of the shape's footprint against the full measurement's
+/// per-frame tallies, on a sample of frames while searching and on every
+/// frame before it is accepted. Nothing is classified; the numbers move
+/// to wherever the pixels agree best, and stay readable numbers.
+pub fn refine(original: &[VideoFrame], doc: Document) -> Result<Refined> {
+    let fid = measure(original, &doc)?;
+    refine_measured(original, doc, fid)
+}
+
+/// The steps the refinement searches with, coarse to fine, pixels. The
+/// finest is the precision positions are written at.
+const REFINE_STEPS_PX: [f32; 3] = [0.5, 0.2, 0.1];
+/// How far refinement may move a shape or change its size, pixels: a
+/// correction to an estimate, not a refit.
+const REFINE_MAX_PX: f32 = 3.0;
+/// Frames the search scores each trial on (evenly spaced over the shape's
+/// lifetime); the winner is then scored on every frame.
+const REFINE_SAMPLE_FRAMES: usize = 12;
+/// A footprint already reconstructed this well has nothing to gain.
+const REFINE_SKIP_ABOVE_PSNR_DB: f64 = 45.0;
+
+/// [`refine`] on a document whose fidelity is already measured.
+fn refine_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity) -> Result<Refined> {
+    use vac_compiler::render::{Rig, Tweak};
+    let unchanged = |document: Document, fidelity: Fidelity| Refined {
+        document,
+        fidelity,
+        refined: Vec::new(),
+    };
+    if doc.scenes.len() != 1 || fid.frames.len() != frames.len() {
+        return Ok(unchanged(doc, fid));
+    }
+    let mut rig = Rig::new(&doc)?;
+    let count = rig.frame_count();
+    let idx = aligned_indices(frames, count, doc.canvas.fps);
+    let mut wanted: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (j, &i) in idx.iter().enumerate() {
+        wanted[i].push(j);
+    }
+    let bg = ink_background(frames);
+    let opts = CompareOptions::default();
+    let compared: Vec<f64> = fid.frames.iter().map(|f| f.compared_pixels as f64).collect();
+    let mut sse: Vec<f64> = fid.frames.iter().map(|f| f.residual * 3.0 * f.compared_pixels as f64).collect();
+    let mut inter: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px - f.missing_px) as i64).collect();
+    let mut union: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px + f.spurious_px) as i64).collect();
+    let frame_res = |sse: f64, c: f64| if c > 0.0 { sse / (3.0 * c) } else { 0.0 };
+    let frame_iou = |i: i64, u: i64| if u > 0 { i as f64 / u as f64 } else { 1.0 };
+    let mut res_sum: f64 = (0..frames.len()).map(|j| frame_res(sse[j], compared[j])).sum();
+    let mut iou_sum: f64 = (0..frames.len()).map(|j| frame_iou(inter[j], union[j])).sum();
+
+    let names: Vec<String> = rig.shapes(0).to_vec();
+    let mut bounds: Vec<Vec<Option<[u32; 4]>>> =
+        (0..count).map(|i| (0..names.len()).map(|m| rig.bounds(i, m)).collect()).collect();
+    let overlaps = |a: Option<[u32; 4]>, b: [u32; 4]| {
+        a.is_some_and(|a| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3])
+    };
+    let (cw, ch) = (doc.canvas.width, doc.canvas.height);
+    // Every pixel any trial can touch: the footprint, grown by the most a
+    // trial may move or grow the shape, and its stroke.
+    let pad = |b: [u32; 4]| -> [u32; 4] {
+        let p = (REFINE_MAX_PX * 2.0).ceil() as u32 + 2;
+        [b[0].saturating_sub(p), b[1].saturating_sub(p), (b[2] + p).min(cw), (b[3] + p).min(ch)]
+    };
+
+    let mut current = doc.clone();
+    let mut refined: Vec<String> = Vec::new();
+    for (k, name) in names.iter().enumerate() {
+        if name == "bg" || name == "plate" {
+            continue;
+        }
+        let Some(Statement::Let { shape: base, .. }) = current.scenes[0]
+            .statements
+            .iter()
+            .find(|st| matches!(st, Statement::Let { name: n, .. } if n == name))
+            .cloned()
+        else {
+            continue;
+        };
+        if matches!(base, Shape::Image { .. }) {
+            continue;
+        }
+        let stroked = current.scenes[0].statements.iter().any(|st| {
+            matches!(st, Statement::Assign { target, property: Property::Stroke, value: Value::Color(_) } if target == name)
+        });
+        let stroke_width = current.scenes[0]
+            .statements
+            .iter()
+            .find_map(|st| match st {
+                Statement::Assign { target, property: Property::StrokeWidth, value: Value::Number(w) }
+                    if target == name =>
+                {
+                    Some(*w)
+                }
+                _ => None,
+            })
+            .unwrap_or(2.0);
+        let alive: Vec<usize> = (0..count)
+            .filter(|&i| !wanted[i].is_empty() && bounds[i][k].is_some())
+            .collect();
+        if alive.is_empty() {
+            continue;
+        }
+        // Score the shape's footprint as it stands; skip it if it is
+        // already reconstructed about as well as pixels allow.
+        let regions: Vec<[u32; 4]> = alive.iter().map(|&i| pad(bounds[i][k].expect("alive"))).collect();
+        let before_tallies: Vec<Vec<(f64, usize, i64, i64)>> = alive
+            .iter()
+            .zip(&regions)
+            .map(|(&i, &r)| {
+                let img = rig.render_region(i, r, |m| overlaps(bounds[i][m], r));
+                wanted[i].iter().map(|&j| region_tallies(&frames[j], &img, r, bg, &opts)).collect()
+            })
+            .collect();
+        let (fs, fp) = before_tallies.iter().flatten().fold((0.0f64, 0usize), |a, t| (a.0 + t.0, a.1 + t.1));
+        if fp == 0 || vac_metrics::psnr_from_mse(fs / (3.0 * fp as f64)) >= REFINE_SKIP_ABOVE_PSNR_DB {
+            continue;
+        }
+        // Parameters: offset x, offset y, the two sizes (not for paths),
+        // and the stroke width when stroked.
+        let mut params: Vec<usize> = vec![0, 1];
+        if !matches!(base, Shape::Path(_)) {
+            params.extend([2, 3]);
+        }
+        if stroked {
+            params.push(4);
+        }
+        let make = |p: &[f32; 5]| -> Tweak {
+            let resized = match &base {
+                Shape::Rect { x, y, w, h } => Some(Shape::Rect {
+                    x: *x,
+                    y: *y,
+                    w: (w + p[2]).max(0.5),
+                    h: (h + p[3]).max(0.5),
+                }),
+                Shape::Ellipse { cx, cy, rx, ry } => Some(Shape::Ellipse {
+                    cx: *cx,
+                    cy: *cy,
+                    rx: (rx + p[2]).max(0.25),
+                    ry: (ry + p[3]).max(0.25),
+                }),
+                _ => None,
+            };
+            Tweak {
+                shape: k,
+                base: resized.filter(|_| p[2] != 0.0 || p[3] != 0.0),
+                offset: (p[0], p[1]),
+                stroke_width: (p[4] != 0.0).then(|| (stroke_width + p[4]).max(0.5)),
+            }
+        };
+        // The clip score with tweak `p`, from the frames in `which`.
+        let score = |p: &[f32; 5], which: &[usize]| -> (f64, Vec<(usize, f64, i64, i64)>) {
+            let tw = make(p);
+            let mut deltas = Vec::new();
+            for &a in which {
+                let (i, r) = (alive[a], regions[a]);
+                let after = rig.render_region_with(i, r, |m| m == k || overlaps(bounds[i][m], r), Some(&tw));
+                for (n, &j) in wanted[i].iter().enumerate() {
+                    let (bs, _, bi, bu) = before_tallies[a][n];
+                    let (s2, _, i2, u2) = region_tallies(&frames[j], &after, r, bg, &opts);
+                    if s2 != bs || i2 != bi || u2 != bu {
+                        deltas.push((j, s2 - bs, i2 - bi, u2 - bu));
+                    }
+                }
+            }
+            let (mut res_c, mut iou_c) = (res_sum, iou_sum);
+            for &(j, ds, di, du) in &deltas {
+                res_c += frame_res(sse[j] + ds, compared[j]) - frame_res(sse[j], compared[j]);
+                iou_c += frame_iou(inter[j] + di, union[j] + du) - frame_iou(inter[j], union[j]);
+            }
+            let gain = (res_sum.max(1e-9) / res_c.max(1e-9)).ln() + (iou_c.max(1e-9) / iou_sum.max(1e-9)).ln();
+            (gain, deltas)
+        };
+        let sample: Vec<usize> = if alive.len() <= REFINE_SAMPLE_FRAMES {
+            (0..alive.len()).collect()
+        } else {
+            (0..REFINE_SAMPLE_FRAMES).map(|n| n * (alive.len() - 1) / (REFINE_SAMPLE_FRAMES - 1)).collect()
+        };
+        let mut p = [0f32; 5];
+        let mut best = 0f64;
+        for step in REFINE_STEPS_PX {
+            loop {
+                let mut improved = false;
+                for &q in &params {
+                    for dir in [1.0f32, -1.0] {
+                        let mut t = p;
+                        t[q] = ((t[q] + dir * step) * 10.0).round() / 10.0;
+                        if t[q].abs() > REFINE_MAX_PX {
+                            continue;
+                        }
+                        let (g, _) = score(&t, &sample);
+                        if g > best + 1e-12 {
+                            p = t;
+                            best = g;
+                            improved = true;
+                            break;
+                        }
+                    }
+                }
+                if !improved {
+                    break;
+                }
+            }
+        }
+        if p == [0.0; 5] {
+            continue;
+        }
+        let all: Vec<usize> = (0..alive.len()).collect();
+        let (gain, deltas) = score(&p, &all);
+        if gain <= 0.0 {
+            continue;
+        }
+        let tw = make(&p);
+        apply_tweak(&mut current, name, &tw, stroke_width);
+        rig = Rig::new(&current)?;
+        for (i, row) in bounds.iter_mut().enumerate() {
+            row[k] = rig.bounds(i, k);
+        }
+        for (j, ds, di, du) in deltas {
+            sse[j] += ds;
+            inter[j] += di;
+            union[j] += du;
+        }
+        res_sum = (0..frames.len()).map(|j| frame_res(sse[j], compared[j])).sum();
+        iou_sum = (0..frames.len()).map(|j| frame_iou(inter[j], union[j])).sum();
+        refined.push(name.clone());
+    }
+    if refined.is_empty() {
+        return Ok(unchanged(doc, fid));
+    }
+    let rfid = measure(frames, &current)?;
+    if reconstructs_better(&fid, &rfid) {
+        return Ok(unchanged(doc, fid));
+    }
+    Ok(Refined {
+        document: current,
+        fidelity: rfid,
+        refined,
+    })
+}
+
+/// Write an accepted [`vac_compiler::render::Tweak`] into the document:
+/// the new size into the `let`, the offset into every `position()`
+/// keyframe (or, for a shape that never moves, into its declared place),
+/// and the stroke width into its assignment.
+fn apply_tweak(doc: &mut Document, name: &str, tw: &vac_compiler::render::Tweak, stroke_width: f32) {
+    let round = |v: f32| (v * 10.0).round() / 10.0;
+    let stmts = &mut doc.scenes[0].statements;
+    let keyframed = stmts.iter().any(|st| {
+        matches!(st, Statement::Animate(a) if a.target == name
+            && a.keyframes.iter().flat_map(|k| &k.transforms).any(|t| matches!(t, Transform::Position(..))))
+    });
+    let (dx, dy) = tw.offset;
+    for st in stmts.iter_mut() {
+        match st {
+            Statement::Let { name: n, shape } if n == name => {
+                if let Some(b) = &tw.base {
+                    *shape = b.clone();
+                }
+                if !keyframed && (dx != 0.0 || dy != 0.0) {
+                    match shape {
+                        Shape::Rect { x, y, .. } | Shape::Image { x, y, .. } => {
+                            *x = round(*x + dx);
+                            *y = round(*y + dy);
+                        }
+                        Shape::Ellipse { cx, cy, .. } => {
+                            *cx = round(*cx + dx);
+                            *cy = round(*cy + dy);
+                        }
+                        Shape::Path(segs) => {
+                            let mv = |p: &mut Point| {
+                                p.x = round(p.x + dx);
+                                p.y = round(p.y + dy);
+                            };
+                            for seg in segs.iter_mut() {
+                                match seg {
+                                    PathSeg::MoveTo(p) | PathSeg::LineTo(p) => mv(p),
+                                    PathSeg::CurveTo { c1, c2, p } => {
+                                        mv(c1);
+                                        mv(c2);
+                                        mv(p);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Statement::Animate(a) if a.target == name && keyframed => {
+                for kf in &mut a.keyframes {
+                    for t in &mut kf.transforms {
+                        if let Transform::Position(x, y) = t {
+                            *x = round(*x + dx);
+                            *y = round(*y + dy);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(w) = tw.stroke_width.filter(|w| (*w - stroke_width).abs() > 1e-6) {
+        let w = round(w);
+        let mut set = false;
+        for st in stmts.iter_mut() {
+            if let Statement::Assign { target, property: Property::StrokeWidth, value } = st {
+                if target == name {
+                    *value = Value::Number(w);
+                    set = true;
+                }
+            }
+        }
+        if !set {
+            let at = stmts
+                .iter()
+                .rposition(|st| matches!(st, Statement::Assign { target, .. } if target == name))
+                .or_else(|| stmts.iter().position(|st| matches!(st, Statement::Let { name: n, .. } if n == name)))
+                .expect("the shape is declared");
+            stmts.insert(
+                at + 1,
+                Statement::Assign {
+                    target: name.to_string(),
+                    property: Property::StrokeWidth,
+                    value: Value::Number(w),
+                },
+            );
+        }
+    }
 }
 
 /// What the sprite pass (v1.8) did to a document.
@@ -1336,6 +1696,9 @@ pub struct Verification {
     /// Shapes the decompiler emitted that the audit (v1.7) measured as not
     /// improving the reconstruction, and took out. 0 for a given document.
     pub audited_out: usize,
+    /// Shapes whose size, position or stroke width the refinement (v1.9)
+    /// moved. 0 for a given document.
+    pub refined: usize,
     /// Shapes drawn as sprites of their own pixels (v1.8). For a given
     /// document, the `image()` shapes other than the plate.
     pub sprites: usize,
@@ -1359,6 +1722,7 @@ pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verifi
         chosen.background,
         chosen.plate,
         chosen.audited_out,
+        chosen.refined,
         chosen.sprites,
     ))
 }
@@ -1395,6 +1759,7 @@ pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verific
         Background::Auto,
         plate,
         0,
+        0,
         sprite_count,
     ))
 }
@@ -1407,6 +1772,7 @@ fn summarise(
     background: Background,
     plate: Plate,
     audited_out: usize,
+    refined: usize,
     sprites: usize,
 ) -> Verification {
     let text = vac_format::write(&doc);
@@ -1437,6 +1803,7 @@ fn summarise(
         animate_blocks,
         keyframes,
         audited_out,
+        refined,
         sprites,
     }
 }

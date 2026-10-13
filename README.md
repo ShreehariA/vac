@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.8)
+## Where VAC is today (v1.9)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -53,7 +53,8 @@ choice is tried several ways: segmentation, background rule, raster versus
 vector plate. Each candidate is re-rendered and scored against the source,
 and the one that reconstructs best wins. Then every shape in the winner is
 measured against its own absence, and a shape the reconstruction is no
-better with is taken out.
+better with is taken out. Finally each remaining shape's size, position
+and stroke width are nudged to wherever the pixels agree best.
 
 **How well**, against the corpus in `examples/wild/` (default quality):
 
@@ -61,15 +62,15 @@ better with is taken out.
 |---|---|---|---|
 | `vac_control.mp4` | VAC's own output, two moving balls | 46.6 dB | 0.971 |
 | `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
-| `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 44.1 dB | 0.990 |
-| `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 39.5 dB | 0.976 |
-| `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.5 dB | 0.984 |
-| `real_newtons_cradle.gif` | Wikimedia photograph | 29.4 dB | 0.919 |
-| `real_loader.gif` | Wikimedia 32 px spinner | 25.7 dB | 0.732 |
-| `real_pendulum.gif` | Wikimedia diagram | 22.6 dB | 0.622 |
-| `testsrc2.mp4` | ffmpeg test card with noise | 22.2 dB | 0.995 |
-| `real_double_pendulum.gif` | Wikimedia diagram with trails | 20.9 dB | 0.505 |
-| `mandelbrot.mp4` | ffmpeg fractal zoom | 12.0 dB | 0.766 |
+| `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 44.4 dB | 0.990 |
+| `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
+| `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
+| `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
+| `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
+| `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.640 |
+| `testsrc2.mp4` | ffmpeg test card with noise | 22.4 dB | 0.995 |
+| `real_double_pendulum.gif` | Wikimedia diagram with trails | 21.5 dB | 0.594 |
+| `mandelbrot.mp4` | ffmpeg fractal zoom | 12.0 dB | 0.770 |
 
 What it still gets wrong is listed, measured, in `docs/frontier.md`. The
 rate–distortion curves are in `docs/rate-distortion.md`. The sections after
@@ -1900,7 +1901,7 @@ Three measured rules decide, and each one came from a failure:
    drawbox square, keyframed a pixel off, for a PNG of its own blurred
    edges. With thin shapes allowed, `outlined.vac`'s ring (radius 49.8 for 50)
    gave up 5.7 dB to a PNG copy of itself. Both are geometry errors, which
-   are the vector fit's to fix (now `docs/frontier.md` item 3).
+   are the vector fit's to fix, recorded as frontier item 3 and fixed in v1.9.
 2. **It must reconstruct the shape's own footprint at least twice as well.**
 3. **It must pay for its bytes**: about 0.04 dB of clip PSNR per KB at
    quality 50, scaled by the dial. Without this rule the Mandelbrot zoom
@@ -1923,3 +1924,42 @@ recorded floors were never asserted by any test, so those fixtures could
 regress silently. One test now walks every fixture in `examples/` and
 requires a recorded row for each. With the keyframe tolerance broken tenfold
 it fails on `grow.vac`, which no test checked before.
+
+## v1.9 — The fit is whatever reconstructs best
+
+Every shape's geometry is *estimated* from its detected blob: a radius from
+its coverage, a position from its centroid, a stroke width from a ring's
+thickness. Through v1.8 that estimate was final. On a thin, high-contrast
+stroke a fifth of a pixel is worth decibels. `outlined.vac`'s 3 px ring came
+back with radius 49.8 instead of 50 and gave up 5.7 dB, which v1.8 had to
+refuse to paper over with a sprite.
+
+v1.9 measures the numbers themselves. Each shape's size, position offset and
+stroke width are nudged by coordinate descent, in steps of 0.5, then 0.2,
+then 0.1 px (the precision positions are written at). Each trial is scored
+the way the audit scores a shape: only the shape's footprint is re-rendered,
+using a `Tweak` the renderer applies without rebuilding anything, against
+the full measurement's per-frame tallies. The search scores trials on a
+sample of 12 frames. A winner must also win on every frame before it is
+written back, and the result is re-measured in full. Nothing is classified;
+the numbers simply move to where the pixels agree best, and they stay
+readable numbers.
+
+| | v1.8 | v1.9 |
+|---|---|---|
+| `outlined.vac` (hermetic) | 40.57 dB, IoU 0.988, ring r = 49.8 | **47.80 dB**, IoU **1.000**, r = **50.0** |
+| `spin.vac` (hermetic) | 34.4 dB, IoU 0.927 | **47.6 dB**, IoU **0.993** |
+| `shaded.vac` (hermetic) | 39.6 dB | **51.4 dB** |
+| `triangle.vac` (hermetic) | 35.8 dB, IoU 0.975 | **39.6 dB**, IoU 0.986 |
+| `real_loader.gif` | 25.75 dB, IoU 0.732 | **28.32 dB**, IoU **0.864** |
+| `real_double_pendulum.gif` | 20.87 dB, IoU 0.505 | **21.46 dB**, IoU **0.594** |
+| `motion_graphics.mp4` | 39.46 dB | **41.76 dB** |
+| `real_newtons_cradle.gif` | 29.39 dB | 29.95 dB |
+| `real_pendulum.gif` | 22.60 dB, IoU 0.622 | 22.88 dB, IoU 0.640 |
+
+Every corpus clip with room improved; the rest were already above the 45 dB
+footprint at which refinement doesn't bother. The test knocks three numbers
+off a perfect reconstruction (the ring's radius, the moving frame's
+keyframes, the card border's width), and refinement must put each back to
+within 0.1 px from the pixels alone. `vac::refine(frames, doc)` runs it on
+any document, and `--no-refine` turns it off.

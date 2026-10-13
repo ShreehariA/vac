@@ -202,6 +202,50 @@ impl SceneRig {
         let state = self.shapes.get(name).expect("declared shape exists");
         apply_animation(state, self.animations.get(name), t_ms)
     }
+
+    /// [`SceneRig::live`], with `tweak` applied when it names shape `k`.
+    fn live_tweaked(&self, k: usize, t_ms: u32, tweak: Option<&Tweak>) -> ShapeState {
+        let mut st = self.live(k, t_ms);
+        let Some(tw) = tweak.filter(|tw| tw.shape == k) else {
+            return st;
+        };
+        if let Some(b) = &tw.base {
+            st.base = b.clone();
+        }
+        if tw.offset != (0.0, 0.0) {
+            let p = st.position.unwrap_or_else(|| anchor_of(&st.base));
+            st.position = Some((p.0 + tw.offset.0, p.1 + tw.offset.1));
+        }
+        if let Some(w) = tw.stroke_width {
+            st.stroke_width = w.max(0.0);
+        }
+        st
+    }
+}
+
+/// The point a shape's `position()` keyframes move.
+fn anchor_of(base: &Shape) -> (f32, f32) {
+    match base {
+        Shape::Rect { x, y, .. } | Shape::Image { x, y, .. } => (*x, *y),
+        Shape::Ellipse { cx, cy, .. } => (*cx, *cy),
+        Shape::Path(segs) => vac_format::path_anchor(segs),
+    }
+}
+
+/// One shape changed, to try an alternative without rebuilding the rig
+/// (v1.9): its declared geometry replaced, its position moved in every
+/// frame, its stroke width set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tweak {
+    /// The shape, as an index into [`Rig::shapes`].
+    pub shape: usize,
+    /// Replacement geometry; `None` keeps the declared one. The anchor —
+    /// what `position()` moves — is the replacement's.
+    pub base: Option<Shape>,
+    /// Added to the shape's position in every frame.
+    pub offset: (f32, f32),
+    /// Replacement stroke width; `None` keeps it.
+    pub stroke_width: Option<f32>,
 }
 
 /// Where a shape stands in one frame — see [`Rig::placement`].
@@ -270,8 +314,13 @@ impl Rig {
     /// stroke included). `None` when it paints nothing there: fully
     /// transparent, unpainted, or off the canvas.
     pub fn bounds(&self, i: usize, k: usize) -> Option<[u32; 4]> {
+        self.bounds_with(i, k, None)
+    }
+
+    /// [`Rig::bounds`] with `tweak` applied.
+    pub fn bounds_with(&self, i: usize, k: usize, tweak: Option<&Tweak>) -> Option<[u32; 4]> {
         let (si, t) = self.timeline[i];
-        let st = self.scenes[si].live(k, t);
+        let st = self.scenes[si].live_tweaked(k, t, tweak);
         let r = paint_bounds(&st)?;
         let clamp = |v: f32, hi: u32| (v.max(0.0) as u32).min(hi);
         let b = [
@@ -288,11 +337,7 @@ impl Rig {
     pub fn placement(&self, i: usize, k: usize) -> Placement {
         let (si, t) = self.timeline[i];
         let st = self.scenes[si].live(k, t);
-        let anchor = match &st.base {
-            Shape::Rect { x, y, .. } | Shape::Image { x, y, .. } => (*x, *y),
-            Shape::Ellipse { cx, cy, .. } => (*cx, *cy),
-            Shape::Path(segs) => vac_format::path_anchor(segs),
-        };
+        let anchor = anchor_of(&st.base);
         Placement {
             position: st.position.unwrap_or(anchor),
             scale: st.scale,
@@ -304,7 +349,18 @@ impl Rig {
     /// Render the rectangle `[x0, y0, x1, y1)` of frame `i`, drawing only
     /// the shapes `draw(k)` admits, as non-premultiplied RGBA8 rows of
     /// `x1 - x0` pixels.
-    pub fn render_region(&self, i: usize, rect: [u32; 4], mut draw: impl FnMut(usize) -> bool) -> Vec<u8> {
+    pub fn render_region(&self, i: usize, rect: [u32; 4], draw: impl FnMut(usize) -> bool) -> Vec<u8> {
+        self.render_region_with(i, rect, draw, None)
+    }
+
+    /// [`Rig::render_region`] with `tweak` applied.
+    pub fn render_region_with(
+        &self,
+        i: usize,
+        rect: [u32; 4],
+        mut draw: impl FnMut(usize) -> bool,
+        tweak: Option<&Tweak>,
+    ) -> Vec<u8> {
         let (si, t) = self.timeline[i];
         let scene = &self.scenes[si];
         let (w, h) = (rect[2].saturating_sub(rect[0]), rect[3].saturating_sub(rect[1]));
@@ -314,7 +370,7 @@ impl Rig {
         let origin = Transform::from_translate(-(rect[0] as f32), -(rect[1] as f32));
         for k in 0..scene.declared.len() {
             if draw(k) {
-                draw_shape(&mut pixmap, &scene.live(k, t), origin);
+                draw_shape(&mut pixmap, &scene.live_tweaked(k, t, tweak), origin);
             }
         }
         unpremultiply(pixmap.data(), w.max(1), h.max(1))
