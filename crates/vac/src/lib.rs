@@ -237,6 +237,8 @@ struct Chosen {
     audited_out: usize,
     /// Shapes whose geometry the refinement (v1.9) moved.
     refined: usize,
+    /// Shapes whose motion was re-measured from their pixels (v1.11).
+    moved: usize,
     /// Shapes drawn as sprites of their own pixels (v1.8).
     sprites: usize,
 }
@@ -249,7 +251,7 @@ struct Chosen {
 /// content classifier decides; the reconstruction does.
 fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let chosen = choose(frames, opts)?;
-    if !opts.audit && !opts.refine && !opts.sprites {
+    if !opts.audit && !opts.refine && !opts.motion && !opts.sprites {
         return Ok(chosen);
     }
     let fidelity = match chosen.fidelity {
@@ -271,6 +273,12 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
     } else {
         (a.document, a.fidelity, 0)
     };
+    let (document, fidelity, moved) = if opts.motion {
+        let m = motion_measured(frames, document, fidelity, opts.quality)?;
+        (m.document, m.fidelity, m.moved.len())
+    } else {
+        (document, fidelity, 0)
+    };
     let (document, fidelity, sprites) = if opts.sprites {
         let sp = sprites_measured(frames, document, fidelity, opts.quality)?;
         (sp.document, sp.fidelity, sp.sprites.len())
@@ -282,6 +290,7 @@ fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Ch
         fidelity: Some(fidelity),
         audited_out: a.removed.len(),
         refined,
+        moved,
         sprites,
         ..chosen
     })
@@ -313,43 +322,66 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
             fidelity: None,
             audited_out: 0,
             refined: 0,
+            moved: 0,
             sprites: 0,
         });
     }
     // The static layer and its stripping depend only on the background
     // rule, so each background is prepared once and its segmentation
-    // candidates share it read-only, running concurrently (at most
-    // `MAX_CONCURRENT_CANDIDATES` at once). The winner is then picked in a
+    // candidates share it read-only. The backgrounds are prepared side by
+    // side and every candidate runs concurrently, at most
+    // `MAX_CONCURRENT_CANDIDATES` at once. The winner is then picked in a
     // fixed candidate order, so the result is the same as a sequential
     // search.
     let width = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
         .clamp(1, MAX_CONCURRENT_CANDIDATES);
+    let per_background = (width / bgs.len()).max(1);
+    type Run = ((Background, Segmentation), Result<(Document, Fidelity)>);
+    let runs: Vec<Result<Vec<Run>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = bgs
+            .iter()
+            .map(|&background| {
+                scope.spawn(move || -> Result<Vec<Run>> {
+                    let prepared = vac_decompiler::prepare(frames.to_vec(), opts.static_layer, background)?;
+                    let mut out: Vec<Run> = Vec::new();
+                    for chunk in segs.chunks(per_background) {
+                        let chunk_results: Vec<Result<(Document, Fidelity)>> = std::thread::scope(|inner| {
+                            let handles: Vec<_> = chunk
+                                .iter()
+                                .map(|&segmentation| {
+                                    let prepared = &prepared;
+                                    inner.spawn(move || -> Result<(Document, Fidelity)> {
+                                        let doc =
+                                            vac_decompiler::finish(prepared, segmentation, opts.quality, Plate::Vector);
+                                        let fid = measure(frames, &doc)?;
+                                        Ok((doc, fid))
+                                    })
+                                })
+                                .collect();
+                            handles
+                                .into_iter()
+                                .map(|h| h.join().expect("candidate thread panicked"))
+                                .collect()
+                        });
+                        out.extend(chunk.iter().map(|&s| (background, s)).zip(chunk_results));
+                    }
+                    Ok(out)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("background thread panicked"))
+            .collect()
+    });
     let mut combos: Vec<(Background, Segmentation)> = Vec::new();
     let mut results: Vec<Result<(Document, Fidelity)>> = Vec::new();
-    for &background in bgs {
-        let prepared = vac_decompiler::prepare(frames.to_vec(), opts.static_layer, background)?;
-        for chunk in segs.chunks(width) {
-            let chunk_results: Vec<Result<(Document, Fidelity)>> = std::thread::scope(|scope| {
-                let handles: Vec<_> = chunk
-                    .iter()
-                    .map(|&segmentation| {
-                        let prepared = &prepared;
-                        scope.spawn(move || -> Result<(Document, Fidelity)> {
-                            let doc = vac_decompiler::finish(prepared, segmentation, opts.quality, Plate::Vector);
-                            let fid = measure(frames, &doc)?;
-                            Ok((doc, fid))
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().expect("candidate thread panicked"))
-                    .collect()
-            });
-            combos.extend(chunk.iter().map(|&s| (background, s)));
-            results.extend(chunk_results);
+    for run in runs {
+        for (combo, result) in run? {
+            combos.push(combo);
+            results.push(result);
         }
     }
     let mut best: Option<Chosen> = None;
@@ -368,6 +400,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
                 fidelity: Some(fid),
                 audited_out: 0,
                 refined: 0,
+                moved: 0,
                 sprites: 0,
             });
         }
@@ -404,27 +437,47 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
         Plate::Camera => &[Plate::Camera],
         _ => &[Plate::Raster, Plate::Camera],
     };
-    for &plate in tries {
-        let prepared = match plate {
-            Plate::Camera => vac_decompiler::prepare_camera(frames.to_vec(), best.background)?,
-            _ => vac_decompiler::prepare_raster(frames.to_vec(), best.background)?,
-        };
-        let Some(prepared) = prepared else { continue };
-        let doc = vac_decompiler::finish(&prepared, best.segmentation, opts.quality, plate);
-        if !has_plate(&doc) {
-            continue;
+    // The plates are independent of each other, so they are tried side by
+    // side.
+    let (segmentation, background) = (best.segmentation, best.background);
+    let tried: Vec<Result<Option<Chosen>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = tries
+            .iter()
+            .map(|&plate| {
+                scope.spawn(move || -> Result<Option<Chosen>> {
+                    let prepared = match plate {
+                        Plate::Camera => vac_decompiler::prepare_camera(frames.to_vec(), background)?,
+                        _ => vac_decompiler::prepare_raster(frames.to_vec(), background)?,
+                    };
+                    let Some(prepared) = prepared else { return Ok(None) };
+                    let doc = vac_decompiler::finish(&prepared, segmentation, opts.quality, plate);
+                    if !has_plate(&doc) {
+                        return Ok(None);
+                    }
+                    let fid = measure(frames, &doc)?;
+                    Ok(Some(Chosen {
+                        document: doc,
+                        segmentation,
+                        background,
+                        plate,
+                        fidelity: Some(fid),
+                        audited_out: 0,
+                        refined: 0,
+                        moved: 0,
+                        sprites: 0,
+                    }))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("plate thread panicked"))
+            .collect()
+    });
+    for t in tried {
+        if let Some(c) = t? {
+            plated.push(c);
         }
-        let fid = measure(frames, &doc)?;
-        plated.push(Chosen {
-            document: doc,
-            segmentation: best.segmentation,
-            background: best.background,
-            plate,
-            fidelity: Some(fid),
-            audited_out: 0,
-            refined: 0,
-            sprites: 0,
-        });
     }
     let top = plated.into_iter().reduce(|a, b| {
         if reconstructs_better(b.fidelity.as_ref().expect("measured"), a.fidelity.as_ref().expect("measured")) {
@@ -771,6 +824,7 @@ fn refine_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity) -> Resul
                 base: resized.filter(|_| p[2] != 0.0 || p[3] != 0.0),
                 offset: (p[0], p[1]),
                 stroke_width: (p[4] != 0.0).then(|| (stroke_width + p[4]).max(0.5)),
+                animation: None,
             }
         };
         // The clip score with tweak `p`, from the frames in `which`.
@@ -951,6 +1005,489 @@ fn apply_tweak(doc: &mut Document, name: &str, tw: &vac_compiler::render::Tweak,
             );
         }
     }
+}
+
+/// What the motion pass (v1.11) did to a document.
+#[derive(Debug, Clone)]
+pub struct Moved {
+    pub document: Document,
+    pub fidelity: Fidelity,
+    /// The shapes whose motion was re-keyframed.
+    pub moved: Vec<String>,
+}
+
+/// Motion, measured from the pixels (v1.11).
+///
+/// The tracker keyframes a shape from its blob's centroid and, for a
+/// turning shape, its second moments — estimates that drift whenever the
+/// blob is lit unevenly, crossed, or merged for a frame. Here each moving
+/// shape's own pixels, at the frame its vector shape matches best, are
+/// registered against every other frame it is on screen: the rigid motion
+/// (a turn and a translation, the turn only for elongated or already
+/// turning shapes) that best maps them there, by a small grid about the
+/// shape's keyframed placement and its registered neighbours' heading,
+/// then a pattern search to a fiftieth of a pixel, under the camera's
+/// robust error. The registered track is simplified into keyframes again,
+/// and two candidates are scored like the audit — the registered motion at
+/// the shape's own keyframe times (no new bytes), and at the frames the
+/// simplification keeps. One is kept only if the clip reconstructs better
+/// and the gain pays for any keyframes it adds, at the price per byte the
+/// sprite pass pays.
+pub fn motion(original: &[VideoFrame], doc: Document, quality: f32) -> Result<Moved> {
+    let fid = measure(original, &doc)?;
+    motion_measured(original, doc, fid, quality)
+}
+
+/// [`motion`] on a document whose fidelity is already measured.
+fn motion_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity, quality: f32) -> Result<Moved> {
+    use vac_compiler::render::{Rig, Tweak};
+    let unchanged = |document: Document, fidelity: Fidelity| Moved {
+        document,
+        fidelity,
+        moved: Vec::new(),
+    };
+    if doc.scenes.len() != 1 || fid.frames.len() != frames.len() {
+        return Ok(unchanged(doc, fid));
+    }
+    let tol = vac_decompiler::Tolerances::from_quality(quality);
+    let mut rig = Rig::new(&doc)?;
+    let count = rig.frame_count();
+    let idx = aligned_indices(frames, count, doc.canvas.fps);
+    let mut wanted: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (j, &i) in idx.iter().enumerate() {
+        wanted[i].push(j);
+    }
+    let bg = ink_background(frames);
+    let opts = CompareOptions::default();
+    let thr = vac_metrics::DEFAULT_INK_THRESHOLD_SQ as i64;
+    let compared: Vec<f64> = fid.frames.iter().map(|f| f.compared_pixels as f64).collect();
+    let mut sse: Vec<f64> = fid.frames.iter().map(|f| f.residual * 3.0 * f.compared_pixels as f64).collect();
+    let mut inter: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px - f.missing_px) as i64).collect();
+    let mut union: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px + f.spurious_px) as i64).collect();
+    let frame_res = |sse: f64, c: f64| if c > 0.0 { sse / (3.0 * c) } else { 0.0 };
+    let frame_iou = |i: i64, u: i64| if u > 0 { i as f64 / u as f64 } else { 1.0 };
+    let mut res_sum: f64 = (0..frames.len()).map(|j| frame_res(sse[j], compared[j])).sum();
+    let mut iou_sum: f64 = (0..frames.len()).map(|j| frame_iou(inter[j], union[j])).sum();
+    let names: Vec<String> = rig.shapes(0).to_vec();
+    let mut bounds: Vec<Vec<Option<[u32; 4]>>> =
+        (0..count).map(|i| (0..names.len()).map(|m| rig.bounds(i, m)).collect()).collect();
+    let overlaps = |a: Option<[u32; 4]>, b: [u32; 4]| {
+        a.is_some_and(|a| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3])
+    };
+    let (cw, ch) = (doc.canvas.width, doc.canvas.height);
+    let mut current = doc.clone();
+    let mut moved = Vec::new();
+    // Bilinear sample of a source frame at continuous point p.
+    let sample = |f: &VideoFrame, p: (f32, f32)| -> Option<[f32; 3]> {
+        let (x, y) = (p.0 - 0.5, p.1 - 0.5);
+        if x < 0.0 || y < 0.0 || x > (f.width - 1) as f32 || y > (f.height - 1) as f32 {
+            return None;
+        }
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(f.width as usize - 1), (y0 + 1).min(f.height as usize - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let w = f.width as usize;
+        let mut out = [0f32; 3];
+        for c in 0..3 {
+            let at = |xx: usize, yy: usize| f.pixels[(yy * w + xx) * 4 + c] as f32;
+            out[c] = (at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy) + (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy;
+        }
+        Some(out)
+    };
+    for (k, name) in names.iter().enumerate() {
+        if name == "bg" || name == "plate" {
+            continue;
+        }
+        let Some(Statement::Let { shape: base, .. }) = current.scenes[0]
+            .statements
+            .iter()
+            .find(|st| matches!(st, Statement::Let { name: n, .. } if n == name))
+            .cloned()
+        else {
+            continue;
+        };
+        if matches!(base, Shape::Image { .. }) {
+            continue;
+        }
+        let Some(anim) = current.scenes[0].statements.iter().find_map(|st| match st {
+            Statement::Animate(a) if a.target == *name => Some(a.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        if !anim.keyframes.iter().flat_map(|kf| &kf.transforms).any(|t| matches!(t, Transform::Position(..))) {
+            continue;
+        }
+        let alive: Vec<usize> = (0..count).filter(|&i| !wanted[i].is_empty() && bounds[i][k].is_some()).collect();
+        if alive.len() < 3 || alive.last().unwrap() - alive[0] + 1 != alive.len() {
+            continue;
+        }
+        // 1. The frame where the shape best matches its own pixels.
+        let mut best_ref = (0.0f64, alive[0]);
+        let mut presence_of: Vec<Vec<bool>> = Vec::new();
+        let mut cover_of: Vec<Vec<bool>> = Vec::new();
+        for &i in &alive {
+            let r = bounds[i][k].unwrap();
+            let rw = (r[2] - r[0]) as usize;
+            let without = rig.render_region(i, r, |m| m != k && overlaps(bounds[i][m], r));
+            let alone = rig.render_region(i, r, |m| m == k);
+            let src = &frames[wanted[i][0]];
+            let (mut it, mut un) = (0usize, 0usize);
+            let mut pres = vec![false; rw * (r[3] - r[1]) as usize];
+            let mut cov = vec![false; rw * (r[3] - r[1]) as usize];
+            for y in r[1]..r[3] {
+                for x in r[0]..r[2] {
+                    let q = ((y - r[1]) as usize * rw + (x - r[0]) as usize) * 4;
+                    let sp = ((y * src.width + x) * 4) as usize;
+                    let o = &src.pixels[sp..sp + 4];
+                    let d: i64 = (0..3).map(|c| (o[c] as i64 - without[q + c] as i64).pow(2)).sum();
+                    let p = d > thr;
+                    let c = alone[q + 3] >= 128;
+                    pres[q / 4] = p;
+                    cov[q / 4] = c;
+                    it += (p && c) as usize;
+                    un += (p || c) as usize;
+                }
+            }
+            let iou = if un > 0 { it as f64 / un as f64 } else { 0.0 };
+            if iou > best_ref.0 {
+                best_ref = (iou, i);
+            }
+            presence_of.push(pres);
+            cover_of.push(cov);
+        }
+        let (ref_iou, iref) = best_ref;
+        if ref_iou < 0.3 {
+            continue;
+        }
+        let a_ref = alive.iter().position(|&i| i == iref).unwrap();
+        let r = bounds[iref][k].unwrap();
+        let rw = (r[2] - r[0]) as usize;
+        let src_ref = &frames[wanted[iref][0]];
+        // 2. The template: the shape's own pixels at the reference frame.
+        // The shape's own pixels: where the source differs from the scene
+        // without it *and* the shape itself paints, give or take 2 px —
+        // not every pixel some other shape got wrong.
+        let rh = (r[3] - r[1]) as usize;
+        let near_cover = |x: usize, y: usize| {
+            let (x0, x1) = (x.saturating_sub(2), (x + 2).min(rw - 1));
+            let (y0, y1) = (y.saturating_sub(2), (y + 2).min(rh - 1));
+            (y0..=y1).any(|yy| (x0..=x1).any(|xx| cover_of[a_ref][yy * rw + xx]))
+        };
+        let mut template: Vec<((f32, f32), [f32; 3])> = Vec::new();
+        for y in r[1]..r[3] {
+            for x in r[0]..r[2] {
+                let (lx, ly) = ((x - r[0]) as usize, (y - r[1]) as usize);
+                if presence_of[a_ref][ly * rw + lx] && near_cover(lx, ly) {
+                    let sp = ((y * src_ref.width + x) * 4) as usize;
+                    let o = &src_ref.pixels[sp..sp + 4];
+                    template.push(((x as f32 + 0.5, y as f32 + 0.5), [o[0] as f32, o[1] as f32, o[2] as f32]));
+                }
+            }
+        }
+        if template.len() < 12 {
+            continue;
+        }
+        if template.len() > 1500 {
+            let step = template.len() as f32 / 1500.0;
+            template = (0..1500).map(|n| template[(n as f32 * step) as usize]).collect();
+        }
+        // Rotation centre: where the shape turns about, at the reference.
+        let pl = rig.placement(iref, k);
+        let centre_off = match &base {
+            Shape::Rect { w, h, .. } => (w * 0.5 * pl.scale, h * 0.5 * pl.scale),
+            _ => (0.0, 0.0),
+        };
+        let c_ref = (pl.position.0 + centre_off.0, pl.position.1 + centre_off.1);
+        let elongated = match &base {
+            Shape::Rect { w, h, .. } => w.max(*h) / w.min(*h).max(0.5) >= 1.5,
+            Shape::Ellipse { rx, ry, .. } => rx.max(*ry) / rx.min(*ry).max(0.25) >= 1.5,
+            _ => {
+                let bw = (r[2] - r[0]) as f32;
+                let bh = (r[3] - r[1]) as f32;
+                bw.max(bh) / bw.min(bh).max(1.0) >= 1.5
+            }
+        };
+        let turns = elongated
+            || anim.keyframes.iter().flat_map(|kf| &kf.transforms).any(|t| matches!(t, Transform::Rotate(_)));
+        const CEIL: f32 = 3.0 * 40.0 * 40.0;
+        let cost = |f: &VideoFrame, ang: f32, m: (f32, f32)| -> f64 {
+            let (sn, cs) = ang.sin_cos();
+            let mut sum = 0f64;
+            let mut n = 0usize;
+            for &(q, col) in &template {
+                let (dx, dy) = (q.0 - c_ref.0, q.1 - c_ref.1);
+                let p = (cs * dx - sn * dy + m.0, sn * dx + cs * dy + m.1);
+                if let Some(v) = sample(f, p) {
+                    let d: f32 = (0..3).map(|c| (v[c] - col[c]).powi(2)).sum();
+                    sum += d.min(CEIL) as f64;
+                    n += 1;
+                }
+            }
+            if n * 2 < template.len() {
+                f64::INFINITY
+            } else {
+                sum / n as f64 + CEIL as f64 * (template.len() - n) as f64 / template.len() as f64
+            }
+        };
+        let register = |f: &VideoFrame, guesses: &[(f32, (f32, f32))]| -> (f32, (f32, f32)) {
+            let mut best = (f64::INFINITY, guesses[0].0, guesses[0].1);
+            // The basin: a small grid about each guess — where the shape's
+            // own keyframes put it, and where its registered neighbours
+            // say it is heading.
+            let angs: Vec<f32> = if turns { vec![-0.03, 0.0, 0.03] } else { vec![0.0] };
+            for &(ga, gm) in guesses {
+                for &da in &angs {
+                    for dy in [-3.0f32, -1.5, 0.0, 1.5, 3.0] {
+                        for dx in [-3.0f32, -1.5, 0.0, 1.5, 3.0] {
+                            let (a, m) = (ga + da, (gm.0 + dx, gm.1 + dy));
+                            let c = cost(f, a, m);
+                            if c < best.0 {
+                                best = (c, a, m);
+                            }
+                        }
+                    }
+                }
+            }
+            // Then a pattern search down to a fiftieth of a pixel.
+            let (mut sa, mut st) = (0.02f32, 1.0f32);
+            for _ in 0..300 {
+                let (_, a, m) = best;
+                let mut trials = vec![(a, (m.0 + st, m.1)), (a, (m.0 - st, m.1)), (a, (m.0, m.1 + st)), (a, (m.0, m.1 - st))];
+                if turns {
+                    trials.push((a + sa, m));
+                    trials.push((a - sa, m));
+                }
+                let mut improved = false;
+                for (ta, tm) in trials {
+                    let c = cost(f, ta, tm);
+                    if c < best.0 {
+                        best = (c, ta, tm);
+                        improved = true;
+                    }
+                }
+                if !improved {
+                    sa *= 0.5;
+                    st *= 0.5;
+                    if st < 0.02 && sa < 0.0005 {
+                        break;
+                    }
+                }
+            }
+            (best.1, best.2)
+        };
+        // 3. Register outward from the reference frame.
+        let keyed = |i: usize| -> (f32, (f32, f32)) {
+            let p = rig.placement(i, k);
+            let off = match &base {
+                Shape::Rect { w, h, .. } => (w * 0.5 * p.scale, h * 0.5 * p.scale),
+                _ => (0.0, 0.0),
+            };
+            ((p.rotation - pl.rotation).to_radians(), (p.position.0 + off.0, p.position.1 + off.1))
+        };
+        let mut reg: Vec<(f32, (f32, f32))> = vec![(0.0, c_ref); alive.len()];
+        for dir in [1i64, -1] {
+            let mut prev = (0.0f32, c_ref);
+            let mut prev2: Option<(f32, (f32, f32))> = None;
+            let mut a = a_ref as i64 + dir;
+            while a >= 0 && (a as usize) < alive.len() {
+                let heading = match prev2 {
+                    Some(p2) => (2.0 * prev.0 - p2.0, (2.0 * prev.1 .0 - p2.1 .0, 2.0 * prev.1 .1 - p2.1 .1)),
+                    None => prev,
+                };
+                let got = register(&frames[wanted[alive[a as usize]][0]], &[keyed(alive[a as usize]), heading]);
+                reg[a as usize] = got;
+                prev2 = Some(prev);
+                prev = got;
+                a += dir;
+            }
+        }
+        // 4. Keyframes: RDP on the transform, measured at the template's
+        // corners.
+        let (tx0, ty0, tx1, ty1) = template.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, (q, _)| {
+            (b.0.min(q.0), b.1.min(q.1), b.2.max(q.0), b.3.max(q.1))
+        });
+        let corners = [(tx0, ty0), (tx1, ty0), (tx0, ty1), (tx1, ty1)];
+        let place = |t: (f32, (f32, f32)), q: (f32, f32)| -> (f32, f32) {
+            let (sn, cs) = t.0.sin_cos();
+            let (dx, dy) = (q.0 - c_ref.0, q.1 - c_ref.1);
+            (cs * dx - sn * dy + t.1 .0, sn * dx + cs * dy + t.1 .1)
+        };
+        let times: Vec<u32> = alive.iter().map(|&i| rig.time_ms(i)).collect();
+        let err = |a: usize, b: usize, t: usize| -> f32 {
+            let span = (times[b] - times[a]).max(1) as f32;
+            let u = (times[t] - times[a]) as f32 / span;
+            let lerp = |x: f32, y: f32| x + (y - x) * u;
+            let v = (lerp(reg[a].0, reg[b].0), (lerp(reg[a].1 .0, reg[b].1 .0), lerp(reg[a].1 .1, reg[b].1 .1)));
+            corners
+                .iter()
+                .map(|&q| {
+                    let (p1, p2) = (place(v, q), place(reg[t], q));
+                    ((p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2)).sqrt()
+                })
+                .fold(0.0, f32::max)
+        };
+        let n = alive.len();
+        let mut keep = vec![false; n];
+        keep[0] = true;
+        keep[n - 1] = true;
+        let mut stack = vec![(0usize, n - 1)];
+        let ktol = tol.keyframe_px * 0.5;
+        while let Some((a, b)) = stack.pop() {
+            if b <= a + 1 {
+                continue;
+            }
+            let (worst, at) = (a + 1..b).map(|t| (err(a, b, t), t)).fold((0.0f32, a), |m, x| if x.0 > m.0 { x } else { m });
+            if worst > ktol {
+                keep[at] = true;
+                stack.push((a, at));
+                stack.push((at, b));
+            }
+        }
+        // 5. Candidate animations: the registered motion sampled at the
+        // shape's own keyframe times (no new bytes), and at the frames the
+        // simplification kept. Every other channel stays as it was.
+        let theta_ref = pl.rotation;
+        let round = |v: f32| (v * 10.0).round() / 10.0;
+        let at_time = |t: u32| -> (f32, (f32, f32)) {
+            let t = t.clamp(times[0], times[n - 1]);
+            let b = times.iter().position(|&x| x >= t).unwrap_or(n - 1);
+            if b == 0 || times[b] == t {
+                return reg[b];
+            }
+            let a = b - 1;
+            let u = (t - times[a]) as f32 / (times[b] - times[a]).max(1) as f32;
+            let l = |x: f32, y: f32| x + (y - x) * u;
+            (l(reg[a].0, reg[b].0), (l(reg[a].1 .0, reg[b].1 .0), l(reg[a].1 .1, reg[b].1 .1)))
+        };
+        let build = |at: &[u32]| -> vac_format::Animation {
+            let mut keyframes: Vec<vac_format::Keyframe> = anim
+                .keyframes
+                .iter()
+                .filter_map(|kf| {
+                    let rest: Vec<Transform> = kf
+                        .transforms
+                        .iter()
+                        .filter(|t| !matches!(t, Transform::Position(..)) && !(turns && matches!(t, Transform::Rotate(_))))
+                        .cloned()
+                        .collect();
+                    (!rest.is_empty()).then(|| vac_format::Keyframe { time_ms: kf.time_ms, transforms: rest })
+                })
+                .collect();
+            for &t in at {
+                let (ang, m) = at_time(t);
+                let i = alive[times.iter().position(|&x| x >= t.min(times[n - 1])).unwrap_or(n - 1)];
+                let scale = rig.placement(i, k).scale;
+                let off = match &base {
+                    Shape::Rect { w, h, .. } => (w * 0.5 * scale, h * 0.5 * scale),
+                    _ => (0.0, 0.0),
+                };
+                let mut tr = vec![Transform::Position(round(m.0 - off.0), round(m.1 - off.1))];
+                if turns {
+                    tr.push(Transform::Rotate(round(theta_ref + ang.to_degrees())));
+                }
+                match keyframes.iter_mut().find(|kf| kf.time_ms == t) {
+                    Some(kf) => kf.transforms.extend(tr),
+                    None => keyframes.push(vac_format::Keyframe { time_ms: t, transforms: tr }),
+                }
+            }
+            keyframes.sort_by_key(|kf| kf.time_ms);
+            vac_format::Animation { target: name.clone(), keyframes, easing: anim.easing }
+        };
+        let own_times: Vec<u32> = anim
+            .keyframes
+            .iter()
+            .filter(|kf| kf.transforms.iter().any(|t| matches!(t, Transform::Position(..))))
+            .map(|kf| kf.time_ms)
+            .collect();
+        let kept_times: Vec<u32> = (0..n).filter(|&a| keep[a]).map(|a| times[a]).collect();
+        let anim_bytes = |a: &vac_format::Animation| -> i64 {
+            let mut d = current.clone();
+            d.scenes[0].statements = vec![Statement::Animate(a.clone())];
+            vac_format::write(&d).len() as i64
+        };
+        let old_bytes = anim_bytes(&anim);
+        let m = 2f64.powf((50.0 - quality.clamp(0.0, 100.0) as f64) / 25.0);
+        let price = SPRITE_MIN_GAIN_PER_BYTE * m * m;
+        // 6. Score each on every frame either version is visible in; keep
+        // the one that buys the most, if it pays for its bytes.
+        let mut chosen: Option<(f64, vac_format::Animation, Vec<(usize, f64, i64, i64)>)> = None;
+        for cand in [build(&own_times), build(&kept_times)] {
+        let tw = Tweak { shape: k, base: None, offset: (0.0, 0.0), stroke_width: None, animation: Some(cand.clone()) };
+        let mut deltas: Vec<(usize, f64, i64, i64)> = Vec::new();
+        for i in 0..count {
+            if wanted[i].is_empty() {
+                continue;
+            }
+            let rr = match (bounds[i][k], rig.bounds_with(i, k, Some(&tw))) {
+                (Some(a), Some(b)) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => continue,
+            };
+            let rr = [rr[0], rr[1], rr[2].min(cw), rr[3].min(ch)];
+            let before = rig.render_region(i, rr, |m| overlaps(bounds[i][m], rr));
+            let after = rig.render_region_with(i, rr, |m| m == k || overlaps(bounds[i][m], rr), Some(&tw));
+            for &j in &wanted[i] {
+                let (s0, _, i0, u0) = region_tallies(&frames[j], &before, rr, bg, &opts);
+                let (s1, _, i1, u1) = region_tallies(&frames[j], &after, rr, bg, &opts);
+                if s0 != s1 || i0 != i1 || u0 != u1 {
+                    deltas.push((j, s1 - s0, i1 - i0, u1 - u0));
+                }
+            }
+        }
+        let (mut res_c, mut iou_c) = (res_sum, iou_sum);
+        for &(j, ds, di, du) in &deltas {
+            res_c += frame_res(sse[j] + ds, compared[j]) - frame_res(sse[j], compared[j]);
+            iou_c += frame_iou(inter[j] + di, union[j] + du) - frame_iou(inter[j], union[j]);
+        }
+        let gain = (res_sum.max(1e-9) / res_c.max(1e-9)).ln() + (iou_c.max(1e-9) / iou_sum.max(1e-9)).ln();
+        let added = (anim_bytes(&cand) - old_bytes) as f64;
+        // Below the default quality the dial only ever takes keyframes
+        // away; the motion pass may correct them there, not add to them
+        // (on `spin.vac` it made quality 0 larger than quality 25).
+        if added > 0.0 && quality < vac_decompiler::track::DEFAULT_QUALITY {
+            continue;
+        }
+        let net = gain - price * added.max(0.0);
+        if gain > 0.0 && net > 0.0 && chosen.as_ref().is_none_or(|c| net > c.0) {
+            chosen = Some((net, cand, deltas));
+        }
+        }
+        let Some((_, new_anim, deltas)) = chosen else {
+            continue;
+        };
+        for st in &mut current.scenes[0].statements {
+            if let Statement::Animate(a) = st {
+                if a.target == *name {
+                    *a = new_anim.clone();
+                }
+            }
+        }
+        rig = Rig::new(&current)?;
+        for (i, row) in bounds.iter_mut().enumerate() {
+            row[k] = rig.bounds(i, k);
+        }
+        for (j, ds, di, du) in deltas {
+            sse[j] += ds;
+            inter[j] += di;
+            union[j] += du;
+        }
+        res_sum = (0..frames.len()).map(|j| frame_res(sse[j], compared[j])).sum();
+        iou_sum = (0..frames.len()).map(|j| frame_iou(inter[j], union[j])).sum();
+        moved.push(name.clone());
+    }
+    if moved.is_empty() {
+        return Ok(unchanged(doc, fid));
+    }
+    let mfid = measure(frames, &current)?;
+    if reconstructs_better(&fid, &mfid) {
+        return Ok(unchanged(doc, fid));
+    }
+    Ok(Moved {
+        document: current,
+        fidelity: mfid,
+        moved,
+    })
 }
 
 /// What the sprite pass (v1.8) did to a document.
@@ -1535,7 +2072,7 @@ pub fn decompile_to_target(
 }
 
 /// How many measured-search candidates may decompile at once.
-const MAX_CONCURRENT_CANDIDATES: usize = 3;
+const MAX_CONCURRENT_CANDIDATES: usize = 6;
 
 /// How much better `b` reconstructs than `a`: `ln(residual_a / residual_b)
 /// + ln(iou_b / iou_a)` — positive when better. The currency
@@ -1722,6 +2259,9 @@ pub struct Verification {
     /// Shapes whose size, position or stroke width the refinement (v1.9)
     /// moved. 0 for a given document.
     pub refined: usize,
+    /// Shapes whose keyframes the motion pass (v1.11) re-measured from
+    /// their own pixels. 0 for a given document.
+    pub moved: usize,
     /// Shapes drawn as sprites of their own pixels (v1.8). For a given
     /// document, the `image()` shapes other than the plate.
     pub sprites: usize,
@@ -1746,6 +2286,7 @@ pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verifi
         chosen.plate,
         chosen.audited_out,
         chosen.refined,
+        chosen.moved,
         chosen.sprites,
     ))
 }
@@ -1781,6 +2322,7 @@ pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verific
         plate,
         0,
         0,
+        0,
         sprite_count,
     ))
 }
@@ -1794,6 +2336,7 @@ fn summarise(
     plate: Plate,
     audited_out: usize,
     refined: usize,
+    moved: usize,
     sprites: usize,
 ) -> Verification {
     let text = vac_format::write(&doc);
@@ -1825,6 +2368,7 @@ fn summarise(
         keyframes,
         audited_out,
         refined,
+        moved,
         sprites,
     }
 }

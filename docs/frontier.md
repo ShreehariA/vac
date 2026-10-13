@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.10, default quality 50) and is
+table re-measured 2026-10-13 at v1.11, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -62,6 +62,7 @@ had blamed static dashes blinking under a sweeping arm).
 | `real_double_pendulum.gif`, v0.9 | 0.071 | 0.039 | 8425.9 | **616.6%** |
 | `real_double_pendulum.gif`, v1.7 | 0.498 | 0.355 | 560.5 | 9.7% |
 | `real_double_pendulum.gif`, v1.9 | 0.594 | 0.402 | 464.2 | 8.3% |
+| `real_double_pendulum.gif`, v1.11 | 0.621 | 0.385 | 406.3 | 6.2% |
 
 At v0.9 the double pendulum painted **more than six times** the ink its
 source had. The v1.7 audit takes out every fragment that made the picture
@@ -297,6 +298,15 @@ always true; only one of them was measurable.
   each mosaic point from the frames that see it most magnified, rather than
   letting a zoom's blurry early frames outvote its sharp late ones.
 
+- **v1.11 — motion, measured from the pixels.** The tracker's keyframes
+  come from blob centroids and second moments, which drift when a blob is lit
+  unevenly or crossed. Each mover's own pixels are now registered against
+  every frame it's on screen: a rigid turn and translation, by robust pattern
+  search seeded from its keyframes. The track is re-keyframed and kept only
+  when the clip measures better and the gain pays for any added keyframes.
+  `real_bouncing_ball` 44.36 → **46.37 dB**; `real_double_pendulum` IoU
+  0.594 → **0.621**; `crossing.vac` IoU 0.979 → **0.9999**.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -304,19 +314,19 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
-| `testsrc2.mp4` | 0.9951 | 0.9859 | 374.0 | 22.40 | 0.4% | 64 |
+| `testsrc2.mp4` | 0.9951 | 0.9859 | 372.7 | 22.42 | 0.4% | 64 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
 | `kenburns_watercolor.mp4` | 0.9920 | 0.9899 | 60.9 | 30.29 | 0.6% | 2 |
-| `real_bouncing_ball.gif` | 0.9900 | 0.9858 | 2.4 | 44.36 | 0.6% | 2 |
+| `real_bouncing_ball.gif` | 0.9905 | 0.9885 | 1.5 | 46.37 | 0.6% | 2 |
 | `mandelbrot.mp4` | 0.9896 | 0.9842 | 149.3 | 26.39 | 0.6% | 2 |
 | `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
 | `pan_portrait.mp4` | 0.9697 | 0.9580 | 3.7 | 42.47 | 1.5% | 1 |
-| `real_newtons_cradle.gif` | 0.9203 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
+| `real_newtons_cradle.gif` | 0.9204 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
-| `real_pendulum.gif` | 0.6398 | 0.5409 | 334.8 | 22.88 | 5.0% | 27 |
-| `real_double_pendulum.gif` | 0.5943 | 0.4017 | 464.2 | 21.46 | 8.3% | 419 |
+| `real_pendulum.gif` | 0.6430 | 0.5445 | 331.5 | 22.93 | 4.8% | 27 |
+| `real_double_pendulum.gif` | 0.6211 | 0.3853 | 406.3 | 22.04 | 6.2% | 419 |
 
 Flat-shaded content of exactly the kind the detector was built for, meaning
 VAC's own output and ffmpeg `drawbox` rectangles, reconstructs at 33–47 dB. The

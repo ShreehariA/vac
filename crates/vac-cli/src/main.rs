@@ -46,6 +46,7 @@ struct Knobs {
     plate: vac::Plate,
     audit: bool,
     refine: bool,
+    motion: bool,
     sprites: bool,
 }
 
@@ -170,6 +171,10 @@ enum Cmd {
         /// measures best.
         #[arg(long)]
         no_refine: bool,
+        /// Skip the motion pass (v1.11), which re-measures every mover's
+        /// keyframes by registering its own pixels from frame to frame.
+        #[arg(long)]
+        no_motion: bool,
         /// Rate control: instead of a fixed quality, find the smallest
         /// source whose reconstruction reaches this PSNR (dB).
         #[arg(long, value_name = "DB", conflicts_with = "quality")]
@@ -234,6 +239,10 @@ enum Cmd {
         /// measures best.
         #[arg(long)]
         no_refine: bool,
+        /// Skip the motion pass (v1.11), which re-measures every mover's
+        /// keyframes by registering its own pixels from frame to frame.
+        #[arg(long)]
+        no_motion: bool,
         /// Write PNG triptychs — source | reconstruction | ink map — of
         /// the worst-IoU frame, the worst-PSNR frame and the middle frame
         /// into this directory. In the ink map, white is ink both agree
@@ -265,6 +274,7 @@ fn main() -> Result<()> {
             no_audit,
             no_sprites,
             no_refine,
+            no_motion,
             target_psnr,
         } => run_decompile(
             &input,
@@ -278,6 +288,7 @@ fn main() -> Result<()> {
                 audit: !no_audit,
                 sprites: !no_sprites,
                 refine: !no_refine,
+                motion: !no_motion,
             },
             target_psnr,
         ),
@@ -293,6 +304,7 @@ fn main() -> Result<()> {
             no_audit,
             no_sprites,
             no_refine,
+            no_motion,
             dump,
             vac: given,
         } => {
@@ -304,6 +316,7 @@ fn main() -> Result<()> {
                 audit: !no_audit,
                 sprites: !no_sprites,
                 refine: !no_refine,
+                motion: !no_motion,
             };
             if let Some(file) = &given {
                 let doc = vac::read(file).with_context(|| format!("reading {}", file.display()))?;
@@ -340,9 +353,9 @@ fn run_verify(
     knobs: Knobs,
 ) -> Result<()> {
     if ab {
-        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, sprites: knobs.sprites })
+        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, sprites: knobs.sprites })
             .with_context(|| format!("verifying {} with layering", input.display()))?;
-        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, sprites: knobs.sprites })
+        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, sprites: knobs.sprites })
             .with_context(|| format!("verifying {} without layering", input.display()))?;
         if json {
             println!("{{");
@@ -356,7 +369,7 @@ fn run_verify(
         return Ok(());
     }
 
-    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, sprites: knobs.sprites })
+    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, sprites: knobs.sprites })
         .with_context(|| format!("verifying {}", input.display()))?;
     if json {
         println!("{{");
@@ -410,6 +423,9 @@ fn print_report(input: &Path, v: &vac::Verification) {
     }
     if v.refined > 0 {
         println!("    refine        moved {} shape(s) to where the pixels agree best", v.refined);
+    }
+    if v.moved > 0 {
+        println!("    motion        re-measured {} shape(s) from their own pixels", v.moved);
     }
     if v.sprites > 0 {
         println!("    sprites       {} shape(s) drawn as their own pixels", v.sprites);
@@ -480,7 +496,7 @@ fn json_body(v: &vac::Verification) -> String {
          \"residual\": {:.6}, \"psnr_db\": {:.4}, \"worst_psnr_db\": {:.4}, \
          \"missing_ink\": {:.6}, \"spurious_ink\": {:.6}, \
          \"shapes\": {}, \"animate_blocks\": {}, \"keyframes\": {}, \"vac_bytes\": {}, \
-         \"segmentation\": \"{:?}\", \"background\": \"{:?}\", \"plate\": \"{:?}\", \"audited_out\": {}, \"refined\": {}, \"sprites\": {} }}",
+         \"segmentation\": \"{:?}\", \"background\": \"{:?}\", \"plate\": \"{:?}\", \"audited_out\": {}, \"refined\": {}, \"moved\": {}, \"sprites\": {} }}",
         f.frames_compared,
         f.ink_iou,
         f.worst_iou,
@@ -499,6 +515,7 @@ fn json_body(v: &vac::Verification) -> String {
         v.plate,
         v.audited_out,
         v.refined,
+        v.moved,
         v.sprites,
     )
 }
@@ -588,7 +605,7 @@ fn run_decompile(
 fn run_dump(input: &Path, dir: &Path, static_layer: bool, knobs: Knobs) -> Result<()> {
     let frames = vac::load_video_frames(input)
         .with_context(|| format!("loading {}", input.display()))?;
-    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, sprites: knobs.sprites })?;
+    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, sprites: knobs.sprites })?;
     dump_frames(input, dir, &frames, &doc)
 }
 

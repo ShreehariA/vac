@@ -205,9 +205,15 @@ impl SceneRig {
 
     /// [`SceneRig::live`], with `tweak` applied when it names shape `k`.
     fn live_tweaked(&self, k: usize, t_ms: u32, tweak: Option<&Tweak>) -> ShapeState {
-        let mut st = self.live(k, t_ms);
         let Some(tw) = tweak.filter(|tw| tw.shape == k) else {
-            return st;
+            return self.live(k, t_ms);
+        };
+        let mut st = match &tw.animation {
+            Some(a) => {
+                let state = self.shapes.get(&self.declared[k]).expect("declared shape exists");
+                apply_animation(state, Some(a), t_ms)
+            }
+            None => self.live(k, t_ms),
         };
         if let Some(b) = &tw.base {
             st.base = b.clone();
@@ -246,6 +252,9 @@ pub struct Tweak {
     pub offset: (f32, f32),
     /// Replacement stroke width; `None` keeps it.
     pub stroke_width: Option<f32>,
+    /// A replacement for the shape's whole `animate` block (v1.11);
+    /// `None` keeps it.
+    pub animation: Option<Animation>,
 }
 
 /// Where a shape stands in one frame — see [`Rig::placement`].
@@ -301,6 +310,12 @@ impl Rig {
 
     pub fn frame_count(&self) -> usize {
         self.timeline.len()
+    }
+
+    /// The time of frame `i` within its scene, ms — what keyframes are
+    /// written against.
+    pub fn time_ms(&self, i: usize) -> u32 {
+        self.timeline[i].1
     }
 
     /// The shapes of frame `i`'s scene, in draw order. Shape indices in

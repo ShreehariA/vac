@@ -75,6 +75,9 @@ pub struct Options {
     /// Nudge every shape's size, position and stroke width to wherever the
     /// reconstruction measures best (v1.9). Resolved by the `vac` facade.
     pub refine: bool,
+    /// Re-measure every mover's keyframes by registering its own pixels
+    /// from frame to frame (v1.11). Resolved by the `vac` facade.
+    pub motion: bool,
     /// Draw a shape vectors cannot describe as a sprite of its own pixels
     /// when that measures clearly better (v1.8). Resolved by the `vac`
     /// facade, like [`Options::audit`].
@@ -110,6 +113,7 @@ impl Default for Options {
             plate: Plate::Auto,
             audit: true,
             refine: true,
+            motion: true,
             sprites: true,
         }
     }

@@ -460,6 +460,62 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.11 — motion, measured from the pixels.**
+///
+/// The tracker keyframes a shape from its blob's centroid and second
+/// moments, estimates that drift when a blob is lit unevenly or crossed;
+/// on `real_bouncing_ball` re-measuring the ball's motion from its own
+/// pixels took the clip from 44.4 to 46.4 dB. Refinement (v1.9) moves a
+/// whole shape; it cannot fix one keyframe. The motion pass registers each
+/// mover's pixels against every frame and keyframes what it measures.
+///
+/// Mechanism: knock one keyframe of a perfect reconstruction off — a ball's
+/// position in `two_balls.vac`, a swinging rod's turn and position in
+/// `spin.vac` — and the motion pass must re-measure it from the pixels.
+#[test]
+fn a_keyframe_knocked_off_is_re_measured_from_the_shapes_own_pixels() {
+    let run = |fixture: &str, target: &str, at_ms: u32, nudge: &dyn Fn(&mut Transform)| {
+        let source = vac::read(examples_dir().join(fixture)).expect("read fixture");
+        let frames = vac::rendered_to_video_frames(&vac::render(&source).expect("render"), source.canvas.fps);
+        let mut off = source.clone();
+        for st in &mut off.scenes[0].statements {
+            if let Statement::Animate(a) = st {
+                if a.target == target {
+                    for k in a.keyframes.iter_mut().filter(|k| k.time_ms == at_ms) {
+                        k.transforms.iter_mut().for_each(|t| nudge(t));
+                    }
+                }
+            }
+        }
+        let before = vac::measure(&frames, &off).unwrap();
+        let m = vac::motion(&frames, off, 50.0).expect("motion");
+        assert!(m.moved.iter().any(|n| n == target), "{fixture}: `{target}` must be re-measured, moved {:?}", m.moved);
+        assert!(
+            m.fidelity.psnr_db > before.psnr_db + 6.0,
+            "{fixture}: the knocked-off keyframe must come back: {:.2} -> {:.2} dB",
+            before.psnr_db,
+            m.fidelity.psnr_db
+        );
+        m.fidelity
+    };
+    let balls = run("two_balls.vac", "red", 1500, &|t| {
+        if let Transform::Position(x, y) = t {
+            *x += 6.0;
+            *y -= 4.0;
+        }
+    });
+    assert!(balls.psnr_db > 40.0, "two_balls.vac after the motion pass: {:.2} dB", balls.psnr_db);
+    let rod = run("spin.vac", "rod", 1000, &|t| match t {
+        Transform::Position(x, y) => {
+            *x += 4.0;
+            *y -= 3.0;
+        }
+        Transform::Rotate(d) => *d += 9.0,
+        _ => {}
+    });
+    assert!(rod.psnr_db > 30.0, "spin.vac after the motion pass: {:.2} dB", rod.psnr_db);
+}
+
 /// **FIXED in v1.10 — a camera.**
 ///
 /// A clip whose whole picture moves together is one image seen through a

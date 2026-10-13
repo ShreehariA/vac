@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.10)
+## Where VAC is today (v1.11)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -55,16 +55,17 @@ choice is tried several ways: segmentation, background rule, raster versus
 vector plate. Each candidate is re-rendered and scored against the source,
 and the one that reconstructs best wins. Then every shape in the winner is
 measured against its own absence, and a shape the reconstruction is no
-better with is taken out. Finally each remaining shape's size, position
-and stroke width are nudged to wherever the pixels agree best.
+better with is taken out. Each remaining shape's size, position and stroke
+width are nudged to wherever the pixels agree best, and every mover's
+keyframes are re-measured by registering its own pixels across frames.
 
 **How well**, against the corpus in `examples/wild/` (default quality):
 
 | clip | what it is | PSNR | ink IoU |
 |---|---|---|---|
 | `vac_control.mp4` | VAC's own output, two moving balls | 46.6 dB | 0.971 |
+| `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 46.4 dB | 0.991 |
 | `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
-| `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 44.4 dB | 0.990 |
 | `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.970 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
@@ -72,9 +73,9 @@ and stroke width are nudged to wherever the pixels agree best.
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
-| `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.640 |
+| `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
 | `testsrc2.mp4` | ffmpeg test card with noise | 22.4 dB | 0.995 |
-| `real_double_pendulum.gif` | Wikimedia diagram with trails | 21.5 dB | 0.594 |
+| `real_double_pendulum.gif` | Wikimedia diagram with trails | 22.0 dB | 0.621 |
 
 What it still gets wrong is listed, measured, in `docs/frontier.md`. The
 rate–distortion curves are in `docs/rate-distortion.md`. The sections after
@@ -2046,3 +2047,52 @@ see it most magnified (scale within 10% of the largest), which is
 but it measured a poor trade at the default quality: +0.8 dB for +54% bytes
 on the Ken Burns clip, +0.2 dB for twice the bytes on the Mandelbrot. So it
 stays at one mosaic pixel per frame pixel.
+
+## v1.11 — Motion, measured from the pixels
+
+The tracker keyframes a shape from its blob's centroid and, for a turning
+shape, its second moments. Both estimates drift whenever the blob is lit
+unevenly, crossed by something, or merged with a neighbour for a frame.
+v1.9's refinement can move a whole shape, but it can't fix one keyframe.
+
+v1.11 registers each mover's own pixels across its lifetime:
+
+1. **Template.** Take the shape's pixels at the frame its vector shape
+   matches best: where the source differs from the scene without it, and the
+   shape itself paints (give or take 2 px).
+2. **Register.** Against every other frame it's on screen, find the rigid
+   motion that best maps those pixels there, under the camera's robust
+   error. That's a turn and a translation, with the turn only for elongated
+   or already-turning shapes. The search is a small grid about the shape's
+   keyframed placement and its registered neighbours' heading, then a pattern
+   search to a fiftieth of a pixel.
+3. **Keyframe.** Simplify the registered track into keyframes again.
+4. **Choose.** Score two candidates the way the audit scores shapes: the
+   registered motion sampled at the shape's own keyframe times (no new
+   bytes), and at the frames the simplification keeps. A candidate is kept
+   only if the clip reconstructs better and the gain pays for any keyframes
+   it adds, at the per-byte price sprites pay. Below the default quality the
+   dial only ever takes keyframes away, so there motion may correct them but
+   not add any. Without that rule, `spin.vac` came out larger at quality 0
+   than at quality 25.
+
+| | v1.10 | v1.11 |
+|---|---|---|
+| `real_bouncing_ball.gif` | 44.36 dB | **46.37 dB**, +83 bytes |
+| `real_double_pendulum.gif` | 21.46 dB, IoU 0.594 | **22.04 dB**, IoU **0.621** |
+| `crossing.vac` (hermetic) | IoU 0.9794, residual 1.03 | IoU **0.9999**, residual **0.00** |
+| `real_pendulum.gif` | 22.88 dB, IoU 0.640 | 22.93 dB, IoU 0.643 |
+
+On the ball, the gain comes from *where* the keyframes fall on the precise
+trajectory, not from sampling the old times more precisely. Those two
+candidates measured +0.18 and +0.005. The test knocks one keyframe off a
+perfect reconstruction (a ball's position in `two_balls.vac`, a swinging
+rod's turn and position in `spin.vac`), and the motion pass has to
+re-measure it from the pixels. `vac::motion(frames, doc, quality)` runs it on
+any document, and `--no-motion` turns it off.
+
+The measured search also got faster with identical output. The two
+background rules are now prepared side by side, all six candidates run
+concurrently, and the still and camera plates are tried in parallel. The
+corpus run went from about 145 s to 104 s (the Ken Burns clip 42 → 26 s),
+and every clip's output is byte-for-byte what the baseline recorded.

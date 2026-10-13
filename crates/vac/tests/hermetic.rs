@@ -112,7 +112,7 @@ fn anchor(shape: &Shape) -> (f32, f32) {
 // That is the "test that cannot fail" failure mode this whole tier
 // exists to eliminate, so the floors are per-fixture and tight.
 //
-// Values re-measured 2026-10-13 at v1.9. The tolerance below absorbs platform
+// Values re-measured 2026-10-13 at v1.11. The tolerance below absorbs platform
 // rasteriser differences — `tiny-skia` picks SIMD backends by target
 // feature, so f32 rasterisation is not guaranteed bit-identical between
 // an aarch64 laptop and an x86_64 CI runner — and nothing more.
@@ -124,23 +124,23 @@ const IOU_TOL: f64 = 0.01;
 /// Recorded hermetic scores: (fixture, ink_iou, residual).
 const BASELINE: &[(&str, f64, f64)] = &[
     ("ball.vac", 0.9993, 0.01),
-    ("camera.vac", 1.0000, 0.96),
+    ("camera.vac", 1.0000, 0.95),
     ("color_shift.vac", 0.9998, 0.14),
-    ("crossing.vac", 0.9794, 1.03),
+    ("crossing.vac", 0.9999, 0.00),
     ("diagonal.vac", 0.9995, 0.03),
     ("fade.vac", 1.0000, 0.01),
     ("grow.vac", 0.9769, 13.11),
     ("late_entry.vac", 1.0000, 0.00),
     ("occlusion.vac", 0.9999, 0.01),
     ("outlined.vac", 1.0000, 1.08),
-    ("panel.vac", 0.9982, 0.01),
-    ("pop_in.vac", 0.9999, 0.04),
-    ("round_trip_two.vac", 0.9935, 2.07),
+    ("panel.vac", 0.9987, 0.01),
+    ("pop_in.vac", 0.9997, 0.01),
+    ("round_trip_two.vac", 0.9941, 2.05),
     ("shaded.vac", 0.9999, 0.47),
     ("sliding_rect.vac", 1.0000, 0.00),
     ("spin.vac", 0.9932, 1.12),
-    ("sprite.vac", 0.9715, 14.63),
-    ("static_and_moving.vac", 0.9998, 0.01),
+    ("sprite.vac", 0.9746, 13.39),
+    ("static_and_moving.vac", 0.9999, 0.01),
     ("textured.vac", 0.9999, 1.51),
     ("triangle.vac", 0.9855, 7.18),
     ("two_balls.vac", 0.9997, 0.02),
