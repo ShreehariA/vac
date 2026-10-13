@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.20, default quality 50) and is
+table re-measured 2026-10-13 at v1.21, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -113,6 +113,21 @@ the 33 px strip the dissolve still shows, so the carried plate has nothing
 there. The dissolve frames sit near **22 dB**, between shots at 30 and 42.
 Building each mosaic from the dissolve's frames as well, with the other
 picture taken out of them, would close it.
+
+---
+
+## 5. What is behind what
+
+**Status: open. Corpus row: `progress_bars.mp4`.**
+
+A progress bar fills a grey track: the bar is drawn over the track. v1.21
+writes the bar exactly, as one rect stretching from its left edge, but
+writes the track as a rect shrinking from the left. That's what stays
+visible, and it reconstructs (39.9 dB), but it isn't the scene the source
+drew. The static layer can't recover the track either: its temporal
+median is the bar's green wherever the bar covers the track for more than
+half the clip. Writing the track as the source has it needs depth order, a
+shape under another, which the tracker does not yet infer.
 
 ---
 
@@ -425,6 +440,16 @@ picture taken out of them, would close it.
   0.058 search-stage margin had cost `real_loader` ink IoU 0.864 → 0.806).
   `cuts_three_shots` 29.17 → **37.70 dB**.
 
+- **v1.21 — shapes that grow one way.** `scale` takes a value per axis,
+  `scale(sx, sy)`, stretching about the anchor (a rect's top-left), and the
+  tracker measures each axis against its own median, writing a stretch
+  when the two part for a sustained run by at least 8 px. A progress bar
+  drawn by ffmpeg went from three wrong pieces at 21.7 dB to one rect
+  filling, at **39.90 dB**; testsrc2's grey bar arms now extend and retract
+  (22.42 → 22.60). Without the static layer the segmentations are
+  re-chosen, which fixed a regression the corpus check caught in
+  `cuts_three_shots`.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -434,7 +459,8 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 |---|---|---|---|---|---|---|
 | `slideshow_dissolve.mp4` | 0.9962 | 0.9634 | 69.4 | 29.72 | 0.2% | 4 |
 | `roll_watercolor.mp4` | 0.9958 | 0.9933 | 16.9 | 35.85 | 0.3% | 1 |
-| `testsrc2.mp4` | 0.9951 | 0.9859 | 372.7 | 22.42 | 0.4% | 64 |
+| `testsrc2.mp4` | 0.9954 | 0.9865 | 357.2 | 22.60 | 0.4% | 63 |
+| `progress_bars.mp4` | 0.9947 | 0.9376 | 6.7 | 39.90 | 0.3% | 6 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
 | `kenburns_watercolor.mp4` | 0.9932 | 0.9881 | 37.5 | 32.39 | 0.4% | 1 |
 | `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
@@ -445,10 +471,10 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `pan_portrait.mp4` | 0.9708 | 0.9587 | 3.6 | 42.54 | 1.4% | 1 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `real_newtons_cradle.gif` | 0.9204 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
+| `real_newtons_cradle.gif` | 0.9210 | 0.9051 | 64.5 | 30.03 | 5.6% | 46 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
 | `real_pendulum.gif` | 0.6430 | 0.5445 | 331.5 | 22.93 | 4.8% | 27 |
-| `real_double_pendulum.gif` | 0.6211 | 0.3853 | 406.3 | 22.04 | 6.2% | 419 |
+| `real_double_pendulum.gif` | 0.6240 | 0.3880 | 404.3 | 22.06 | 6.3% | 421 |
 
 Flat-shaded content of exactly the kind the detector was built for, meaning
 VAC's own output and ffmpeg `drawbox` rectangles, reconstructs at 33–47 dB. The

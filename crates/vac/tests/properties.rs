@@ -164,8 +164,8 @@ fn assert_well_formed(sample: &str, doc: &Document) {
                                         "{sample}: non-finite position"
                                     );
                                 }
-                                Transform::Scale(s) => {
-                                    assert!(s.is_finite(), "{sample}: non-finite scale")
+                                Transform::Scale(sx, sy) => {
+                                    assert!(sx.is_finite() && sy.is_finite(), "{sample}: non-finite scale")
                                 }
                                 Transform::Rotate(d) => {
                                     assert!(d.is_finite(), "{sample}: non-finite rotation")

@@ -322,7 +322,7 @@ pub fn build_document(
                     .map(|&(t, (px, py), sc, deg)| {
                         let mut transforms = vec![
                             Transform::Position(round(px, 100.0), round(py, 100.0)),
-                            Transform::Scale(round(sc, 10000.0)),
+                            Transform::Scale(round(sc, 10000.0), round(sc, 10000.0)),
                         ];
                         if rolls {
                             transforms.push(Transform::Rotate(round(deg, 100.0)));
@@ -517,6 +517,16 @@ const SCALE_MIN_RATIO: f32 = 1.12;
 /// How far a sample's rx/ry may drift from the track's median aspect and
 /// still count as a measurement of its uniform scale.
 const SCALE_MAX_ASPECT_DRIFT: f32 = 0.15;
+/// How many consecutive samples (after the 5-sample median) a track's
+/// axes must part by more than [`SCALE_MAX_ASPECT_DRIFT`] for it to be
+/// written as stretching, `scale(sx, sy)` (v1.21), rather than as a
+/// uniform scale with its merges held out.
+const STRETCH_MIN_RUN: usize = 5;
+/// The least a stretching axis must change, in pixels of half-extent
+/// (4: the shape's width or height changes by 8 px). testsrc2's 8 px
+/// squares wobble a pixel either side as they touch, a 25% aspect change
+/// that is the detector's noise, not the shape growing.
+const STRETCH_MIN_PX: f32 = 4.0;
 /// A fill closer than this (RGB distance) to the background cannot carry a
 /// measurable opacity.
 const OPACITY_MIN_CONTRAST: f32 = 60.0;
@@ -818,7 +828,7 @@ fn emit_shape(
     // Skipped for paths (their outline is traced at one frame, so no
     // single reference size exists) and for any track clipped by the
     // canvas edge, whose visible area shrinks without the shape doing so.
-    let scales: Option<Vec<f32>> = (|| {
+    let scales: Option<Vec<(f32, f32)>> = (|| {
         if kind == ShapeKind::Path
             || rotated
             || ring_width.is_some()
@@ -826,6 +836,56 @@ fn emit_shape(
             || track.samples.iter().any(|(_, b)| touches_edge(b))
         {
             return None;
+        }
+        // v1.21: each axis measured on its own.
+        // When the two part for a sustained run the shape stretches —
+        // a progress bar filling, a bar rising — and is written
+        // `scale(sx, sy)`. A short excursion is a merge (two same-colour
+        // blobs side by side are twice as wide, not as tall), and the
+        // temporal median takes it out.
+        let smooth = |v: &[f32]| -> Vec<f32> {
+            (0..v.len())
+                .map(|i| median_f32(&v[i.saturating_sub(2)..(i + 3).min(v.len())]))
+                .collect()
+        };
+        let half_w: Vec<f32> = track
+            .samples
+            .iter()
+            .map(|(_, b)| if b.soft_w > 0.0 { b.soft_w * 0.5 } else { b.rx })
+            .collect();
+        let half_h: Vec<f32> = track
+            .samples
+            .iter()
+            .map(|(_, b)| if b.soft_h > 0.0 { b.soft_h * 0.5 } else { b.ry })
+            .collect();
+        // Each axis against its own median, as the uniform scale is against
+        // the median area: the declared size comes from a stricter
+        // estimator, and measured against it a shape of constant size read
+        // as a constant `scale(0.8, 1)` (testsrc2's squares).
+        let (mw, mh) = (median_f32(&half_w).max(0.5), median_f32(&half_h).max(0.5));
+        let sx: Vec<f32> = smooth(&half_w).iter().map(|v| v / mw).collect();
+        let sy: Vec<f32> = smooth(&half_h).iter().map(|v| v / mh).collect();
+        let drift = (1.0 + SCALE_MAX_ASPECT_DRIFT).ln();
+        let (mut run, mut longest) = (0usize, 0usize);
+        for (a, b) in sx.iter().zip(&sy) {
+            if (a / b.max(1e-3)).ln().abs() > drift {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        if longest >= STRETCH_MIN_RUN {
+            // Grows by enough to be the shape and not its outline's noise:
+            // a pixel either side is a quarter of an 8 px square.
+            let grows = |v: &[f32], m: f32| {
+                let (lo, hi) = (
+                    v.iter().cloned().fold(f32::INFINITY, f32::min),
+                    v.iter().cloned().fold(0.0f32, f32::max),
+                );
+                hi / lo.max(1e-3) >= SCALE_MIN_RATIO && (hi - lo) * m >= STRETCH_MIN_PX
+            };
+            return (grows(&sx, mw) || grows(&sy, mh)).then(|| sx.into_iter().zip(sy).collect());
         }
         let areas: Vec<f32> = track.samples.iter().map(|(_, b)| b.area as f32).collect();
         let med = median_f32(&areas).max(1.0);
@@ -866,7 +926,7 @@ fn emit_shape(
             .collect();
         let lo = s.iter().cloned().fold(f32::INFINITY, f32::min);
         let hi = s.iter().cloned().fold(0.0, f32::max);
-        (hi / lo.max(1e-3) >= SCALE_MIN_RATIO).then_some(s)
+        (hi / lo.max(1e-3) >= SCALE_MIN_RATIO).then(|| s.into_iter().map(|v| (v, v)).collect())
     })();
     // Opacity: the renderer composites `bg + a·(fill − bg)`, so every
     // sample's colour should lie on the segment from its frame's
@@ -1014,18 +1074,40 @@ fn emit_shape(
         None
     })();
 
+    // v1.21: a stretching shape is declared at its fullest, so its scale
+    // reads as how full it is — a progress bar `scale(0.02, 1)` to
+    // `scale(1, 1)` — with its first frame's top-left.
+    // The 90th percentile, so a merge's brief spike does not set it.
+    let fullest: Option<(f32, f32)> = scales.as_ref().filter(|sc| sc.iter().any(|s| s.0 != s.1)).map(|sc| {
+        let p90 = |mut v: Vec<f32>| {
+            v.sort_by(f32::total_cmp);
+            v[(v.len() * 9 / 10).min(v.len() - 1)].max(1e-3)
+        };
+        (p90(sc.iter().map(|s| s.0).collect()), p90(sc.iter().map(|s| s.1).collect()))
+    });
     let shape = match kind {
-        ShapeKind::Ellipse => Shape::Ellipse {
-            cx: round_pos(base_cx + PIXEL_CENTRE),
-            cy: round_pos(base_cy + PIXEL_CENTRE),
-            rx,
-            ry,
-        },
-        ShapeKind::Rect => Shape::Rect {
-            x: round_pos(base_cx + PIXEL_CENTRE - rx),
-            y: round_pos(base_cy + PIXEL_CENTRE - ry),
-            w: 2.0 * rx,
-            h: 2.0 * ry,
+        ShapeKind::Ellipse => {
+            let (mx, my) = fullest.unwrap_or((1.0, 1.0));
+            Shape::Ellipse {
+                cx: round_pos(base_cx + PIXEL_CENTRE),
+                cy: round_pos(base_cy + PIXEL_CENTRE),
+                rx: round_tenth(rx * mx),
+                ry: round_tenth(ry * my),
+            }
+        }
+        ShapeKind::Rect => match (fullest, &scales) {
+            (Some((mx, my)), Some(sc)) => Shape::Rect {
+                x: round_pos(first_b.cx + PIXEL_CENTRE - rx * sc[0].0),
+                y: round_pos(first_b.cy + PIXEL_CENTRE - ry * sc[0].1),
+                w: round_tenth(2.0 * rx * mx),
+                h: round_tenth(2.0 * ry * my),
+            },
+            _ => Shape::Rect {
+                x: round_pos(base_cx + PIXEL_CENTRE - rx),
+                y: round_pos(base_cy + PIXEL_CENTRE - ry),
+                w: 2.0 * rx,
+                h: 2.0 * ry,
+            },
         },
         ShapeKind::Path => Shape::Path(path_segs.take().expect("checked above")),
     };
@@ -1109,9 +1191,17 @@ fn emit_shape(
     let mut keep = simplify_trajectory(blobs, tol.keyframe_px);
     let times: Vec<f32> = blobs.iter().map(|(t, _)| *t as f32).collect();
     if let Some(sc) = &scales {
-        // Tolerance in pixels of radius, like position.
-        let extent: Vec<f32> = sc.iter().map(|s| s * (rx + ry) / 2.0).collect();
-        keep.extend(rdp_1d(&times, &extent, tol.keyframe_px));
+        // Tolerance in pixels of radius, like position; a stretch on each
+        // axis's own extent.
+        if sc.iter().all(|s| s.0 == s.1) {
+            let extent: Vec<f32> = sc.iter().map(|s| s.0 * (rx + ry) / 2.0).collect();
+            keep.extend(rdp_1d(&times, &extent, tol.keyframe_px));
+        } else {
+            let ex: Vec<f32> = sc.iter().map(|s| s.0 * rx).collect();
+            let ey: Vec<f32> = sc.iter().map(|s| s.1 * ry).collect();
+            keep.extend(rdp_1d(&times, &ex, tol.keyframe_px));
+            keep.extend(rdp_1d(&times, &ey, tol.keyframe_px));
+        }
     }
     if let Some((al, _)) = &opacity {
         let levels: Vec<f32> = al.iter().map(|a| a * 255.0).collect();
@@ -1237,8 +1327,8 @@ fn emit_shape(
                 let mut transforms = Vec::with_capacity(3);
                 if emit_pos {
                     let (ax, ay) = match (kind, s) {
-                        (ShapeKind::Rect, Some(s)) => {
-                            (b.cx + PIXEL_CENTRE - rx * s, b.cy + PIXEL_CENTRE - ry * s)
+                        (ShapeKind::Rect, Some((sx, sy))) => {
+                            (b.cx + PIXEL_CENTRE - rx * sx, b.cy + PIXEL_CENTRE - ry * sy)
                         }
                         (ShapeKind::Path, _) if stationary => (base_cx, base_cy),
                         (_, _) if stationary => (base_cx + PIXEL_CENTRE, base_cy + PIXEL_CENTRE),
@@ -1246,8 +1336,10 @@ fn emit_shape(
                     };
                     transforms.push(Transform::Position(round_pos(ax), round_pos(ay)));
                 }
-                if let Some(s) = s {
-                    transforms.push(Transform::Scale((s * 1000.0).round() / 1000.0));
+                if let Some((sx, sy)) = s {
+                    let r = |v: f32| (v * 1000.0).round() / 1000.0;
+                    let (mx, my) = fullest.unwrap_or((1.0, 1.0));
+                    transforms.push(Transform::Scale(r(sx / mx), r(sy / my)));
                 }
                 if let Some((al, _)) = &opacity {
                     transforms.push(Transform::Opacity((al[i] * 100.0).round() / 100.0));
@@ -1267,6 +1359,17 @@ fn emit_shape(
     } else {
         Vec::new()
     };
+    // A scale channel that is `scale(1)` throughout says nothing (v1.21).
+    let no_op_scale = |t: &Transform| matches!(t, Transform::Scale(sx, sy) if *sx == 1.0 && *sy == 1.0);
+    let has_scale = |t: &Transform| matches!(t, Transform::Scale(..));
+    if keyframes.iter().any(|k| k.transforms.iter().any(has_scale))
+        && keyframes.iter().all(|k| k.transforms.iter().filter(|t| has_scale(t)).all(no_op_scale))
+    {
+        for k in keyframes.iter_mut() {
+            k.transforms.retain(|t| !has_scale(t));
+        }
+        keyframes.retain(|k| !k.transforms.is_empty());
+    }
 
     let at_pos = |t: u32, (x, y): (f32, f32)| Keyframe {
         time_ms: t,

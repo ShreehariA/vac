@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.20)
+## Where VAC is today (v1.21)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -42,7 +42,8 @@ animate shape_1 {
 
 **What it recovers:** shots, each as its own scene; fades to and from
 black or white; dissolves between shots; rects, ellipses and traced paths, by measured fit;
-position, scale, rotation, opacity and colour over time; linear and radial
+position, scale (uniform, or stretching along one axis), rotation, opacity
+and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
 scenery becomes one embedded `image()` with the moving shapes still written
@@ -73,17 +74,18 @@ keyframes are re-measured by registering its own pixels across frames.
 | `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.971 |
 | `fade_through_black.mp4` | a card fading out, then a photo pan fading in | 42.2 dB | 0.992 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
+| `progress_bars.mp4` | ffmpeg progress bar and a bar chart rising | 39.9 dB | 0.995 |
 | `cuts_three_shots.mp4` | three corpus clips cut together | 37.7 dB | 0.988 |
 | `roll_watercolor.mp4` | a camera rolling 26° over an AI-generated watercolour | 35.9 dB | 0.996 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 32.4 dB | 0.993 |
-| `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
+| `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.921 |
 | `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.7 dB | 0.996 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
-| `testsrc2.mp4` | ffmpeg test card with noise | 22.4 dB | 0.995 |
-| `real_double_pendulum.gif` | Wikimedia diagram with trails | 22.0 dB | 0.621 |
+| `testsrc2.mp4` | ffmpeg test card with noise | 22.6 dB | 0.995 |
+| `real_double_pendulum.gif` | Wikimedia diagram with trails | 22.1 dB | 0.624 |
 
 What it still gets wrong is listed, measured, in `docs/frontier.md`. The
 rate–distortion curves are in `docs/rate-distortion.md`. The sections after
@@ -2522,3 +2524,66 @@ that's wrong. With 1-second slices `slide_in_card` still loses 9.4 dB
 at rest is exact (59 dB). The loss is in the first slice, where the card
 enters from off-screen: its first keyframe puts it at x = −145.6, partly
 visible, where the source has it at −180, hidden (24.9 dB at frame 0).
+
+## v1.21 — Shapes that grow one way
+
+`scale()` was uniform, so a shape that grows along one axis had no
+description. That covers a progress bar filling, a bar chart rising, an
+underline drawing out. A progress bar drawn by ffmpeg came back as three
+wrong things at 29.6 dB: a static stub for the part covered longest, a
+uniformly scaled rect sliding right, and a sprite for its leading edge.
+
+The format's `scale` now takes a value per axis. `scale(sx, sy)` stretches
+about the shape's anchor, which for a rect is its top-left, so a bar keeps
+its left edge as it fills. `scale(s)` is still written whenever the two
+are equal, and every older file parses as before. A chart bar keeps its
+bottom edge by moving its top up as it grows. Both channels are linear, so
+two keyframes describe it exactly:
+
+```vac
+let shape_0 = rect(100, 273, 60, 140)          // the red bar, at its fullest
+animate shape_0 {
+  33ms -> position(100, 273), scale(1, 0.071)  // a sliver on the baseline
+  1s   -> position(100, 140), scale(1)         // risen to 140 px
+}
+let shape_1 = rect(37.5, 40, 399.9, 16)        // the progress bar
+animate shape_1 {
+  33ms   -> position(37.6, 40), scale(0.025, 1)
+  2500ms -> position(40.1, 40), scale(1)       // full at 2.5 s
+}
+```
+
+The tracker measures a track's width and height on their own, each against
+its own median, and writes a stretch when the two part for a sustained run.
+Getting that rule honest took three corrections, each found on the corpus:
+
+- **Against its own median, not the declared size.** The declared size
+  comes from a stricter estimator, so measured against it, shapes of
+  constant size read as a constant `scale(0.8, 1)` (testsrc2's squares).
+- **By enough to be the shape.** The stretched axis must change by 8 px or
+  more. testsrc2's 8 px squares wobble a pixel either side as they touch:
+  a 25% aspect change that is the detector's noise, not growth.
+- **Declared at its fullest.** A stretching shape is declared at the 90th
+  percentile of its extent, so its scale reads as how full it is.
+
+The corpus check also caught a regression in v1.20's static-layer
+variant. Without the layer, the segmentations compete afresh: which one won
+*with* the layer says nothing about which wins without it. v1.21's tracker
+change tipped `cuts_three_shots`'s first shot to edges, which finishes at
+32.7 dB without the layer where regions gives 34.1. When the layer is
+dropped, every segmentation is now decompiled on the same layerless frames
+and the best is kept. The clip is back to 37.70 dB.
+
+| clip | v1.20 | v1.21 |
+|---|---|---|
+| `progress_bars.mp4` (new corpus clip) | 21.72 dB, ink IoU 0.839 | **39.90 dB**, ink IoU **0.995**, one rect per bar |
+| `progress.vac` (new fixture), hermetic | — | **41.30 dB**, ink IoU 0.997 |
+| `testsrc2.mp4` | 22.42 dB | 22.60 dB: its grey bar's arms extend and retract |
+| `real_newtons_cradle.gif` | 29.95 dB | 30.03 dB |
+| `real_double_pendulum.gif` | 22.04 dB, 174 KB | 22.06 dB, 185 KB |
+
+Every other corpus clip is unchanged. One thing `progress_bars` shows that
+the format can't say: the grey track the bar fills comes back as a rect
+shrinking from the left, which is what stays visible, not a track under a
+bar. Writing it as the source has it needs depth order, which the tracker
+does not yet infer.

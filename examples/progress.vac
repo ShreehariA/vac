@@ -1,0 +1,63 @@
+// VAC v1.21 fixture: shapes that grow one way. A progress bar fills its
+// track from the left while the three bars of a chart rise from a common
+// baseline, one after another. Each is one rect under `scale(sx, sy)`
+// keyframes, which stretch about the rect's top-left: the progress bar
+// keeps its left edge, and a chart bar keeps its bottom edge by moving its
+// top up as it grows. Before v1.21 `scale()` was uniform and none of them
+// could be written, or read back.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #12161f
+
+  let track = rect(40, 40, 400, 16)
+  track.fill = #2a3242
+  track.stroke = none
+
+  let bar = rect(40, 40, 400, 16)
+  bar.fill = #3ec27a
+  bar.stroke = none
+
+  animate bar {
+    0ms -> scale(0, 1)
+    2500ms -> scale(1, 1)
+    3s -> scale(1, 1)
+    easing: linear
+  }
+
+  let rise_a = rect(100, 140, 60, 140)
+  rise_a.fill = #e0694c
+  rise_a.stroke = none
+
+  animate rise_a {
+    0ms -> position(100, 280), scale(1, 0)
+    1s -> position(100, 140), scale(1, 1)
+    easing: linear
+  }
+
+  let rise_b = rect(210, 80, 60, 200)
+  rise_b.fill = #4c8fe0
+  rise_b.stroke = none
+
+  animate rise_b {
+    0ms -> position(210, 280), scale(1, 0)
+    500ms -> position(210, 280), scale(1, 0)
+    1500ms -> position(210, 80), scale(1, 1)
+    easing: linear
+  }
+
+  let rise_c = rect(320, 190, 60, 90)
+  rise_c.fill = #e0c24c
+  rise_c.stroke = none
+
+  animate rise_c {
+    0ms -> position(320, 280), scale(1, 0)
+    1s -> position(320, 280), scale(1, 0)
+    2s -> position(320, 190), scale(1, 1)
+    easing: linear
+  }
+}

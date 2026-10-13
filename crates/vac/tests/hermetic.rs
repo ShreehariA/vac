@@ -139,6 +139,7 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("outlined.vac", 1.0000, 1.08),
     ("panel.vac", 0.9987, 0.01),
     ("pop_in.vac", 0.9997, 0.01),
+    ("progress.vac", 0.9966, 4.82),
     ("round_trip_two.vac", 0.9941, 2.05),
     ("shaded.vac", 0.9999, 0.47),
     ("sliding_rect.vac", 1.0000, 0.00),

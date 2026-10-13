@@ -119,6 +119,7 @@ v0.1 transforms:
 |---|---|---|
 | `position(x, y)` | absolute world point | overrides the shape's declared anchor |
 | `scale(s)` | uniform | multiplies extent about the anchor |
+| `scale(sx, sy)` | per axis | stretches each axis about the anchor (a rect's top-left), so a bar fills as `scale(0, 1)` → `scale(1, 1)`; `scale(s)` is `scale(s, s)` — added v1.21 |
 | `opacity(o)` | `[0, 1]` | multiplies fill/stroke alpha |
 | `rotate(deg)` | degrees, clockwise | turns the shape about its **centre** (rect/ellipse centre, path centroid), independent of the `position` anchor — added v0.14 |
 | `fill(#rrggbb)` | colour | sets a flat fill, interpolated in RGB between keyframes that carry one; replaces a gradient fill while it applies — added v1.3 |
@@ -183,7 +184,8 @@ value. (Through v0.10 the runtime used only the two keyframes bracketing
 `now`, so a kind absent from both reverted to its base value.)
 
 Composition order when rendering a shape: rotate about its centre, then
-scale about its anchor, then move the anchor to `position`.
+scale about its anchor, then move the anchor to `position`. Stretching a
+rotated shape (`scale(sx, sy)` with `sx ≠ sy`) therefore skews it.
 
 ---
 

@@ -121,7 +121,7 @@ fn scale_and_opacity_are_recovered_along_the_source_curve() {
         v0 + (v1 - v0) * (t - t0) as f32 / (t1 - t0) as f32
     }
     let scale = |t: &Transform| match t {
-        Transform::Scale(s) => Some(*s),
+        Transform::Scale(s, _) => Some(*s),
         _ => None,
     };
     let opacity = |t: &Transform| match t {
@@ -460,6 +460,54 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.21 — shapes that grow one way.**
+///
+/// `scale()` was uniform, so a progress bar filling, a chart's bar rising,
+/// anything that grows along one axis had no description: an ffmpeg
+/// progress bar came back as a static stub, a sliding uniformly scaled rect
+/// and a sprite for its head, at 29.6 dB. Scale now has a value per axis,
+/// `scale(sx, sy)`, about the shape's anchor, and the tracker measures each
+/// axis on its own, writing a stretch when they part for a sustained run.
+/// `progress.vac` holds a bar filling its track and three chart bars rising
+/// from a common baseline. Each must come back as one rect that stretches
+/// along its own axis, and the clip at better than 38 dB.
+#[test]
+fn shapes_that_grow_one_way_come_back_stretching() {
+    let (_, recovered, fid) = hermetic("progress.vac");
+    let stretched = |widening: bool| -> usize {
+        recovered
+            .scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .filter(|st| match st {
+                Statement::Animate(a) => {
+                    let axis: Vec<f32> = a
+                        .keyframes
+                        .iter()
+                        .filter_map(|k| k.transforms.iter().find_map(|t| match t {
+                            Transform::Scale(sx, sy) => Some(if widening { *sx } else { *sy }),
+                            _ => None,
+                        }))
+                        .collect();
+                    let other_fixed = a.keyframes.iter().all(|k| {
+                        k.transforms.iter().all(|t| match t {
+                            Transform::Scale(sx, sy) => ((if widening { *sy } else { *sx }) - 1.0).abs() < 0.05,
+                            _ => true,
+                        })
+                    });
+                    let lo = axis.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let hi = axis.iter().cloned().fold(0.0f32, f32::max);
+                    other_fixed && axis.len() >= 2 && lo < 0.1 && hi > 0.95
+                }
+                _ => false,
+            })
+            .count()
+    };
+    assert!(stretched(true) >= 1, "the progress bar fills along x: {}", vac::to_string(&recovered));
+    assert!(stretched(false) >= 3, "three chart bars rise along y: {}", vac::to_string(&recovered));
+    assert!(fid.psnr_db > 38.0, "progress.vac: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.20 — a slow mover is not scenery.**
 ///
 /// The static layer (v0.8) is a per-pixel temporal median, and to a median
@@ -563,7 +611,7 @@ fn a_detailed_zoom_comes_back_sharp() {
     let recovered = vac::decompile_frames(frames.clone(), &DecompileOptions::default()).expect("decompile");
     let fid = vac::measure(&frames, &recovered).expect("measure");
     let zoomed = recovered.scenes.iter().flat_map(|s| &s.statements).any(|st| {
-        matches!(st, Statement::Animate(a) if a.keyframes.iter().any(|k| k.transforms.iter().any(|t| matches!(t, Transform::Scale(s) if *s > 1.3))))
+        matches!(st, Statement::Animate(a) if a.keyframes.iter().any(|k| k.transforms.iter().any(|t| matches!(t, Transform::Scale(s, _) if *s > 1.3))))
     });
     assert!(zoomed, "the zoom comes back as a camera");
     assert!(fid.psnr_db > 33.5, "detailed zoom: {:.2} dB", fid.psnr_db);
@@ -884,7 +932,7 @@ fn a_moving_camera_comes_back_as_keyframes_on_one_image() {
     assert!(camera.keyframes.len() <= 4, "a straight zoom needs few keyframes, got {}", camera.keyframes.len());
     let last = camera.keyframes.last().unwrap();
     let scale = last.transforms.iter().find_map(|t| match t {
-        Transform::Scale(s) => Some(*s),
+        Transform::Scale(s, _) => Some(*s),
         _ => None,
     });
     // At the last frame (1966 ms) the source camera is at 1 + 0.5 * 1966 / 2000.

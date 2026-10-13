@@ -30,7 +30,8 @@ struct ShapeState {
     /// Absolute world position (anchor point) — overrides the shape's
     /// declared position when set by an `animate` block.
     position: Option<(f32, f32)>,
-    scale: f32,
+    /// Scale on each axis about the anchor (v1.21; one value before).
+    scale: (f32, f32),
     opacity: f32,
     /// Clockwise degrees about the shape's centre (v0.14).
     rotation: f32,
@@ -52,7 +53,7 @@ impl ShapeState {
             stroke_width: 2.0,
             stroke: None,
             position: None,
-            scale: 1.0,
+            scale: (1.0, 1.0),
             opacity: 1.0,
             rotation: 0.0,
         }
@@ -261,7 +262,8 @@ pub struct Tweak {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Placement {
     pub position: (f32, f32),
-    pub scale: f32,
+    /// Scale on each axis (v1.21).
+    pub scale: (f32, f32),
     pub rotation: f32,
     pub opacity: f32,
 }
@@ -437,7 +439,9 @@ fn apply_animation(base: &ShapeState, anim: Option<&Animation>, t_ms: u32) -> Sh
     }) {
         st.position = Some((x, y));
     }
-    if let Some(s) = sample_channel(anim, t_ms, first_scale, |a, b, p| a + (b - a) * p) {
+    if let Some(s) = sample_channel(anim, t_ms, first_scale, |a, b, p| {
+        (a.0 + (b.0 - a.0) * p, a.1 + (b.1 - a.1) * p)
+    }) {
         st.scale = s;
     }
     if let Some(o) = sample_channel(anim, t_ms, first_opacity, |a, b, p| a + (b - a) * p) {
@@ -497,9 +501,9 @@ fn first_position(k: &Keyframe) -> Option<(f32, f32)> {
         _ => None,
     })
 }
-fn first_scale(k: &Keyframe) -> Option<f32> {
+fn first_scale(k: &Keyframe) -> Option<(f32, f32)> {
     k.transforms.iter().find_map(|t| match t {
-        VTransform::Scale(s) => Some(*s),
+        VTransform::Scale(sx, sy) => Some((*sx, *sy)),
         _ => None,
     })
 }
@@ -540,13 +544,13 @@ fn image_transform(state: &ShapeState, img: &Pixmap) -> Option<Transform> {
     let Shape::Image { x, y, w, h, .. } = &state.base else {
         return None;
     };
-    let scale = state.scale.max(0.0);
+    let (sx, sy) = (state.scale.0.max(0.0), state.scale.1.max(0.0));
     let pos = state.position.unwrap_or((*x, *y));
     let to_box = Transform::from_scale(*w / img.width() as f32, *h / img.height() as f32)
         .post_translate(*x, *y);
     let shape = Transform::from_rotate_at(state.rotation, *x + *w * 0.5, *y + *h * 0.5)
         .post_translate(-*x, -*y)
-        .post_scale(scale, scale)
+        .post_scale(sx, sy)
         .post_translate(pos.0, pos.1);
     Some(to_box.post_concat(shape))
 }
@@ -576,11 +580,11 @@ fn placed_path(state: &ShapeState) -> Option<(tiny_skia::Path, Transform)> {
             (path, a, a)
         }
     };
-    let scale = state.scale.max(0.0);
+    let (sx, sy) = (state.scale.0.max(0.0), state.scale.1.max(0.0));
     let pos = state.position.unwrap_or(anchor);
     let transform = Transform::from_rotate_at(state.rotation, centre.0, centre.1)
         .post_translate(-anchor.0, -anchor.1)
-        .post_scale(scale, scale)
+        .post_scale(sx, sy)
         .post_translate(pos.0, pos.1);
     Some((path, transform))
 }
@@ -608,7 +612,7 @@ fn paint_bounds(state: &ShapeState) -> Option<tiny_skia::Rect> {
     let b = path.transform(ts)?.bounds();
     // A stroke is centred on the outline and, like the path, scaled.
     let out = if stroked {
-        state.stroke_width * 0.5 * state.scale.max(0.0)
+        state.stroke_width * 0.5 * state.scale.0.max(state.scale.1).max(0.0)
     } else {
         0.0
     };
@@ -769,7 +773,7 @@ mod tests {
             stroke_width: 2.0,
             stroke: None,
             position: None,
-            scale: 1.0,
+            scale: (1.0, 1.0),
             opacity: 1.0,
             rotation: 0.0,
             image: None,
@@ -786,13 +790,13 @@ mod tests {
             target: "s".into(),
             easing: Easing::Linear,
             keyframes: vec![
-                kf(0, vec![VTransform::Scale(2.0), VTransform::Position(0.0, 0.0)]),
+                kf(0, vec![VTransform::Scale(2.0, 2.0), VTransform::Position(0.0, 0.0)]),
                 kf(500, vec![VTransform::Position(10.0, 0.0)]),
-                kf(1000, vec![VTransform::Scale(4.0), VTransform::Position(20.0, 0.0)]),
+                kf(1000, vec![VTransform::Scale(4.0, 4.0), VTransform::Position(20.0, 0.0)]),
             ],
         };
         let st = state_at(&anim, 750);
-        assert!((st.scale - 3.5).abs() < 1e-4, "scale {}", st.scale);
+        assert!((st.scale.0 - 3.5).abs() < 1e-4 && (st.scale.1 - 3.5).abs() < 1e-4, "scale {:?}", st.scale);
         assert_eq!(st.position, Some((15.0, 0.0)));
     }
 
@@ -859,6 +863,23 @@ mod tests {
         // At 100 ms it has moved 50 px right: x=10 is now uncovered.
         let (r, b) = px(&frames[1], 10);
         assert!(r < 20 && b < 20, "moved image should leave x=10 black: {r},{b}");
+    }
+
+    /// v1.21: `scale(sx, sy)` stretches each axis about the anchor, so a
+    /// rect keeps its top-left and only the stretched axis grows — a
+    /// progress bar, not a zoom.
+    #[test]
+    fn a_rect_stretches_from_its_top_left() {
+        let doc = vac_format::parse(
+            "canvas 60x30 @10fps\n\nscene main {\n  duration 100ms\n  let bar = rect(10, 10, 20, 10)\n  bar.fill = #ffffff\n  bar.stroke = none\n  animate bar {\n    0ms -> scale(2, 1)\n  }\n}\n",
+        )
+        .unwrap();
+        let frames = render_document(&doc).unwrap();
+        let red = |x: u32, y: u32| frames[0].rgba[((y * 60 + x) * 4) as usize];
+        assert_eq!(red(12, 15), 255, "the top-left stays");
+        assert_eq!(red(45, 15), 255, "twice as wide: 10 to 50");
+        assert_eq!(red(55, 15), 0, "and no wider");
+        assert_eq!(red(15, 25), 0, "the height is unstretched: 10 to 20");
     }
 
     /// The two promises the shape audit (v1.7) rests on, over every

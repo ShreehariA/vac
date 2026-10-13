@@ -1017,10 +1017,10 @@ fn camera_at(anim: &Animation, t: f64) -> Vec<Transform> {
         out.push(Transform::Position((v[0] * 100.0).round() / 100.0, (v[1] * 100.0).round() / 100.0));
     }
     if let Some(v) = pick(&|tr| match tr {
-        Transform::Scale(s) => Some(vec![*s]),
+        Transform::Scale(sx, sy) => Some(vec![*sx, *sy]),
         _ => None,
     }) {
-        out.push(Transform::Scale((v[0] * 10000.0).round() / 10000.0));
+        out.push(Transform::Scale((v[0] * 10000.0).round() / 10000.0, (v[1] * 10000.0).round() / 10000.0));
     }
     if let Some(v) = pick(&|tr| match tr {
         Transform::Rotate(d) => Some(vec![*d]),
@@ -1607,10 +1607,41 @@ fn choose_full(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen>
         let doc = vac_decompiler::finish(&prepared, segmentation, opts.quality, Plate::Vector);
         let fid = measure(frames, &doc)?;
         if improvement(&fid, best.fidelity.as_ref().expect("measured")) >= STATIC_LAYER_MIN_GAIN {
+            // Without the layer the segmentations are a different contest:
+            // which one won with it says nothing about which wins without
+            // (v1.21: `outlined_ui`'s first 45 frames went to edges with
+            // the layer, 32.7 dB without it, where regions gave 34.1). Each
+            // is decompiled on the same layerless frames, the best kept.
+            let others: Vec<Segmentation> = segs.iter().copied().filter(|&s| s != segmentation).collect();
+            let tried: Vec<Result<(Segmentation, Document, Fidelity)>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = others
+                    .iter()
+                    .map(|&seg| {
+                        let prepared = &prepared;
+                        scope.spawn(move || -> Result<(Segmentation, Document, Fidelity)> {
+                            let doc = vac_decompiler::finish(prepared, seg, opts.quality, Plate::Vector);
+                            let fid = measure(frames, &doc)?;
+                            Ok((seg, doc, fid))
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("candidate thread panicked"))
+                    .collect()
+            });
+            let (mut seg_best, mut doc_best, mut fid_best) = (segmentation, doc, fid);
+            for t in tried {
+                let (seg, doc, fid) = t?;
+                if reconstructs_better(&fid, &fid_best) {
+                    (seg_best, doc_best, fid_best) = (seg, doc, fid);
+                }
+            }
             best = Chosen {
-                document: doc,
+                document: doc_best,
+                segmentation: seg_best,
                 static_layer: false,
-                fidelity: Some(fid),
+                fidelity: Some(fid_best),
                 ..best
             };
         }
@@ -2405,7 +2436,7 @@ fn motion_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity, quality:
         // Rotation centre: where the shape turns about, at the reference.
         let pl = rig.placement(iref, k);
         let centre_off = match &base {
-            Shape::Rect { w, h, .. } => (w * 0.5 * pl.scale, h * 0.5 * pl.scale),
+            Shape::Rect { w, h, .. } => (w * 0.5 * pl.scale.0, h * 0.5 * pl.scale.1),
             _ => (0.0, 0.0),
         };
         let c_ref = (pl.position.0 + centre_off.0, pl.position.1 + centre_off.1);
@@ -2490,7 +2521,7 @@ fn motion_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity, quality:
         let keyed = |i: usize| -> (f32, (f32, f32)) {
             let p = rig.placement(i, k);
             let off = match &base {
-                Shape::Rect { w, h, .. } => (w * 0.5 * p.scale, h * 0.5 * p.scale),
+                Shape::Rect { w, h, .. } => (w * 0.5 * p.scale.0, h * 0.5 * p.scale.1),
                 _ => (0.0, 0.0),
             };
             ((p.rotation - pl.rotation).to_radians(), (p.position.0 + off.0, p.position.1 + off.1))
@@ -2589,7 +2620,7 @@ fn motion_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity, quality:
                 let i = alive[times.iter().position(|&x| x >= t.min(times[n - 1])).unwrap_or(n - 1)];
                 let scale = rig.placement(i, k).scale;
                 let off = match &base {
-                    Shape::Rect { w, h, .. } => (w * 0.5 * scale, h * 0.5 * scale),
+                    Shape::Rect { w, h, .. } => (w * 0.5 * scale.0, h * 0.5 * scale.1),
                     _ => (0.0, 0.0),
                 };
                 let mut tr = vec![Transform::Position(round(m.0 - off.0), round(m.1 - off.1))];
@@ -2814,7 +2845,7 @@ fn sprites_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity, quality
             a.keyframes
                 .iter()
                 .flat_map(|kf| &kf.transforms)
-                .any(|t| matches!(t, Transform::Scale(_) | Transform::Rotate(_) | Transform::Fill(_)))
+                .any(|t| matches!(t, Transform::Scale(..) | Transform::Rotate(_) | Transform::Fill(_)))
         }) {
             continue;
         }

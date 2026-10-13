@@ -21,7 +21,7 @@
 //! animate_stmt  = "animate" Ident "{" keyframe* easing_decl? "}"
 //! keyframe      = Time "->" transform ("," transform)*
 //! transform     = "position" "(" Number "," Number ")"
-//!               | "scale"    "(" Number ")"
+//!               | "scale"    "(" Number ("," Number)? ")"
 //!               | "opacity"  "(" Number ")"
 //! easing_decl   = "easing" ":" Ident
 //! ```
@@ -928,15 +928,11 @@ impl Parser {
                 }
                 Ok(Transform::Position(nums[0], nums[1]))
             }
-            "scale" => {
-                if nums.len() != 1 {
-                    return Err(ParseError::syntax(
-                        span,
-                        format!("scale() takes 1 arg, got {}", nums.len()),
-                    ));
-                }
-                Ok(Transform::Scale(nums[0]))
-            }
+            "scale" => match nums.len() {
+                1 => Ok(Transform::Scale(nums[0], nums[0])),
+                2 => Ok(Transform::Scale(nums[0], nums[1])),
+                n => Err(ParseError::syntax(span, format!("scale() takes (s) or (sx, sy), got {n} args"))),
+            },
             "opacity" => {
                 if nums.len() != 1 {
                     return Err(ParseError::syntax(

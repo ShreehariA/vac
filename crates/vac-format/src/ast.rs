@@ -234,7 +234,12 @@ pub struct Keyframe {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Transform {
     Position(f32, f32),
-    Scale(f32),
+    /// Scale about the shape's anchor — a rect's top-left, an ellipse's
+    /// centre, a path's centroid — each axis on its own (v1.21): `scale(s)`
+    /// is uniform, `scale(sx, sy)` stretches, so a progress bar fills from
+    /// its left edge as `scale(0, 1) → scale(1, 1)`. A rotated shape is
+    /// turned first and stretched after, so stretching it skews it.
+    Scale(f32, f32),
     Opacity(f32),
     /// Clockwise rotation in degrees (v0.14), about the shape's centre —
     /// a rect's or ellipse's centre, a path's centroid — independent of

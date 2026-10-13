@@ -177,7 +177,8 @@ fn fmt_value(v: &Value) -> String {
 fn fmt_transform(t: &Transform) -> String {
     match t {
         Transform::Position(x, y) => format!("position({}, {})", fmt_num(*x), fmt_num(*y)),
-        Transform::Scale(s) => format!("scale({})", fmt_num(*s)),
+        Transform::Scale(sx, sy) if sx == sy => format!("scale({})", fmt_num(*sx)),
+        Transform::Scale(sx, sy) => format!("scale({}, {})", fmt_num(*sx), fmt_num(*sy)),
         Transform::Opacity(o) => format!("opacity({})", fmt_num(*o)),
         Transform::Rotate(d) => format!("rotate({})", fmt_num(*d)),
         Transform::Fill(c) => format!("fill({})", fmt_color(c)),
@@ -306,6 +307,25 @@ mod tests {
         let s = write(&doc);
         assert!(s.contains("#1a1a2e"), "got:\n{s}");
         assert!(s.contains("#e94560"), "got:\n{s}");
+    }
+
+    /// v1.21: `scale(s)` is uniform and still written that way; a
+    /// stretch, `scale(sx, sy)`, keeps both axes.
+    #[test]
+    fn scale_round_trips_uniform_and_stretched() {
+        let src = "canvas 10x10 @10fps\nscene s {\n  duration 1s\n  let r = rect(0, 0, 4, 2)\n  animate r {\n    0ms -> scale(1.5)\n    1s -> scale(0.25, 1)\n    easing: linear\n  }\n}\n";
+        let doc = crate::parse(src).unwrap();
+        let kfs = match &doc.scenes[0].statements[1] {
+            Statement::Animate(a) => &a.keyframes,
+            other => panic!("expected the animate block, got {other:?}"),
+        };
+        assert_eq!(kfs[0].transforms, vec![Transform::Scale(1.5, 1.5)]);
+        assert_eq!(kfs[1].transforms, vec![Transform::Scale(0.25, 1.0)]);
+        let out = write(&doc);
+        assert!(out.contains("0ms -> scale(1.5)\n"), "{out}");
+        assert!(out.contains("1s -> scale(0.25, 1)"), "{out}");
+        assert_eq!(crate::parse(&out).unwrap(), doc);
+        assert!(crate::parse(&src.replace("scale(1.5)", "scale(1, 2, 3)")).is_err());
     }
 
     #[test]

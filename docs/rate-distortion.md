@@ -145,6 +145,16 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | 75 | 42,770 | 1.8× smaller | 2.8 | 43.62 | 0.9743 | 1 | 65 |
 | 100 | 69,794 | 1.1× smaller | 2.1 | 44.82 | 0.9783 | 1 | 72 |
 
+### `progress_bars.mp4` — source file 8 KB
+
+| quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
+|---|---|---|---|---|---|---|---|
+| 0 | 1,660 | 5.1× smaller | 18.4 | 35.48 | 0.9862 | 6 | 22 |
+| 25 | 1,660 | 5.1× smaller | 18.4 | 35.48 | 0.9862 | 6 | 22 |
+| 50 | 1,872 | 4.5× smaller | 6.7 | 39.90 | 0.9947 | 6 | 26 |
+| 75 | 2,214 | 3.8× smaller | 3.8 | 42.36 | 0.9953 | 6 | 33 |
+| 100 | 3,868 | 2.2× smaller | 4.4 | 41.72 | 0.9965 | 6 | 66 |
+
 ### `real_bouncing_ball.gif` — source file 85 KB
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
@@ -159,11 +169,11 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 29,744 | 116.2× smaller | 544.8 | 20.77 | 0.5204 | 106 | 399 |
-| 25 | 60,617 | 57.0× smaller | 505.1 | 21.10 | 0.5588 | 154 | 950 |
-| 50 | 174,285 | 19.8× smaller | 406.3 | 22.04 | 0.6211 | 419 | 2905 |
-| 75 | 197,204 | 17.5× smaller | 383.3 | 22.30 | 0.6349 | 420 | 3463 |
-| 100 | 208,895 | 16.5× smaller | 380.8 | 22.32 | 0.6359 | 420 | 3857 |
+| 0 | 26,901 | 128.4× smaller | 554.6 | 20.69 | 0.5132 | 106 | 340 |
+| 25 | 60,893 | 56.7× smaller | 503.8 | 21.11 | 0.5594 | 154 | 956 |
+| 50 | 185,424 | 18.6× smaller | 404.3 | 22.06 | 0.6240 | 421 | 3038 |
+| 75 | 208,936 | 16.5× smaller | 379.9 | 22.33 | 0.6377 | 421 | 3601 |
+| 100 | 219,935 | 15.7× smaller | 379.3 | 22.34 | 0.6377 | 422 | 3870 |
 
 ### `real_loader.gif` — source file 3 KB
 
@@ -179,17 +189,17 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 27,275 | 10.9× smaller | 88.3 | 28.67 | 0.9050 | 8 | 51 |
-| 25 | 33,993 | 8.7× smaller | 78.7 | 29.17 | 0.9058 | 12 | 90 |
-| 50 | 56,051 | 5.3× smaller | 65.8 | 29.95 | 0.9204 | 47 | 315 |
-| 75 | 67,157 | 4.4× smaller | 63.1 | 30.13 | 0.9243 | 46 | 339 |
-| 100 | 99,221 | 3.0× smaller | 60.9 | 30.28 | 0.9336 | 46 | 357 |
+| 0 | 27,266 | 10.9× smaller | 87.5 | 28.71 | 0.9055 | 8 | 50 |
+| 25 | 34,010 | 8.7× smaller | 77.7 | 29.23 | 0.9064 | 12 | 89 |
+| 50 | 56,154 | 5.3× smaller | 64.5 | 30.03 | 0.9210 | 46 | 308 |
+| 75 | 67,154 | 4.4× smaller | 61.9 | 30.21 | 0.9250 | 45 | 327 |
+| 100 | 99,358 | 3.0× smaller | 59.8 | 30.36 | 0.9341 | 45 | 349 |
 
 ### `real_pendulum.gif` — source file 247 KB
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 35,891 | 7.1× smaller | 419.6 | 21.90 | 0.5486 | 19 | 151 |
+| 0 | 36,088 | 7.0× smaller | 418.1 | 21.92 | 0.5448 | 19 | 151 |
 | 25 | 42,956 | 5.9× smaller | 391.9 | 22.20 | 0.5749 | 23 | 226 |
 | 50 | 49,578 | 5.1× smaller | 331.5 | 22.93 | 0.6430 | 27 | 265 |
 | 75 | 54,246 | 4.7× smaller | 329.2 | 22.96 | 0.6498 | 27 | 275 |
@@ -229,11 +239,11 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 28,382 | 11.0× smaller | 397.7 | 22.14 | 0.9951 | 42 | 265 |
-| 25 | 44,391 | 7.0× smaller | 380.4 | 22.33 | 0.9951 | 58 | 541 |
-| 50 | 54,981 | 5.7× smaller | 372.7 | 22.42 | 0.9951 | 64 | 705 |
-| 75 | 72,216 | 4.3× smaller | 366.4 | 22.49 | 0.9952 | 64 | 1069 |
-| 100 | 90,892 | 3.4× smaller | 361.7 | 22.55 | 0.9952 | 64 | 1399 |
+| 0 | 29,628 | 10.5× smaller | 384.6 | 22.28 | 0.9953 | 43 | 278 |
+| 25 | 44,911 | 6.9× smaller | 365.9 | 22.50 | 0.9954 | 58 | 549 |
+| 50 | 55,952 | 5.6× smaller | 357.2 | 22.60 | 0.9954 | 63 | 713 |
+| 75 | 75,403 | 4.1× smaller | 352.0 | 22.67 | 0.9954 | 65 | 1118 |
+| 100 | 93,200 | 3.3× smaller | 346.5 | 22.73 | 0.9954 | 64 | 1412 |
 
 ### `vac_control.mp4` — source file 18 KB
 
