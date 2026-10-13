@@ -39,7 +39,20 @@ use crate::frames::VideoFrame;
 
 /// Fewer frames than this and a temporal median is not a measurement,
 /// it's an accident — skip layering entirely.
+///
+/// Except below the shortest track (v1.18): in a clip of a frame or two
+/// nothing can be tracked as moving, and its frames are the scene — the
+/// median of one frame is that frame, exactly. Through v1.17 a single frame
+/// of a test card came back as a lone background at 3.9 dB.
 const MIN_LAYER_FRAMES: usize = 8;
+/// Clips shorter than this have no movers at all: every track needs at
+/// least `MIN_TRACK_SAMPLES` (3) frames.
+const MAX_STILL_FRAMES: usize = 2;
+
+/// Whether a clip of `n` frames may be layered.
+fn layerable(n: usize) -> bool {
+    n >= MIN_LAYER_FRAMES || (1..=MAX_STILL_FRAMES).contains(&n)
+}
 
 /// Upper bound on how many frames the median plate is estimated from.
 /// The median of 96 evenly-spaced frames and the median of 900 differ
@@ -121,7 +134,7 @@ impl StaticLayer {
     /// nothing at all is persistent — all of which mean "carry on as if
     /// v0.7", not "fail".
     pub fn measure(frames: &[VideoFrame], model: Background) -> Option<StaticLayer> {
-        if frames.len() < MIN_LAYER_FRAMES {
+        if !layerable(frames.len()) {
             return None;
         }
         let width = frames[0].width;
@@ -458,7 +471,7 @@ pub fn strip_against(frame: &mut VideoFrame, plate: &[u8], bg: Color) {
 /// inconsistent frame sizes. The static layer builds on the same median;
 /// the ground pass (v1.1) needs it even when no static layer forms.
 pub fn median_frame(frames: &[VideoFrame]) -> Option<VideoFrame> {
-    if frames.len() < MIN_LAYER_FRAMES {
+    if !layerable(frames.len()) {
         return None;
     }
     let (width, height) = (frames[0].width, frames[0].height);

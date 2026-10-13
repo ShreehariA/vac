@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.17, default quality 50) and is
+table re-measured 2026-10-13 at v1.18, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -96,16 +96,17 @@ would close this.
 
 ---
 
-## 4. Motion during a dissolve
+## 4. What a dissolve shows that neither shot saw
 
 **Status: open. Corpus row: `slideshow_dissolve.mp4`.**
 
-v1.17 writes a dissolve as the frame before it and the frame after it,
-crossfading. Both pictures are frozen, so a camera still moving through the
-dissolve isn't followed. The slideshow's worst frame (21.1 dB, against
-29.1 for the clip) is mid-dissolve, where the first photo is still zooming.
-Carrying each shot's camera, or its shapes, into the dissolve under the
-fitted crossfade would follow it.
+v1.18 carries each neighbouring shot's camera plate through a dissolve,
+so the photos keep moving under the crossfade. Their mosaics, though, hold
+only what their own shots saw. The second photo's pan had not yet revealed
+the 33 px strip the dissolve still shows, so the carried plate has nothing
+there. The dissolve frames sit near **22 dB**, between shots at 30 and 42.
+Building each mosaic from the dissolve's frames as well, with the other
+picture taken out of them, would close it.
 
 ---
 
@@ -392,6 +393,14 @@ fitted crossfade would follow it.
   `slideshow_dissolve` (a Ken Burns zoom dissolving into a pan) went 19.06 →
   **29.09 dB**, 371 shapes → 6.
 
+- **v1.18 — cameras carried through dissolves.** Each side of a dissolve
+  can be its neighbouring shot's camera plate, with the camera extrapolated
+  through the dissolve, rather than a frozen edge frame. Both variants are
+  built and the better one kept. `slideshow_dissolve` 29.09 → **29.16 dB**,
+  worst frame 21.1 → 21.8 dB. A clip of one or two frames is now layered
+  like any other (nothing in it can be tracked as moving), where it used to
+  come back as a lone background: a test card frame went 3.9 → **37.8 dB**.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -399,10 +408,10 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
-| `slideshow_dissolve.mp4` | 0.9955 | 0.9634 | 80.1 | 29.09 | 0.3% | 6 |
 | `testsrc2.mp4` | 0.9951 | 0.9859 | 372.7 | 22.42 | 0.4% | 64 |
 | `roll_watercolor.mp4` | 0.9951 | 0.9921 | 30.8 | 33.25 | 0.4% | 1 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
+| `slideshow_dissolve.mp4` | 0.9938 | 0.9695 | 78.8 | 29.16 | 0.3% | 6 |
 | `kenburns_watercolor.mp4` | 0.9921 | 0.9899 | 60.9 | 30.29 | 0.6% | 2 |
 | `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
 | `real_bouncing_ball.gif` | 0.9905 | 0.9885 | 1.5 | 46.37 | 0.6% | 2 |

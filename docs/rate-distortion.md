@@ -219,9 +219,9 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 97,195 | 4.6× smaller | 97.0 | 28.26 | 0.9944 | 4 | 6 |
-| 25 | 117,376 | 3.8× smaller | 88.5 | 28.66 | 0.9949 | 4 | 10 |
-| 50 | 165,542 | 2.7× smaller | 80.1 | 29.09 | 0.9955 | 6 | 85 |
+| 0 | 96,915 | 4.6× smaller | 85.7 | 28.80 | 0.9924 | 4 | 8 |
+| 25 | 116,723 | 3.8× smaller | 81.3 | 29.03 | 0.9928 | 4 | 12 |
+| 50 | 163,390 | 2.7× smaller | 78.8 | 29.16 | 0.9938 | 6 | 87 |
 | 75 | 218,860 | 2.0× smaller | 76.2 | 29.31 | 0.9959 | 6 | 118 |
 | 100 | 340,485 | 1.3× smaller | 74.1 | 29.43 | 0.9961 | 6 | 130 |
 

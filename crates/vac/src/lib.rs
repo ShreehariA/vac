@@ -796,28 +796,34 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
     edges.extend(&cuts);
     edges.push(frames.len());
     let check_whole = cuts.len() <= WHOLE_CHECK_MAX_CUTS && frames.len() <= WHOLE_CHECK_MAX_FRAMES;
-    let (whole, parts): (Option<Result<Chosen>>, Vec<Result<Chosen>>) = std::thread::scope(|scope| {
+    // The shots first, side by side; each dissolve after them, because it
+    // carries its neighbours' cameras through itself (v1.18).
+    let (whole, shots): (Option<Result<Chosen>>, Vec<Option<Result<Chosen>>>) = std::thread::scope(|scope| {
         let whole = check_whole.then(|| scope.spawn(|| decompile_shot(frames, opts)));
-        let parts: Vec<_> = edges
+        let shots: Vec<_> = edges
             .windows(2)
             .map(|w| {
                 let (a, b) = (w[0], w[1]);
-                let dissolving = is_dissolve(a);
-                scope.spawn(move || {
-                    if dissolving {
-                        dissolve_shot(frames, a, b, opts)
-                    } else {
-                        decompile_shot(&frames[a..b], opts)
-                    }
-                })
+                (!is_dissolve(a)).then(|| scope.spawn(move || decompile_shot(&frames[a..b], opts)))
             })
             .collect();
         (
             whole.map(|h| h.join().expect("whole-clip decompile panicked")),
-            parts.into_iter().map(|h| h.join().expect("shot decompile panicked")).collect(),
+            shots.into_iter().map(|h| h.map(|h| h.join().expect("shot decompile panicked"))).collect(),
         )
     });
-    let parts: Vec<Chosen> = parts.into_iter().collect::<Result<_>>()?;
+    let mut slots: Vec<Option<Chosen>> = shots.into_iter().map(|s| s.transpose()).collect::<Result<_>>()?;
+    for k in 0..slots.len() {
+        if slots[k].is_some() {
+            continue;
+        }
+        let (a, b) = (edges[k], edges[k + 1]);
+        let before = k.checked_sub(1).and_then(|j| slots[j].as_ref()).map(|c| &c.document);
+        let after = slots.get(k + 1).and_then(|s| s.as_ref()).map(|c| &c.document);
+        let made = dissolve_shot(frames, a, b, opts, before, after)?;
+        slots[k] = Some(made);
+    }
+    let parts: Vec<Chosen> = slots.into_iter().map(|s| s.expect("every slot filled")).collect();
     let merged = merge_shots(frames, &edges, parts.iter().map(|c| &c.document));
     let fid = measure(frames, &merged)?;
     if let Some(whole) = whole {
@@ -970,27 +976,194 @@ fn dissolve_candidates(frames: &[VideoFrame]) -> Vec<(usize, usize)> {
     kept
 }
 
-/// A dissolve's frames `[a, b)` as a scene of their own: the frame before
-/// it and the frame after it, both as full-canvas pictures, the second
-/// drawn over the first with its opacity fitted to every frame by least
-/// squares — `β = Σ (F − P)·(Q − P) / Σ |Q − P|²` — and simplified like any
-/// opacity channel.
-fn dissolve_shot(frames: &[VideoFrame], a: usize, b: usize, opts: &DecompileOptions) -> Result<Chosen> {
+/// The value each of a camera's channels — position, scale, rotation —
+/// has at time `t` (ms, possibly outside the animation): linear between
+/// the keyframes that carry it, and carried on linearly past either end
+/// from the two nearest.
+fn camera_at(anim: &Animation, t: f64) -> Vec<Transform> {
+    let mut out = Vec::new();
+    let pick = |f: &dyn Fn(&Transform) -> Option<Vec<f32>>| -> Option<Vec<f32>> {
+        let pts: Vec<(f64, Vec<f32>)> = anim
+            .keyframes
+            .iter()
+            .filter_map(|k| k.transforms.iter().find_map(|tr| f(tr)).map(|v| (k.time_ms as f64, v)))
+            .collect();
+        match pts.len() {
+            0 => None,
+            1 => Some(pts[0].1.clone()),
+            n => {
+                let (i, j) = if t <= pts[0].0 {
+                    (0, 1)
+                } else if t >= pts[n - 1].0 {
+                    (n - 2, n - 1)
+                } else {
+                    let j = pts.iter().position(|p| p.0 >= t).unwrap_or(n - 1).max(1);
+                    (j - 1, j)
+                };
+                let span = (pts[j].0 - pts[i].0).max(1e-9);
+                let u = ((t - pts[i].0) / span) as f32;
+                Some(pts[i].1.iter().zip(&pts[j].1).map(|(a, b)| a + (b - a) * u).collect())
+            }
+        }
+    };
+    if let Some(v) = pick(&|tr| match tr {
+        Transform::Position(x, y) => Some(vec![*x, *y]),
+        _ => None,
+    }) {
+        out.push(Transform::Position((v[0] * 100.0).round() / 100.0, (v[1] * 100.0).round() / 100.0));
+    }
+    if let Some(v) = pick(&|tr| match tr {
+        Transform::Scale(s) => Some(vec![*s]),
+        _ => None,
+    }) {
+        out.push(Transform::Scale((v[0] * 10000.0).round() / 10000.0));
+    }
+    if let Some(v) = pick(&|tr| match tr {
+        Transform::Rotate(d) => Some(vec![*d]),
+        _ => None,
+    }) {
+        out.push(Transform::Rotate((v[0] * 100.0).round() / 100.0));
+    }
+    out
+}
+
+/// One side of a dissolve: the neighbouring shot's camera plate, carried
+/// on through the dissolve — the same mosaic, its camera extrapolated —
+/// when that shot is one; else the frame at the dissolve's edge, frozen.
+/// `offset_ms` is where the dissolve's first frame falls in the
+/// neighbour's own time.
+fn dissolve_side(
+    neighbour: Option<&Document>,
+    edge: &VideoFrame,
+    offset_ms: f64,
+    end_ms: u32,
+    raster_quality: u8,
+) -> Result<(Shape, Option<Animation>)> {
+    let carried = neighbour.and_then(|d| {
+        let scene = d.scenes.last()?;
+        let plate = scene.statements.iter().find_map(|st| match st {
+            Statement::Let { name, shape: shape @ Shape::Image { .. } } if name == "plate" => Some(shape.clone()),
+            _ => None,
+        })?;
+        let camera = scene.statements.iter().find_map(|st| match st {
+            Statement::Animate(a) if a.target == "plate" => Some(a.clone()),
+            _ => None,
+        })?;
+        Some((plate, camera))
+    });
+    if let Some((plate, camera)) = carried {
+        let keyframes = [0u32, end_ms]
+            .iter()
+            .map(|&t| Keyframe {
+                time_ms: t,
+                transforms: camera_at(&camera, offset_ms + t as f64),
+            })
+            .collect();
+        return Ok((
+            plate,
+            Some(Animation {
+                target: String::new(),
+                keyframes,
+                easing: Easing::Linear,
+            }),
+        ));
+    }
+    let src = vac_decompiler::jpeg_data_uri(edge, raster_quality)
+        .ok_or_else(|| Error::Decompile(DecompileError::Other("could not encode a dissolve's picture".into())))?;
+    Ok((
+        Shape::Image {
+            x: 0.0,
+            y: 0.0,
+            w: edge.width as f32,
+            h: edge.height as f32,
+            src,
+        },
+        None,
+    ))
+}
+
+/// A dissolve's frames `[a, b)` as a scene of their own (v1.17, v1.18):
+/// the shot before it under the shot after it, crossfading. Each side is
+/// that shot's camera plate carried on through the dissolve when it has
+/// one — a slideshow's photos keep zooming and panning while they dissolve
+/// — or the frame at the dissolve's edge, frozen. The incoming side's
+/// opacity is fitted to every frame against the two sides as rendered, by
+/// least squares — `β = Σ (F − P)·(Q − P) / Σ |Q − P|²` — and simplified
+/// like any opacity channel.
+fn dissolve_shot(
+    frames: &[VideoFrame],
+    a: usize,
+    b: usize,
+    opts: &DecompileOptions,
+    before: Option<&Document>,
+    after: Option<&Document>,
+) -> Result<Chosen> {
+    // Carried cameras follow the photos' motion but know only what each
+    // shot saw — a pan's mosaic has nothing for the strip the dissolve
+    // still shows — while frozen pictures hold everything at the edge and
+    // nothing of the motion. Both are built; the one that reconstructs the
+    // dissolve's frames better is kept.
+    let carried = dissolve_variant(frames, a, b, opts, before, after)?;
+    if before.is_none() && after.is_none() {
+        return Ok(carried);
+    }
+    let frozen = dissolve_variant(frames, a, b, opts, None, None)?;
+    let shot = &frames[a..b];
+    let (fc, ff) = (measure(shot, &carried.document)?, measure(shot, &frozen.document)?);
+    Ok(if reconstructs_better(&ff, &fc) { frozen } else { carried })
+}
+
+fn dissolve_variant(
+    frames: &[VideoFrame],
+    a: usize,
+    b: usize,
+    opts: &DecompileOptions,
+    before: Option<&Document>,
+    after: Option<&Document>,
+) -> Result<Chosen> {
     let (p, q) = (&frames[a - 1], &frames[b.min(frames.len() - 1)]);
     let tol = vac_decompiler::Tolerances::from_quality(opts.quality);
     let fps = vac_decompiler::frames::estimate_fps(frames).max(1);
-    let (w, h) = (p.width as f32, p.height as f32);
-    let picture = |f: &VideoFrame| {
-        vac_decompiler::jpeg_data_uri(f, tol.raster_quality)
-            .ok_or_else(|| Error::Decompile(DecompileError::Other("could not encode a dissolve's picture".into())))
-    };
-    let (from, to) = (picture(p)?, picture(q)?);
     let n = b - a;
-    let beta: Vec<f32> = frames[a..b]
-        .iter()
-        .map(|f| {
+    let time = |i: usize| ((i as u64 * 1000) / fps as u64) as u32;
+    let end = time(n - 1);
+    let duration_ms = ((n as u64 * 1000).div_ceil(fps as u64)) as u32;
+    let before_ms = before.and_then(|d| d.scenes.last()).map(|s| s.duration_ms as f64).unwrap_or(0.0);
+    let (from, from_cam) = dissolve_side(before, p, before_ms, end, tol.raster_quality)?;
+    let (to, to_cam) = dissolve_side(after, q, -(duration_ms as f64), end, tol.raster_quality)?;
+    let canvas = Canvas {
+        width: p.width,
+        height: p.height,
+        fps,
+    };
+    // Each side alone, rendered over the dissolve's frames.
+    let layer = |shape: &Shape, cam: &Option<Animation>, name: &str| -> Result<Vec<RenderedFrame>> {
+        let mut statements = vec![Statement::Let {
+            name: name.into(),
+            shape: shape.clone(),
+        }];
+        if let Some(c) = cam {
+            statements.push(Statement::Animate(Animation {
+                target: name.into(),
+                ..c.clone()
+            }));
+        }
+        render(&Document {
+            canvas: canvas.clone(),
+            scenes: vec![Scene {
+                name: "dissolve".into(),
+                duration_ms,
+                statements,
+            }],
+        })
+    };
+    let (pr, qr) = (layer(&from, &from_cam, "plate")?, layer(&to, &to_cam, "incoming")?);
+    let beta: Vec<f32> = (0..n)
+        .map(|i| {
+            let f = &frames[a + i];
+            let (pp, qq) = (&pr[i.min(pr.len() - 1)].rgba, &qr[i.min(qr.len() - 1)].rgba);
             let (mut num, mut den) = (0f64, 0f64);
-            for ((fp, pp), qp) in f.pixels.chunks_exact(4).zip(p.pixels.chunks_exact(4)).zip(q.pixels.chunks_exact(4)).step_by(2) {
+            for ((fp, pp), qp) in f.pixels.chunks_exact(4).zip(pp.chunks_exact(4)).zip(qq.chunks_exact(4)).step_by(2) {
                 for c in 0..3 {
                     let dv = qp[c] as f64 - pp[c] as f64;
                     num += (fp[c] as f64 - pp[c] as f64) * dv;
@@ -1000,7 +1173,6 @@ fn dissolve_shot(frames: &[VideoFrame], a: usize, b: usize, opts: &DecompileOpti
             if den > 0.0 { (num / den).clamp(0.0, 1.0) as f32 } else { 0.5 }
         })
         .collect();
-    let time = |i: usize| ((i as u64 * 1000) / fps as u64) as u32;
     let opacity_tol = tol.opacity_levels / 255.0;
     let mut keep = vec![false; n];
     keep[0] = true;
@@ -1023,41 +1195,50 @@ fn dissolve_shot(frames: &[VideoFrame], a: usize, b: usize, opts: &DecompileOpti
         }
     }
     let round = |v: f32| (v * 1000.0).round() / 1000.0;
-    let statements = vec![
-        Statement::Let {
-            name: "plate".into(),
-            shape: Shape::Image { x: 0.0, y: 0.0, w, h, src: from },
-        },
-        Statement::Let {
-            name: "incoming".into(),
-            shape: Shape::Image { x: 0.0, y: 0.0, w, h, src: to },
-        },
-        Statement::Animate(Animation {
-            target: "incoming".into(),
-            keyframes: (0..n)
-                .filter(|&i| keep[i])
-                .map(|i| Keyframe {
-                    time_ms: time(i),
-                    transforms: vec![Transform::Opacity(round(beta[i]))],
-                })
-                .collect(),
-            easing: Easing::Linear,
-        }),
-    ];
-    let document = Document {
-        canvas: Canvas {
-            width: p.width,
-            height: p.height,
-            fps,
-        },
-        scenes: vec![Scene {
-            name: "dissolve".into(),
-            duration_ms: ((n as u64 * 1000).div_ceil(fps as u64)) as u32,
-            statements,
-        }],
-    };
+    let mut incoming: Vec<Keyframe> = (0..n)
+        .filter(|&i| keep[i])
+        .map(|i| Keyframe {
+            time_ms: time(i),
+            transforms: vec![Transform::Opacity(round(beta[i]))],
+        })
+        .collect();
+    if let Some(cam) = &to_cam {
+        for k in &cam.keyframes {
+            match incoming.iter_mut().find(|x| x.time_ms == k.time_ms) {
+                Some(x) => x.transforms.extend(k.transforms.clone()),
+                None => incoming.push(k.clone()),
+            }
+        }
+        incoming.sort_by_key(|k| k.time_ms);
+    }
+    let mut statements = vec![Statement::Let {
+        name: "plate".into(),
+        shape: from,
+    }];
+    if let Some(c) = from_cam {
+        statements.push(Statement::Animate(Animation {
+            target: "plate".into(),
+            ..c
+        }));
+    }
+    statements.push(Statement::Let {
+        name: "incoming".into(),
+        shape: to,
+    });
+    statements.push(Statement::Animate(Animation {
+        target: "incoming".into(),
+        keyframes: incoming,
+        easing: Easing::Linear,
+    }));
     Ok(Chosen {
-        document,
+        document: Document {
+            canvas,
+            scenes: vec![Scene {
+                name: "dissolve".into(),
+                duration_ms,
+                statements,
+            }],
+        },
         segmentation: Segmentation::Components,
         background: Background::Corners,
         plate: Plate::Raster,

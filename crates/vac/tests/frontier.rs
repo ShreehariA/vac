@@ -460,6 +460,35 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.18 — a still frame is a scene, not nothing.**
+///
+/// Every track needs three frames and the static layer needed eight, so a
+/// clip of a frame or two had nothing to describe it with: a single frame
+/// of ffmpeg's test card came back as a lone background at 3.9 dB. In a
+/// clip that short nothing can be a mover, and its frames are the scene, so
+/// it is layered like any other; the test card frame now comes back at
+/// 37.8 dB. Here `outlined.vac`'s first frame alone must come back as its
+/// shapes.
+#[test]
+fn a_single_frame_comes_back_as_its_shapes() {
+    let mut source = vac::read(examples_dir().join("outlined.vac")).expect("read fixture");
+    // One frame at 30 fps.
+    source.scenes[0].duration_ms = 34;
+    let rendered = vac::render(&source).expect("render");
+    assert_eq!(rendered.len(), 1);
+    let frames = vac::rendered_to_video_frames(&rendered, source.canvas.fps);
+    let recovered = vac::decompile_frames(frames.clone(), &DecompileOptions::default()).expect("decompile");
+    let fid = vac::measure(&frames, &recovered).expect("measure");
+    let shapes = recovered
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .filter(|st| matches!(st, Statement::Let { name, .. } if name != "bg"))
+        .count();
+    assert!(shapes >= 3, "the frame's shapes, not a lone background: {shapes}");
+    assert!(fid.psnr_db > 35.0, "one frame of outlined.vac: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.17 — dissolves.**
 ///
 /// A dissolve is a cut spread over frames: no single step looks like a cut,

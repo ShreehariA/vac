@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.17)
+## Where VAC is today (v1.18)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -76,7 +76,7 @@ keyframes are re-measured by registering its own pixels across frames.
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 30.3 dB | 0.992 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
 | `cuts_three_shots.mp4` | three corpus clips cut together | 29.2 dB | 0.956 |
-| `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.1 dB | 0.996 |
+| `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.2 dB | 0.994 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
@@ -2363,3 +2363,48 @@ Every other corpus clip is unchanged. One thing is left: the dissolve's
 pictures are frozen at its ends, so motion during the dissolve isn't
 followed. The slideshow's worst frame (21.1 dB) is mid-dissolve, where the
 first photo is still zooming.
+
+## v1.18 — Cameras carried through dissolves
+
+v1.17 wrote a dissolve as its two edge frames crossfading, frozen, so a
+slideshow's photos stopped moving for the length of the dissolve. Now each
+side can be its neighbouring shot's camera plate, the same mosaic with the
+camera extrapolated linearly through the dissolve. The first photo keeps
+zooming while the second, already panning, fades in over it. The crossfade
+is fitted against the two sides as rendered.
+
+```vac
+scene shot_2 {                        // the dissolve
+  duration 934ms
+  let plate = image(0, 0, 480, 320, "…")          // the first photo's mosaic
+  animate plate {
+    0ms   -> position(-33.27, -22.42), scale(1.1407)
+    900ms -> position(-50.46, -37.6), scale(1.2119)   // still zooming
+  }
+  let incoming = image(0, -1, 560, 322, "…")      // the second's mosaic
+  animate incoming {
+    0ms   -> opacity(0.063), position(32.94, -1), scale(1)
+    900ms -> opacity(0.969), position(1.17, -1), scale(1)  // already panning
+  }
+}
+```
+
+The gain is small, 29.09 → **29.16 dB**, because a carried mosaic knows only
+what its own shot saw. The second photo's pan had not yet shown the 33 px
+strip the dissolve still displays, so that strip comes from nothing. Since
+neither representation always wins, the decompiler builds both, carried and
+frozen, and keeps whichever reconstructs the dissolve's frames better. The
+remaining gap (the dissolve frames sit near 22 dB between shots at 30 and
+42) needs each shot's mosaic to learn from the dissolve's frames too, by
+taking the other picture out of them. That's recorded as frontier item 4.
+
+### A still frame is a scene, not nothing
+
+A robustness pass fed VAC inputs nobody had tried: one frame, two frames,
+odd sizes (334×212), an 8×8 clip, three seconds of one flat colour. None of
+them crashed. But a single frame of ffmpeg's test card came back as a lone
+background at **3.9 dB**. Every track needs three frames and the static layer
+needed eight, so a clip of a frame or two had nothing to describe it with.
+In a clip that short nothing can be a mover, and its frames are the scene,
+so it's now layered like any other. The test card frame comes back at
+**37.8 dB**, and one frame of `outlined.vac` comes back as its shapes.

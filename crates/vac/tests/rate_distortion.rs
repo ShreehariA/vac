@@ -174,13 +174,27 @@ fn record_rate_distortion_curves() {
                 continue;
             }
         };
-        for q in QUALITIES {
-            let opts = DecompileOptions {
-                quality: q,
-                ..Default::default()
-            };
-            let doc = vac::decompile_frames(frames.clone(), &opts).unwrap();
-            let fid = vac::measure(&frames, &doc).unwrap();
+        // The five qualities are independent decompiles: run them side by
+        // side, and write their rows in quality order.
+        let results: Vec<(f32, vac::Document, vac::Fidelity)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = QUALITIES
+                .iter()
+                .map(|&q| {
+                    let frames = &frames;
+                    scope.spawn(move || {
+                        let opts = DecompileOptions {
+                            quality: q,
+                            ..Default::default()
+                        };
+                        let doc = vac::decompile_frames(frames.clone(), &opts).unwrap();
+                        let fid = vac::measure(frames, &doc).unwrap();
+                        (q, doc, fid)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("decompile panicked")).collect()
+        });
+        for (q, doc, fid) in results {
             let text = vac::to_string(&doc);
             let keyframes: usize = doc
                 .scenes
