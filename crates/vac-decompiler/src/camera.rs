@@ -527,7 +527,7 @@ pub struct Mosaic {
 }
 
 /// Most frames the mosaic's median reads, evenly spaced over the clip.
-const MOSAIC_MAX_SAMPLES: usize = 45;
+pub const MOSAIC_MAX_SAMPLES: usize = 45;
 /// The largest mosaic, as a multiple of the canvas area: a camera that
 /// wanders further is not one scene.
 const MOSAIC_MAX_AREA: f32 = 4.0;
@@ -611,6 +611,180 @@ pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3], density: f32) 
     })
 }
 
+/// Rounds of back-projection in [`sharpen`]. Swept on the Ken Burns clip:
+/// 3 rounds 32.30 dB, 6 rounds 32.42, 10 rounds 32.45.
+const SHARPEN_ROUNDS: usize = 6;
+/// A residual larger than this on any channel is not blur — a mover, a
+/// flicker — and pushes nothing back.
+const SHARPEN_OUTLIER: f32 = 48.0;
+/// [`sharpen`] keeps only the fit's change at scales finer than this: what
+/// two passes of a box blur this many pixels each way would remove. The
+/// fit decides the detail; the median keeps the colour. A fade's restored
+/// frames are a few percent off in brightness, and a fit absorbs that
+/// where a median does not: plain back-projection cost the fade clip
+/// 0.45 dB, the detail alone gained it 0.15 (radius 1 and 2 alike; 4 lost).
+const SHARPEN_DETAIL_RADIUS: usize = 2;
+
+/// The mosaic fitted to the frames through the renderer's own bilinear
+/// reading of it (v1.19): iterative back-projection. Each round renders
+/// every sampled frame from the mosaic and pushes each pixel's error back
+/// onto the mosaic pixels it was read from. The median mosaic is the
+/// frames' samples blurred once on the way in and once more on the way
+/// out; this one is fitted to what the renderer will make of it. A frame
+/// that disagrees with the rest — noise a fade's division amplified — is
+/// weighted down by the square of how much more it disagrees than the
+/// median frame, and only the fit's fine detail is kept
+/// ([`SHARPEN_DETAIL_RADIUS`]).
+pub fn sharpen(m: &Mosaic, frames: &[VideoFrame], views: &[View]) -> Mosaic {
+    let (mw, mh) = (m.image.width as usize, m.image.height as usize);
+    let base: Vec<f32> = m.image.pixels.chunks_exact(4).flat_map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+    let mut px = base.clone();
+    let step = (frames.len() / MOSAIC_MAX_SAMPLES).max(1);
+    let picked: Vec<usize> = (0..frames.len()).step_by(step).collect();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8).min(picked.len().max(1));
+    // Each frame's RMS residual, from the round before; round 0 only measures.
+    let mut rms: Vec<f32> = vec![1.0; picked.len()];
+    for round in 0..=SHARPEN_ROUNDS {
+        let measuring = round == 0;
+        let mut sorted = rms.clone();
+        sorted.sort_by(f32::total_cmp);
+        let typical = sorted[sorted.len() / 2].max(1e-3);
+        let weight: Vec<f32> = rms.iter().map(|&r| (typical / r.max(1e-3)).powi(2).min(1.0)).collect();
+        let jobs: Vec<(usize, usize)> = picked.iter().copied().enumerate().collect();
+        let parts: Vec<(Vec<f32>, Vec<f32>, Vec<(usize, f32)>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = jobs
+                .chunks(jobs.len().div_ceil(threads))
+                .map(|chunk| {
+                    let (px, weight) = (&px, &weight);
+                    scope.spawn(move || {
+                        let cells = if measuring { 0 } else { mw * mh };
+                        let (mut num, mut den) = (vec![0f32; cells * 3], vec![0f32; cells]);
+                        let mut errs = Vec::with_capacity(chunk.len());
+                        for &(j, t) in chunk {
+                            let f = &frames[t];
+                            let (fw, fh) = (f.width as usize, f.height as usize);
+                            let (mut sq, mut count) = (0f64, 0usize);
+                            for y in 0..fh {
+                                for x in 0..fw {
+                                    let q = views[t].to_reference((x as f32 + 0.5, y as f32 + 0.5));
+                                    let (u, v) = ((q.0 - m.x) * m.density - 0.5, (q.1 - m.y) * m.density - 0.5);
+                                    if u < 0.0 || v < 0.0 || u > (mw - 1) as f32 || v > (mh - 1) as f32 {
+                                        continue;
+                                    }
+                                    let (x0, y0) = (u.floor() as usize, v.floor() as usize);
+                                    let (x1, y1) = ((x0 + 1).min(mw - 1), (y0 + 1).min(mh - 1));
+                                    let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+                                    let taps = [
+                                        (y0 * mw + x0, (1.0 - fx) * (1.0 - fy)),
+                                        (y0 * mw + x1, fx * (1.0 - fy)),
+                                        (y1 * mw + x0, (1.0 - fx) * fy),
+                                        (y1 * mw + x1, fx * fy),
+                                    ];
+                                    let i = (y * fw + x) * 4;
+                                    let mut e = [0f32; 3];
+                                    let mut worst = 0f32;
+                                    for (c, ec) in e.iter_mut().enumerate() {
+                                        let r: f32 = taps.iter().map(|&(k, wt)| px[k * 3 + c] * wt).sum();
+                                        *ec = f.pixels[i + c] as f32 - r;
+                                        worst = worst.max(ec.abs());
+                                    }
+                                    sq += e.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
+                                    count += 3;
+                                    if measuring || worst > SHARPEN_OUTLIER {
+                                        continue;
+                                    }
+                                    let wf = weight[j];
+                                    for &(k, wt) in &taps {
+                                        for c in 0..3 {
+                                            num[k * 3 + c] += wf * wt * e[c];
+                                        }
+                                        den[k] += wf * wt;
+                                    }
+                                }
+                            }
+                            errs.push((j, (sq / count.max(1) as f64).sqrt() as f32));
+                        }
+                        (num, den, errs)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("back-projection panicked")).collect()
+        });
+        let (mut num, mut den) = (vec![0f32; mw * mh * 3], vec![0f32; mw * mh]);
+        for (n, d, errs) in parts {
+            if !measuring {
+                num.iter_mut().zip(&n).for_each(|(a, b)| *a += b);
+                den.iter_mut().zip(&d).for_each(|(a, b)| *a += b);
+            }
+            for (j, r) in errs {
+                rms[j] = r;
+            }
+        }
+        if measuring {
+            continue;
+        }
+        for k in 0..mw * mh {
+            if den[k] > 1e-3 {
+                for c in 0..3 {
+                    px[k * 3 + c] = (px[k * 3 + c] + num[k * 3 + c] / den[k]).clamp(0.0, 255.0);
+                }
+            }
+        }
+    }
+    // The fit decides the detail; the median keeps the colour.
+    let change: Vec<f32> = px.iter().zip(&base).map(|(a, b)| a - b).collect();
+    let coarse = box_blur(&box_blur(&change, mw, mh, SHARPEN_DETAIL_RADIUS), mw, mh, SHARPEN_DETAIL_RADIUS);
+    let mut pixels = m.image.pixels.clone();
+    for (k, o) in pixels.chunks_exact_mut(4).enumerate() {
+        for c in 0..3 {
+            let i = k * 3 + c;
+            o[c] = (base[i] + change[i] - coarse[i]).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Mosaic {
+        x: m.x,
+        y: m.y,
+        w: m.w,
+        h: m.h,
+        image: VideoFrame { pixels, ..m.image.clone() },
+        density: m.density,
+    }
+}
+
+/// A separable box blur of an RGB float image, `radius` pixels each way,
+/// edges clamped.
+fn box_blur(img: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    let r = radius as isize;
+    let n = (2 * r + 1) as f32;
+    let mut tmp = vec![0f32; img.len()];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..3 {
+                let mut s = 0f32;
+                for dx in -r..=r {
+                    let xx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                    s += img[(y * w + xx) * 3 + c];
+                }
+                tmp[(y * w + x) * 3 + c] = s / n;
+            }
+        }
+    }
+    let mut out = vec![0f32; img.len()];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..3 {
+                let mut s = 0f32;
+                for dy in -r..=r {
+                    let yy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                    s += tmp[(yy * w + x) * 3 + c];
+                }
+                out[(y * w + x) * 3 + c] = s / n;
+            }
+        }
+    }
+    out
+}
+
 /// The mosaic as frame `view` shows it, `w × h` RGBA — what the renderer
 /// draws for the plate in that frame.
 pub fn warp(m: &Mosaic, view: View, w: u32, h: u32) -> Vec<u8> {
@@ -677,5 +851,56 @@ mod tests {
             }
         }
         assert!(motion_px(&got, w, h) > MIN_CAMERA_MOTION_PX);
+    }
+
+    /// v1.19: a fine texture under a known 1.0 → 1.4 zoom. The median
+    /// mosaic is the frames' samples blurred on the way in and again on the
+    /// way out; fitted through the same reading, the mosaic must read back
+    /// closer to every frame.
+    #[test]
+    fn a_mosaic_fitted_through_the_renderer_reads_back_closer() {
+        let (w, h) = (120u32, 90u32);
+        let texture = |x: f32, y: f32| -> [u8; 3] {
+            let r = 128.0 + 90.0 * (x * 0.9).sin() * (y * 0.7).cos();
+            let g = 128.0 + 90.0 * (x * 0.6 + y * 1.1).sin();
+            let b = 128.0 + 90.0 * ((x - y) * 0.8).cos();
+            [r as u8, g as u8, b as u8]
+        };
+        let views: Vec<View> = (0..24)
+            .map(|t| {
+                let s = 1.0 + 0.4 * t as f32 / 23.0;
+                View { scale: s, angle: 0.0, offset: (60.0 * (1.0 - s), 45.0 * (1.0 - s)) }
+            })
+            .collect();
+        let frames: Vec<VideoFrame> = views
+            .iter()
+            .map(|v| {
+                let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let q = v.to_reference((x as f32 + 0.5, y as f32 + 0.5));
+                        let c = texture(q.0, q.1);
+                        pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+                    }
+                }
+                VideoFrame { width: w, height: h, pixels, delay_ms: 33 }
+            })
+            .collect();
+        let rms = |m: &Mosaic| -> f64 {
+            let (mut sq, mut n) = (0f64, 0usize);
+            for (f, v) in frames.iter().zip(&views) {
+                for (a, b) in warp(m, *v, w, h).chunks_exact(4).zip(f.pixels.chunks_exact(4)) {
+                    if a[3] > 0 {
+                        sq += (0..3).map(|c| (a[c] as f64 - b[c] as f64).powi(2)).sum::<f64>();
+                        n += 3;
+                    }
+                }
+            }
+            (sq / n as f64).sqrt()
+        };
+        let median = mosaic(&frames, &views, [0, 0, 0], 1.0).expect("mosaic");
+        let fitted = sharpen(&median, &frames, &views);
+        let (before, after) = (rms(&median), rms(&fitted));
+        assert!(after < 0.5 * before, "RMS residual {before:.2} -> {after:.2}: the fit should take half of it out");
     }
 }

@@ -460,6 +460,46 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.19 — a mosaic fitted through the renderer.**
+///
+/// A camera plate's mosaic was the per-pixel median of every frame warped
+/// back: each sample blurred once by the warp in and again by the
+/// renderer's reading out. On fine texture that blur was most of the error
+/// (the Ken Burns clip's worst frame: 40 dB at a 4×4 average, 29 dB at full
+/// resolution). The mosaic is now also fitted to the frames through the
+/// renderer's own bilinear reading of it, by back-projection, and kept when
+/// it pays for its bytes. Here a fine procedural texture zoomed 1.0 → 1.4
+/// must come back as a camera at better than 33.5 dB: fitted, 34.5; the
+/// median mosaic alone, 32.0.
+#[test]
+fn a_detailed_zoom_comes_back_sharp() {
+    let (w, h) = (240u32, 160u32);
+    let mut texture = image::RgbImage::new(w, h);
+    for (x, y, p) in texture.enumerate_pixels_mut() {
+        let (x, y) = (x as f32, y as f32);
+        let r = 128.0 + 70.0 * (x * 0.7).sin() * (y * 0.5).cos() + 30.0 * (x * 0.13 + y * 0.21).sin();
+        let g = 128.0 + 70.0 * (x * 0.45 + y * 0.8).sin() + 30.0 * (y * 0.09).cos();
+        let b = 128.0 + 70.0 * ((x - y) * 0.6).cos() + 30.0 * (x * 0.05).sin();
+        *p = image::Rgb([r as u8, g as u8, b as u8]);
+    }
+    let mut png = Vec::new();
+    texture.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).expect("encode texture");
+    let src = format!(
+        "canvas 240x160 @30fps\n\nscene main {{\n  duration 800ms\n\n  let photo = image(0, 0, 240, 160, \"data:image/png;base64,{}\")\n\n  animate photo {{\n    0ms -> position(0, 0), scale(1)\n    800ms -> position(-48, -32), scale(1.4)\n    easing: linear\n  }}\n}}\n",
+        vac_format::base64::encode(&png)
+    );
+    let source = vac::parse(&src).expect("parse the zoom");
+    let rendered = vac::render(&source).expect("render");
+    let frames = vac::rendered_to_video_frames(&rendered, source.canvas.fps);
+    let recovered = vac::decompile_frames(frames.clone(), &DecompileOptions::default()).expect("decompile");
+    let fid = vac::measure(&frames, &recovered).expect("measure");
+    let zoomed = recovered.scenes.iter().flat_map(|s| &s.statements).any(|st| {
+        matches!(st, Statement::Animate(a) if a.keyframes.iter().any(|k| k.transforms.iter().any(|t| matches!(t, Transform::Scale(s) if *s > 1.3))))
+    });
+    assert!(zoomed, "the zoom comes back as a camera");
+    assert!(fid.psnr_db > 33.5, "detailed zoom: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.18 — a still frame is a scene, not nothing.**
 ///
 /// Every track needs three frames and the static layer needed eight, so a

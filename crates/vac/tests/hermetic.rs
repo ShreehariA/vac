@@ -125,7 +125,7 @@ const IOU_TOL: f64 = 0.01;
 const BASELINE: &[(&str, f64, f64)] = &[
     ("ball.vac", 0.9993, 0.01),
     ("camera.vac", 1.0000, 0.95),
-    ("camera_roll.vac", 1.0000, 1.21),
+    ("camera_roll.vac", 1.0000, 1.15),
     ("color_shift.vac", 0.9998, 0.14),
     ("crossing.vac", 0.9999, 0.00),
     ("diagonal.vac", 0.9995, 0.03),

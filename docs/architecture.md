@@ -1,6 +1,6 @@
 # How VAC decompiles a video
 
-This is the pipeline as of v1.18: what runs, in what order, and what decides
+This is the pipeline as of v1.19: what runs, in what order, and what decides
 each step. The README is a version-by-version log, and this is the map. One
 rule runs through all of it: **measure, don't classify.** Wherever there is a
 choice, every option is built, rendered back to pixels, and scored against
@@ -36,7 +36,7 @@ video ──► long?  ──► scan once, then a segment at a time  (v1.16)
             ▼
          one shot:
             measured search ──► vector candidates × backgrounds  (v0.13)
-                             ──► still raster plate / camera     (v1.6, v1.10)
+                             ──► still raster plate / camera     (v1.6, v1.10, v1.19)
             then, on the winner:
               audit   ──► every shape against its own absence    (v1.7)
               refine  ──► every size, position, stroke width     (v1.9)
@@ -88,7 +88,10 @@ shot.
   - a **camera**: each frame's view of the scene (scale, roll, offset) by a
     robust coarse-to-fine search, then re-measured against the median
     mosaic; the mosaic becomes one image with `position`/`scale`/`rotate`
-    keyframes.
+    keyframes. The image is the median mosaic or the same mosaic fitted to
+    the frames through the renderer's bilinear reading of it by
+    back-projection (v1.19), with only its fine detail kept, whichever pays
+    for its JPEG bytes on held-out probe frames.
 
   A plate must reconstruct at least twice as well as the vectors to be kept.
 

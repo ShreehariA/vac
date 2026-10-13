@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.18)
+## Where VAC is today (v1.19)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -48,7 +48,9 @@ appearing and disappearing. Where vectors measurably fail, the static
 scenery becomes one embedded `image()` with the moving shapes still written
 as code on top. When the whole picture moves, that image is moved by a
 measured camera that zooms, pans and rolls, written as `position()`,
-`scale()` and `rotate()` keyframes. A mover no
+`scale()` and `rotate()` keyframes; the image is fitted to the frames
+through the renderer's own reading of it, so what is drawn back is as sharp
+as what was filmed. A mover no
 flat fill can describe, like a shaded ball, keeps its keyframes and is drawn
 as its own pixels.
 
@@ -68,15 +70,15 @@ keyframes are re-measured by registering its own pixels across frames.
 | `vac_control.mp4` | VAC's own output, two moving balls | 46.6 dB | 0.971 |
 | `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 46.4 dB | 0.991 |
 | `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
-| `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.970 |
+| `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.971 |
 | `fade_through_black.mp4` | a card fading out, then a photo pan fading in | 42.2 dB | 0.992 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
+| `roll_watercolor.mp4` | a camera rolling 26° over an AI-generated watercolour | 35.9 dB | 0.996 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
-| `roll_watercolor.mp4` | a camera rolling 26° over an AI-generated watercolour | 33.3 dB | 0.995 |
-| `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 30.3 dB | 0.992 |
+| `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 32.4 dB | 0.993 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
+| `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.7 dB | 0.996 |
 | `cuts_three_shots.mp4` | three corpus clips cut together | 29.2 dB | 0.956 |
-| `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.2 dB | 0.994 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
@@ -2408,3 +2410,66 @@ needed eight, so a clip of a frame or two had nothing to describe it with.
 In a clip that short nothing can be a mover, and its frames are the scene,
 so it's now layered like any other. The test card frame comes back at
 **37.8 dB**, and one frame of `outlined.vac` comes back as its shapes.
+
+## v1.19 — A mosaic fitted through the renderer
+
+The camera clips were the corpus's middle tier. The Ken Burns zoom sat at
+30.3 dB and the rolling watercolour at 33.3. Raising the quality dial barely
+moved them: at quality 100 the Ken Burns clip reached 31.2 dB for twice the
+bytes. So the limit was the plate, not its JPEG. A probe of the worst frame
+said where:
+
+| test on Ken Burns frame 84 | PSNR |
+|---|---|
+| reconstruction as written | 29.3 dB |
+| both averaged over 4×4 blocks (colour only) | **40.0 dB** |
+| best global sub-pixel shift of the reconstruction | 29.3 dB (no shift helps) |
+| reconstruction sharpened | 30.0 dB |
+| reconstruction blurred | 27.5 dB |
+
+The colours were right and the registration was right. The detail was
+missing. The mosaic was the per-pixel median of every frame warped back,
+so each sample was blurred once by the warp on the way in and again by the
+renderer's bilinear reading on the way out. Drawing images bicubically
+instead was tried and bought 0.3 dB.
+
+v1.19 fits the mosaic to the frames *through* the renderer's reading of
+it, by iterative back-projection. Each round draws every sampled frame from
+the mosaic, then pushes each pixel's error back onto the mosaic pixels it
+was read from, in proportion to how much each contributed. Six rounds. Two
+things keep it honest:
+
+- **The fit decides the detail; the median keeps the colour.** A fade's
+  restored frames are a few percent off in brightness. A median ignores
+  that and a fit absorbs it. Plain back-projection cost the fade clip
+  0.45 dB. Keeping only the fit's change at scales finer than a 2-pixel
+  blur turned that into a 0.15 dB gain. Frames that disagree with the rest
+  are also weighted down by the square of how much more they disagree.
+- **It must pay for its bytes.** A sharper image costs more JPEG. Both
+  mosaics are encoded as they would be written, decoded, and read through
+  the camera onto eight probe frames, chosen where possible from frames the
+  fit never saw. The fitted one is kept only if it buys at least the
+  sprite price, about 0.04 dB per KB at the default quality, scaled by the
+  dial.
+
+| clip | v1.18 | v1.19 |
+|---|---|---|
+| `roll_watercolor.mp4` | 33.25 dB, 73 KB | **35.85 dB**, 82 KB |
+| `kenburns_watercolor.mp4` | 30.29 dB, 63 KB | **32.39 dB**, 70 KB |
+| `slideshow_dissolve.mp4` | 29.16 dB, 163 KB | **29.72 dB**, 175 KB |
+| `pan_portrait.mp4` | 42.51 dB | 42.54 dB |
+| `mandelbrot.mp4`, `fade_through_black.mp4` | — | unchanged: the median mosaic kept |
+
+At the default quality the Ken Burns clip now beats what quality 100 gave
+before (32.4 dB at 70 KB, against 31.2 dB at 121 KB). The Mandelbrot zoom
+measured no gain and kept its median mosaic. Its error is content changing
+from frame to frame, not blur. A new frontier test zooms a fine procedural
+texture 1.0 → 1.4 and requires the camera to come back above 33.5 dB:
+fitted, 34.5; the median alone, 32.0.
+
+One attempt failed and is recorded here. An "oracle" plate, the source
+photograph itself under the exact `zoompan` camera, scored *lower* than
+VAC's own decompile (26.3 against 30.3 dB). The clip's frames went through
+4:2:0 chroma subsampling, and the photograph had not. A mosaic built from
+the frames inherits what the frames are; that is what makes it the right
+thing to fit.

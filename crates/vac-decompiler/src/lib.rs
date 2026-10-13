@@ -204,8 +204,28 @@ pub struct Prepared {
     ground: Option<(frames::VideoFrame, vac_format::Color)>,
     background: Background,
     /// The camera and the mosaic it sees, for [`Plate::Camera`].
-    camera: Option<(camera::Mosaic, Vec<camera::View>)>,
+    camera: Option<CameraPlate>,
 }
+
+/// What [`Plate::Camera`] draws from: the views, the median mosaic, the
+/// same mosaic fitted through the renderer (v1.19), and a few of the shot's
+/// frames as they were before the plate was stripped from them, to choose
+/// between the two mosaics on.
+struct CameraPlate {
+    mosaic: camera::Mosaic,
+    sharp: camera::Mosaic,
+    views: Vec<camera::View>,
+    probes: Vec<(usize, frames::VideoFrame)>,
+}
+
+/// Frames [`CameraPlate`] keeps to choose between its mosaics on.
+const CAMERA_PROBES: usize = 8;
+/// What the sharpened mosaic must buy per byte it adds over the median
+/// one, in the selection rule's currency (`ln` of the residual ratio), at
+/// quality 50, scaled by the dial like every other price — the price a
+/// sprite pays (`1e-5`, ~0.04 dB per KB). The Ken Burns clip's sharpened
+/// mosaic buys ~0.28 dB per KB; the Mandelbrot zoom's buys nothing.
+const MOSAIC_MIN_GAIN_PER_BYTE: f64 = 1e-5;
 
 /// Measure and strip the static layer, and take the ground median.
 pub fn prepare(
@@ -329,6 +349,17 @@ pub fn prepare_camera(
     let Some(mosaic) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b], 1.0) else {
         return Ok(None);
     };
+    let sharp = camera::sharpen(&mosaic, &frames, &views);
+    // The probes, where the clip has them, are frames the fit never read.
+    let n = frames.len();
+    let fitted_every = (n / camera::MOSAIC_MAX_SAMPLES).max(1);
+    let probes: Vec<(usize, frames::VideoFrame)> = (0..CAMERA_PROBES.min(n))
+        .map(|k| {
+            let i = k * n / CAMERA_PROBES.min(n);
+            let i = if fitted_every > 1 && i % fitted_every == 0 { (i + 1).min(n - 1) } else { i };
+            (i, frames[i].clone())
+        })
+        .collect();
     for (f, v) in frames.iter_mut().zip(&views) {
         let seen = camera::warp(&mosaic, *v, w, h);
         layer::strip_against(f, &seen, bg);
@@ -338,7 +369,12 @@ pub fn prepare_camera(
         scene: None,
         ground: None,
         background,
-        camera: Some((mosaic, views)),
+        camera: Some(CameraPlate {
+            mosaic,
+            sharp,
+            views,
+            probes,
+        }),
     }))
 }
 
@@ -365,8 +401,9 @@ pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32, pla
         // Under a moving camera, the mosaic, and the views as keyframes —
         // pinned to a quarter of the keyframe tolerance, because a whole
         // picture misregistered by a pixel costs far more than one shape.
-        Plate::Camera => prepared.camera.as_ref().and_then(|(m, views)| {
-            let uri = raster_data_uri(&m.image, tol.raster_quality)?;
+        Plate::Camera => prepared.camera.as_ref().and_then(|cam| {
+            let (m, uri) = chosen_mosaic(cam, tol.raster_quality, quality)?;
+            let views = &cam.views;
             let mut times = Vec::with_capacity(prepared.frames.len());
             let mut t = 0u32;
             for f in &prepared.frames {
@@ -405,16 +442,67 @@ pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32, pla
     )
 }
 
+/// The median mosaic or the sharpened one, whichever pays at this quality,
+/// and its URI: each is encoded as it will be written, decoded, and read
+/// through the camera onto the probe frames. The sharpened one is kept
+/// when the residual it removes (`ln` of the ratio) beats
+/// [`MOSAIC_MIN_GAIN_PER_BYTE`] for every byte it adds.
+fn chosen_mosaic(cam: &CameraPlate, raster_quality: u8, quality: f32) -> Option<(&camera::Mosaic, String)> {
+    let residual = |m: &camera::Mosaic, jpeg: &[u8]| -> Option<f64> {
+        let decoded = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?.to_rgba8();
+        let seen_from = camera::Mosaic {
+            x: m.x,
+            y: m.y,
+            w: m.w,
+            h: m.h,
+            image: frames::VideoFrame {
+                width: decoded.width(),
+                height: decoded.height(),
+                pixels: decoded.into_raw(),
+                delay_ms: m.image.delay_ms,
+            },
+            density: m.density,
+        };
+        let (mut sq, mut count) = (0f64, 0usize);
+        for (i, f) in &cam.probes {
+            let seen = camera::warp(&seen_from, cam.views[*i], f.width, f.height);
+            for (a, b) in seen.chunks_exact(4).zip(f.pixels.chunks_exact(4)) {
+                if a[3] == 0 {
+                    continue;
+                }
+                for c in 0..3 {
+                    sq += (a[c] as f64 - b[c] as f64).powi(2);
+                }
+                count += 3;
+            }
+        }
+        Some(sq / count.max(1) as f64)
+    };
+    let plain = jpeg_bytes(&cam.mosaic.image, raster_quality)?;
+    let sharp = jpeg_bytes(&cam.sharp.image, raster_quality)?;
+    let uri = |b: &[u8]| format!("data:image/jpeg;base64,{}", vac_format::base64::encode(b));
+    let (plain_uri, sharp_uri) = (uri(&plain), uri(&sharp));
+    let gain = (residual(&cam.mosaic, &plain)? / residual(&cam.sharp, &sharp)?.max(1e-9)).ln();
+    let m = 2f64.powf((50.0 - quality.clamp(0.0, 100.0) as f64) / 25.0);
+    let price = MOSAIC_MIN_GAIN_PER_BYTE * m * m * (sharp_uri.len() as f64 - plain_uri.len() as f64).max(0.0);
+    Some(if gain > price { (&cam.sharp, sharp_uri) } else { (&cam.mosaic, plain_uri) })
+}
+
 /// A frame as a `data:image/jpeg;base64,` URI at the given JPEG quality.
 pub fn jpeg_data_uri(f: &frames::VideoFrame, quality: u8) -> Option<String> {
     raster_data_uri(f, quality)
 }
 
 fn raster_data_uri(f: &frames::VideoFrame, quality: u8) -> Option<String> {
+    let buf = jpeg_bytes(f, quality)?;
+    Some(format!("data:image/jpeg;base64,{}", vac_format::base64::encode(&buf)))
+}
+
+fn jpeg_bytes(f: &frames::VideoFrame, quality: u8) -> Option<Vec<u8>> {
     let rgb: Vec<u8> = f.pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
     let mut buf = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality)
         .encode(&rgb, f.width, f.height, image::ExtendedColorType::Rgb8)
         .ok()?;
-    Some(format!("data:image/jpeg;base64,{}", vac_format::base64::encode(&buf)))
+    Some(buf)
 }

@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.18, default quality 50) and is
+table re-measured 2026-10-13 at v1.19, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -40,8 +40,10 @@ into one image under a measured zoom at **26.4 dB** (ink IoU 0.770 →
 detail the first frames never showed, and the set's interior colours cycle
 from frame to frame. The single mosaic, the median of every frame warped
 back, is blurred by the first and averages away the second (frame 89 is
-the worst, at 24.5 dB). A finer mosaic, or plates that change over time,
-would be next.
+the worst, at 24.5 dB). v1.19's mosaic fitted through the renderer, worth
+2–2.6 dB on the Ken Burns and roll clips, measured no gain here and the
+median mosaic is kept. The error is the content changing, not blur. Plates
+that change over time would be next.
 
 ---
 
@@ -401,6 +403,15 @@ picture taken out of them, would close it.
   like any other (nothing in it can be tracked as moving), where it used to
   come back as a lone background: a test card frame went 3.9 → **37.8 dB**.
 
+- **v1.19 — a mosaic fitted through the renderer.** A camera plate's
+  mosaic was the median of the frames warped back, each sample blurred on
+  the way in and again on the way out. It's now also fitted to the frames
+  through the renderer's own bilinear reading of it by back-projection.
+  Only its fine detail is kept, and it's chosen only when it pays for its
+  bytes on held-out probe frames. `roll_watercolor` 33.25 → **35.85 dB**,
+  `kenburns_watercolor` 30.29 → **32.39**, `slideshow_dissolve` 29.16 →
+  **29.72**.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -408,18 +419,18 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
+| `slideshow_dissolve.mp4` | 0.9962 | 0.9634 | 69.4 | 29.72 | 0.2% | 4 |
+| `roll_watercolor.mp4` | 0.9958 | 0.9933 | 16.9 | 35.85 | 0.3% | 1 |
 | `testsrc2.mp4` | 0.9951 | 0.9859 | 372.7 | 22.42 | 0.4% | 64 |
-| `roll_watercolor.mp4` | 0.9951 | 0.9921 | 30.8 | 33.25 | 0.4% | 1 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
-| `slideshow_dissolve.mp4` | 0.9938 | 0.9695 | 78.8 | 29.16 | 0.3% | 6 |
-| `kenburns_watercolor.mp4` | 0.9921 | 0.9899 | 60.9 | 30.29 | 0.6% | 2 |
+| `kenburns_watercolor.mp4` | 0.9932 | 0.9881 | 37.5 | 32.39 | 0.4% | 1 |
 | `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
 | `real_bouncing_ball.gif` | 0.9905 | 0.9885 | 1.5 | 46.37 | 0.6% | 2 |
 | `mandelbrot.mp4` | 0.9898 | 0.9843 | 149.2 | 26.39 | 0.5% | 2 |
 | `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
+| `pan_portrait.mp4` | 0.9708 | 0.9587 | 3.6 | 42.54 | 1.4% | 1 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `pan_portrait.mp4` | 0.9699 | 0.9580 | 3.6 | 42.51 | 1.5% | 1 |
 | `cuts_three_shots.mp4` | 0.9555 | 0.8438 | 78.8 | 29.17 | 0.7% | 8 |
 | `real_newtons_cradle.gif` | 0.9204 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
