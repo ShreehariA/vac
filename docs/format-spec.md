@@ -144,6 +144,14 @@ twice as well, the scenery becomes one `plate = image(...)` with the moving
 shapes still written as code on top. The source stays one self-contained
 file.
 
+Since v1.8 the same primitive also carries **sprites**: a PNG with an alpha
+channel, standing in for one moving shape whose flat fill measurably fails
+to describe its interior (a shaded ball, a textured tile). The sprite keeps
+the shape's `animate` block, with `position()` keyframes moved to the
+image's top-left corner, so the motion is still code. Any data URI the
+renderer can decode works (`image/png`, `image/jpeg`); an image that fails
+to decode draws nothing rather than failing the render.
+
 **Stroke width (v1.4).** `shape.stroke_width = 3` sets the stroke width in
 pixels, in declared coordinates (it scales with the shape). The stroke is
 centred on the outline, half inside and half outside. Unset, strokes are

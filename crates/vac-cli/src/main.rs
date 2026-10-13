@@ -45,6 +45,7 @@ struct Knobs {
     quality: f32,
     plate: vac::Plate,
     audit: bool,
+    sprites: bool,
 }
 
 fn parse_quality(s: &str) -> std::result::Result<f32, String> {
@@ -155,6 +156,11 @@ enum Cmd {
         /// is no better with. Useful for measuring what the audit changed.
         #[arg(long)]
         no_audit: bool,
+        /// Never draw a shape as a sprite of its own pixels (v1.8). By
+        /// default a shape that only moves is replaced by one when that
+        /// reconstructs its footprint at least twice as well.
+        #[arg(long)]
+        no_sprites: bool,
         /// Rate control: instead of a fixed quality, find the smallest
         /// source whose reconstruction reaches this PSNR (dB).
         #[arg(long, value_name = "DB", conflicts_with = "quality")]
@@ -208,6 +214,11 @@ enum Cmd {
         /// is no better with. Useful for measuring what the audit changed.
         #[arg(long)]
         no_audit: bool,
+        /// Never draw a shape as a sprite of its own pixels (v1.8). By
+        /// default a shape that only moves is replaced by one when that
+        /// reconstructs its footprint at least twice as well.
+        #[arg(long)]
+        no_sprites: bool,
         /// Write PNG triptychs — source | reconstruction | ink map — of
         /// the worst-IoU frame, the worst-PSNR frame and the middle frame
         /// into this directory. In the ink map, white is ink both agree
@@ -237,6 +248,7 @@ fn main() -> Result<()> {
             quality,
             plate,
             no_audit,
+            no_sprites,
             target_psnr,
         } => run_decompile(
             &input,
@@ -248,6 +260,7 @@ fn main() -> Result<()> {
                 quality,
                 plate: plate.into(),
                 audit: !no_audit,
+                sprites: !no_sprites,
             },
             target_psnr,
         ),
@@ -261,6 +274,7 @@ fn main() -> Result<()> {
             quality,
             plate,
             no_audit,
+            no_sprites,
             dump,
             vac: given,
         } => {
@@ -270,6 +284,7 @@ fn main() -> Result<()> {
                 quality,
                 plate: plate.into(),
                 audit: !no_audit,
+                sprites: !no_sprites,
             };
             if let Some(file) = &given {
                 let doc = vac::read(file).with_context(|| format!("reading {}", file.display()))?;
@@ -306,9 +321,9 @@ fn run_verify(
     knobs: Knobs,
 ) -> Result<()> {
     if ab {
-        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit })
+        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, sprites: knobs.sprites })
             .with_context(|| format!("verifying {} with layering", input.display()))?;
-        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit })
+        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, sprites: knobs.sprites })
             .with_context(|| format!("verifying {} without layering", input.display()))?;
         if json {
             println!("{{");
@@ -322,7 +337,7 @@ fn run_verify(
         return Ok(());
     }
 
-    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit })
+    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, sprites: knobs.sprites })
         .with_context(|| format!("verifying {}", input.display()))?;
     if json {
         println!("{{");
@@ -373,6 +388,9 @@ fn print_report(input: &Path, v: &vac::Verification) {
     println!("    plate         {:?}", v.plate);
     if v.audited_out > 0 {
         println!("    audit         took out {} shape(s) the reconstruction was no better with", v.audited_out);
+    }
+    if v.sprites > 0 {
+        println!("    sprites       {} shape(s) drawn as their own pixels", v.sprites);
     }
     println!("    shapes        {}", v.shapes);
     println!("    animate       {}", v.animate_blocks);
@@ -440,7 +458,7 @@ fn json_body(v: &vac::Verification) -> String {
          \"residual\": {:.6}, \"psnr_db\": {:.4}, \"worst_psnr_db\": {:.4}, \
          \"missing_ink\": {:.6}, \"spurious_ink\": {:.6}, \
          \"shapes\": {}, \"animate_blocks\": {}, \"keyframes\": {}, \"vac_bytes\": {}, \
-         \"segmentation\": \"{:?}\", \"background\": \"{:?}\", \"plate\": \"{:?}\", \"audited_out\": {} }}",
+         \"segmentation\": \"{:?}\", \"background\": \"{:?}\", \"plate\": \"{:?}\", \"audited_out\": {}, \"sprites\": {} }}",
         f.frames_compared,
         f.ink_iou,
         f.worst_iou,
@@ -458,6 +476,7 @@ fn json_body(v: &vac::Verification) -> String {
         v.background,
         v.plate,
         v.audited_out,
+        v.sprites,
     )
 }
 
@@ -546,7 +565,7 @@ fn run_decompile(
 fn run_dump(input: &Path, dir: &Path, static_layer: bool, knobs: Knobs) -> Result<()> {
     let frames = vac::load_video_frames(input)
         .with_context(|| format!("loading {}", input.display()))?;
-    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit })?;
+    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, sprites: knobs.sprites })?;
     dump_frames(input, dir, &frames, &doc)
 }
 

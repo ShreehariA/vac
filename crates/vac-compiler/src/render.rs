@@ -204,6 +204,15 @@ impl SceneRig {
     }
 }
 
+/// Where a shape stands in one frame — see [`Rig::placement`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub position: (f32, f32),
+    pub scale: f32,
+    pub rotation: f32,
+    pub opacity: f32,
+}
+
 /// A document resolved once for repeated, partial rendering (v1.7).
 ///
 /// The shape audit asks, for every shape, what each frame would look like
@@ -272,6 +281,24 @@ impl Rig {
             clamp(r.bottom().ceil() + 1.0, self.height),
         ];
         (b[0] < b[2] && b[1] < b[3]).then_some(b)
+    }
+
+    /// Where shape `k` stands in frame `i`: the point its `position()`
+    /// keyframes move, and its scale, rotation and opacity.
+    pub fn placement(&self, i: usize, k: usize) -> Placement {
+        let (si, t) = self.timeline[i];
+        let st = self.scenes[si].live(k, t);
+        let anchor = match &st.base {
+            Shape::Rect { x, y, .. } | Shape::Image { x, y, .. } => (*x, *y),
+            Shape::Ellipse { cx, cy, .. } => (*cx, *cy),
+            Shape::Path(segs) => vac_format::path_anchor(segs),
+        };
+        Placement {
+            position: st.position.unwrap_or(anchor),
+            scale: st.scale,
+            rotation: st.rotation,
+            opacity: st.opacity,
+        }
     }
 
     /// Render the rectangle `[x0, y0, x1, y1)` of frame `i`, drawing only

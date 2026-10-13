@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.7)
+## Where VAC is today (v1.8)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -45,7 +45,8 @@ position, scale, rotation, opacity and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
 scenery becomes one embedded `image()` with the moving shapes still written
-as code on top.
+as code on top. A mover no flat fill can describe, like a shaded ball, keeps
+its keyframes and is drawn as its own pixels.
 
 **How it decides:** by measurement, not classification. Every ambiguous
 choice is tried several ways: segmentation, background rule, raster versus
@@ -60,14 +61,14 @@ better with is taken out.
 |---|---|---|---|
 | `vac_control.mp4` | VAC's own output, two moving balls | 46.6 dB | 0.971 |
 | `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
-| `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 40.9 dB | 0.988 |
+| `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 44.1 dB | 0.990 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 39.5 dB | 0.976 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.5 dB | 0.984 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 29.4 dB | 0.919 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 25.7 dB | 0.732 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.6 dB | 0.622 |
 | `testsrc2.mp4` | ffmpeg test card with noise | 22.2 dB | 0.995 |
-| `real_double_pendulum.gif` | Wikimedia diagram with trails | 20.6 dB | 0.498 |
+| `real_double_pendulum.gif` | Wikimedia diagram with trails | 20.9 dB | 0.505 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 12.0 dB | 0.766 |
 
 What it still gets wrong is listed, measured, in `docs/frontier.md`. The
@@ -1876,3 +1877,49 @@ version's output or a hand-edited source. `--no-audit` turns it off, to
 measure what it changed. The test injects a stray blob and an exact duplicate
 of a real ball into a perfect reconstruction. The audit must remove exactly
 those two and leave the rest untouched.
+
+## v1.8 — A mover no flat fill describes keeps its own pixels
+
+A flat fill is the right description of a flat shape and the wrong one of a
+shaded ball, a chrome sphere or a textured tile. v1.6 gave static scenery an
+escape hatch, the raster plate. v1.8 gives one to things that move.
+
+For a shape that only moves (translation, fades), VAC captures the source's
+own pixels in a window that follows the shape's keyframes, as a per-pixel
+median over every frame it is on screen. Transient occluders and noise drop
+out. A pixel belongs to the sprite where the source differs from the scene
+*without* the shape in most of those frames. The sprite is a PNG `image()`
+with that alpha. It takes the shape's place and keeps its keyframes, so the
+motion stays code and only the appearance becomes pixels.
+
+Three measured rules decide, and each one came from a failure:
+
+1. **The flat fill must fail on the shape's interior**: under 30 dB, two
+   pixels in from every edge. That's the plate's bar, applied to appearance.
+   Judged on the whole footprint instead, `motion_graphics` traded a flat
+   drawbox square, keyframed a pixel off, for a PNG of its own blurred
+   edges. With thin shapes allowed, `outlined.vac`'s ring (radius 49.8 for 50)
+   gave up 5.7 dB to a PNG copy of itself. Both are geometry errors, which
+   are the vector fit's to fix (now `docs/frontier.md` item 3).
+2. **It must reconstruct the shape's own footprint at least twice as well.**
+3. **It must pay for its bytes**: about 0.04 dB of clip PSNR per KB at
+   quality 50, scaled by the dial. Without this rule the Mandelbrot zoom
+   took 162 KB of PNG for 0.7 dB.
+
+| clip | v1.7 | v1.8 |
+|---|---|---|
+| `real_bouncing_ball.gif` | 40.86 dB | **44.05 dB**, one sprite (the ball), +1.1 KB |
+| `sprite.vac` (new fixture: a textured tile), hermetic | 26.3 dB as a flat rect | **36.5 dB** |
+| `sprite.vac` through MP4 | 26.0 dB | **37.2 dB** |
+| `real_double_pendulum.gif` | 20.64 dB | 20.87 dB, 6 sprites |
+| `real_newtons_cradle.gif` | 29.36 dB | 29.39 dB, 1 sprite |
+
+Every other clip and fixture is unchanged, and flat content never takes a
+sprite. `--no-sprites` turns the pass off, and `vac::sprites(frames, doc,
+quality)` runs it on any document.
+
+The same slice closed a test gap. Twelve of the hermetic tier's twenty
+recorded floors were never asserted by any test, so those fixtures could
+regress silently. One test now walks every fixture in `examples/` and
+requires a recorded row for each. With the keyframe tolerance broken tenfold
+it fails on `grow.vac`, which no test checked before.

@@ -1,0 +1,21 @@
+// VAC v1.8 fixture: a textured tile — a smooth, many-coloured swirl that
+// no flat fill describes — sliding across a flat background. The tile's
+// motion is code; its appearance can only be its own pixels. The decompiler
+// must recover it as a sprite (an `image()` keyframed like any shape).
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 2s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #20232b
+
+  let tile = image(40, 120, 72, 72, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAMCAIAAADZF8uwAAABx0lEQVR42gG8AUP+AJbmeNzhse3U2rzA5W6m0D6JoVBrZpdPMN04D+0nDbsfKmwfXgC5x7Hs2dre5OWZ5dBR3qE9zmZsuDC6nA/tfw3dYSqYR15QMZoA1n/a75zlxLjQds6hQN5mS+UwjuQP19kN78cqw69edZKaP3XLAOk45eNP0KJroViJZjymMGTAD7LUDerhKuLmXqHhmlfUyzzA5ADvHtDLIKF/LGZDPzBGWA+FdQ3Rkirvr17Kx5p92ctC5ORH5d0A50Chqy1mXiEwPB4PXSMNqTEq5kde52Gaqn/LXZzkPLjdXs64ANKKZodsMEdQD0I5DXwoKsofXu8fmtEny4Y45EZP3UNruH6JgAC0zzBmuQ88ng1WgCqgY17iSJrqMsuyJORlHt08ILhXLIChP0UAkOUPTOQNP9oqdMhewrCa7pTL2Hbkj1ndS0C4QC2AdSFFwx4ZAG6+DT7TKlDhXpflmt3iy+3V5LvB3WynuD2KgFFsRZlQGd45CgBRcyo9kV5srZq6xsvt2OTd492Y5bhQ3oA9z0VtuRm7ngrtgBoAQDBeS0WajmDL133k75vdw7a4dc2AP91FS+UZkOQK2Noa7shGi3bkktc8UB4AAAAASUVORK5CYII=")
+
+  animate tile {
+    0ms    -> position(40, 120)
+    2s     -> position(360, 140)
+    easing: linear
+  }
+}

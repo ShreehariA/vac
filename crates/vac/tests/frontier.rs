@@ -460,6 +460,59 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.8 — a mover no flat fill describes keeps its own pixels.**
+///
+/// `sprite.vac` slides a smooth, many-coloured tile across a flat
+/// background. Vectors find it exactly (a 72×72 rect, every keyframe right)
+/// and can still only paint it one colour: 26.3 dB. The sprite pass
+/// captures the tile's own pixels as a median over every frame it is on
+/// screen, in a window that follows its keyframes, and keeps the sprite
+/// because it reconstructs the tile's footprint far better than twice as
+/// well. The motion stays code. Flat fixtures, whose fills describe their
+/// interiors exactly, never take one (asserted with the raster plate's
+/// test below).
+#[test]
+fn a_mover_no_flat_fill_describes_becomes_a_sprite_of_its_own_pixels() {
+    let (_, recovered, fid) = hermetic("sprite.vac");
+    let lets: Vec<(&String, &vac::Shape)> = recovered
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .filter_map(|st| match st {
+            Statement::Let { name, shape } => Some((name, shape)),
+            _ => None,
+        })
+        .collect();
+    let sprites: Vec<&&String> = lets
+        .iter()
+        .filter(|(_, sh)| matches!(sh, vac::Shape::Image { .. }))
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(sprites.len(), 1, "exactly the tile becomes a sprite: {lets:?}");
+    assert_ne!(sprites[0].as_str(), "plate", "a sprite, not a raster plate");
+    let animated = recovered
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .any(|st| matches!(st, Statement::Animate(a) if &a.target == *sprites[0]));
+    assert!(animated, "the sprite keeps the tile's keyframes");
+    assert!(fid.psnr_db > 34.0, "sprite.vac PSNR {:.2} (one flat rect: 26.3)", fid.psnr_db);
+
+    let frames = {
+        let source = vac::read(examples_dir().join("sprite.vac")).unwrap();
+        vac::rendered_to_video_frames(&vac::render(&source).unwrap(), source.canvas.fps)
+    };
+    let flat = vac::decompile_frames(frames.clone(), &DecompileOptions { sprites: false, ..Default::default() })
+        .expect("decompile without sprites");
+    let flat_fid = vac::measure(&frames, &flat).unwrap();
+    assert!(
+        fid.psnr_db > flat_fid.psnr_db + 6.0,
+        "the sprite must beat the flat fill by a wide margin: {:.2} vs {:.2} dB",
+        fid.psnr_db,
+        flat_fid.psnr_db
+    );
+}
+
 /// **FIXED in v1.7 — every shape earns its place.**
 ///
 /// Through v1.6 a shape stayed in the output once its track cleared the
@@ -532,7 +585,7 @@ fn textured_scenery_takes_a_raster_plate_and_flat_scenery_does_not() {
     assert_eq!(vector_shapes.len(), 1, "only the ball should remain as code: {vector_shapes:?}");
     assert!(matches!(vector_shapes[0], vac::Shape::Ellipse { rx, .. } if (rx - 26.0).abs() <= 1.0));
     assert!(fid.psnr_db > 40.0, "textured.vac PSNR {:.2}", fid.psnr_db);
-    for flat in ["two_balls.vac", "two_tone.vac", "panel.vac", "shaded.vac", "outlined.vac"] {
+    for flat in ["two_balls.vac", "two_tone.vac", "panel.vac", "shaded.vac", "outlined.vac", "color_shift.vac", "spin.vac"] {
         let (_, recovered, _) = hermetic(flat);
         assert_eq!(images(&recovered), 0, "{flat}: flat scenery must stay vector");
     }

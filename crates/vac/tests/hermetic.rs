@@ -138,11 +138,12 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("shaded.vac", 0.9975, 7.20),
     ("sliding_rect.vac", 1.0000, 0.00),
     ("spin.vac", 0.9268, 23.83),
+    ("sprite.vac", 0.9715, 14.63),
     ("static_and_moving.vac", 0.9998, 0.01),
     ("textured.vac", 0.9998, 1.76),
     ("triangle.vac", 0.9747, 17.07),
     ("two_balls.vac", 0.9997, 0.02),
-    ("two_tone.vac", 0.9999, 0.58),
+    ("two_tone.vac", 0.9999, 0.26),
 ];
 
 fn baseline_for(sample: &str) -> (f64, f64) {
@@ -178,6 +179,34 @@ fn assert_fidelity(sample: &str, f: &Fidelity) {
          floor keeps its bite",
         f.ink_iou
     );
+}
+
+/// Every fixture in `examples/` has a recorded floor, and meets it.
+///
+/// The tests below check *structure* for the fixtures they were written
+/// for. This is what makes a `BASELINE` row mean anything: through v1.7,
+/// twelve of its twenty rows were recorded and never asserted, so those
+/// fixtures could regress without a test noticing.
+#[test]
+fn every_fixture_meets_its_recorded_floor() {
+    let mut names: Vec<String> = std::fs::read_dir(examples_dir())
+        .expect("examples/ is readable")
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().to_string_lossy().into_owned();
+            name.ends_with(".vac").then_some(name)
+        })
+        .collect();
+    names.sort();
+    for (row, _, _) in BASELINE {
+        assert!(
+            names.iter().any(|n| n == row),
+            "BASELINE records {row}, which is no longer a fixture"
+        );
+    }
+    for name in &names {
+        let rt = hermetic(name);
+        assert_fidelity(name, &rt.fidelity);
+    }
 }
 
 // ====================================================================

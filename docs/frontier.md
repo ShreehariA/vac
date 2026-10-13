@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-12 at v1.7, default quality 50) and is
+table re-measured 2026-10-13 at v1.8, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -72,6 +72,21 @@ headline win: 45 → 19 animate blocks, 1159 → 186 keyframes, 54 KB → 25 KB.
 of that is true. It is also entirely a *compression* result. Measured on the
 other axis, the same clip reconstructs at an ink IoU of 0.07. Both facts were
 always true; only one of them was measurable.
+
+---
+
+## 3. Vector shapes are fitted once, never refined
+
+**Status: open. Fixture: `outlined.vac`.**
+
+Every shape's geometry is estimated from its detected blob and then kept.
+Nothing checks the estimate against the reconstruction. On `outlined.vac`
+the 3 px gold ring comes back with radius 49.8 instead of 50. On a thin,
+high-contrast stroke that 0.2 px costs **5.7 dB**: a PNG copy of the ring
+reconstructs at 46.3 dB where the fitted vector manages 40.6 dB. v1.8's
+sprite pass deliberately refuses that trade, since the error is the fit's
+to fix. A fix would measure each shape's parameters against the
+reconstruction, the way the audit already measures each shape's presence.
 
 ---
 
@@ -247,6 +262,19 @@ always true; only one of them was measurable.
   22.17 → 22.24 dB. One trade: `real_pendulum`'s ink IoU dips 0.626 → 0.622
   while its residual falls 9%.
 
+- **v1.8 — a mover no flat fill describes keeps its own pixels.** A shape
+  that only moves can be replaced by a *sprite*: the source's own pixels,
+  captured as a per-pixel median over every frame it is on screen in a
+  window that follows its keyframes, as a PNG `image()` that keeps those
+  keyframes. Three measured rules gate it. The flat fill must fail on the
+  shape's interior (under 30 dB, two pixels in from every edge). The sprite
+  must reconstruct the shape's footprint at least twice as well. And it must
+  buy ~0.04 dB of clip PSNR per KB at quality 50. `real_bouncing_ball` 40.86
+  → **44.05 dB** for 1.1 KB; the new `sprite.vac` fixture, a textured tile,
+  26.3 → **36.5 dB** (37.2 dB through MP4). Flat content never takes one.
+  The same slice found that twelve of the hermetic tier's twenty recorded
+  floors were never asserted; one test now walks every fixture.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -256,15 +284,15 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 |---|---|---|---|---|---|---|
 | `testsrc2.mp4` | 0.9951 | 0.9858 | 387.9 | 22.24 | 0.4% | 64 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
-| `real_bouncing_ball.gif` | 0.9883 | 0.9845 | 5.3 | 40.86 | 0.8% | 2 |
+| `real_bouncing_ball.gif` | 0.9899 | 0.9851 | 2.6 | 44.05 | 0.7% | 2 |
 | `outlined_ui.mp4` | 0.9839 | 0.9689 | 28.8 | 33.54 | 1.1% | 4 |
 | `motion_graphics.mp4` | 0.9762 | 0.9562 | 7.4 | 39.46 | 0.8% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `real_newtons_cradle.gif` | 0.9190 | 0.9017 | 75.3 | 29.36 | 5.7% | 47 |
+| `real_newtons_cradle.gif` | 0.9192 | 0.9017 | 74.8 | 29.39 | 5.7% | 47 |
 | `mandelbrot.mp4` | 0.7658 | 0.3961 | 4148.6 | 11.95 | 12.8% | 33 |
 | `real_loader.gif` | 0.7318 | 0.7115 | 173.2 | 25.75 | 9.8% | 16 |
 | `real_pendulum.gif` | 0.6215 | 0.5180 | 357.5 | 22.60 | 6.6% | 27 |
-| `real_double_pendulum.gif` | 0.4979 | 0.3552 | 560.5 | 20.64 | 9.7% | 419 |
+| `real_double_pendulum.gif` | 0.5052 | 0.3555 | 532.8 | 20.87 | 8.9% | 419 |
 
 Flat-shaded content of exactly the kind the detector was built for, meaning
 VAC's own output and ffmpeg `drawbox` rectangles, reconstructs at 33–47 dB. The

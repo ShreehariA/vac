@@ -235,6 +235,8 @@ struct Chosen {
     fidelity: Option<Fidelity>,
     /// Shapes the audit (v1.7) measured and took out.
     audited_out: usize,
+    /// Shapes drawn as sprites of their own pixels (v1.8).
+    sprites: usize,
 }
 
 /// Every `Auto` knob is resolved here, because this is the layer that
@@ -245,18 +247,33 @@ struct Chosen {
 /// content classifier decides; the reconstruction does.
 fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let chosen = choose(frames, opts)?;
-    if !opts.audit {
+    if !opts.audit && !opts.sprites {
         return Ok(chosen);
     }
     let fidelity = match chosen.fidelity {
         Some(f) => f,
         None => measure(frames, &chosen.document)?,
     };
-    let a = audit_measured(frames, chosen.document, fidelity)?;
+    let a = if opts.audit {
+        audit_measured(frames, chosen.document, fidelity)?
+    } else {
+        Audit {
+            document: chosen.document,
+            fidelity,
+            removed: Vec::new(),
+        }
+    };
+    let (document, fidelity, sprites) = if opts.sprites {
+        let sp = sprites_measured(frames, a.document, a.fidelity, opts.quality)?;
+        (sp.document, sp.fidelity, sp.sprites.len())
+    } else {
+        (a.document, a.fidelity, 0)
+    };
     Ok(Chosen {
-        document: a.document,
-        fidelity: Some(a.fidelity),
+        document,
+        fidelity: Some(fidelity),
         audited_out: a.removed.len(),
+        sprites,
         ..chosen
     })
 }
@@ -286,6 +303,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
             plate: opts.plate,
             fidelity: None,
             audited_out: 0,
+            sprites: 0,
         });
     }
     // The static layer and its stripping depend only on the background
@@ -339,6 +357,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
                 plate: Plate::Vector,
                 fidelity: Some(fid),
                 audited_out: 0,
+                sprites: 0,
             });
         }
     }
@@ -381,6 +400,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
             plate: Plate::Raster,
             fidelity: Some(fid),
             audited_out: 0,
+            sprites: 0,
         }
     } else {
         best
@@ -548,6 +568,439 @@ fn audit_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity) -> Result
         fidelity: pfid,
         removed,
     })
+}
+
+/// What the sprite pass (v1.8) did to a document.
+#[derive(Debug, Clone)]
+pub struct Sprited {
+    pub document: Document,
+    pub fidelity: Fidelity,
+    /// The shapes now drawn as sprites of their own pixels.
+    pub sprites: Vec<String>,
+}
+
+/// A shape vectors cannot describe keeps its own pixels (v1.8).
+///
+/// A flat fill is the right description of a flat shape and the wrong one
+/// of a shaded ball, a chrome sphere or a hand-drawn bob. For each shape
+/// that moves only by translation (or not at all), the source's own pixels
+/// are captured in a window that follows it, as a per-pixel median over
+/// every frame it is on screen: transient occluders and noise drop out,
+/// and a pixel belongs to the sprite when the source differs there from
+/// the scene without the shape in most of those frames. The sprite — a PNG
+/// `image()` with that alpha — replaces the shape, keeping its keyframes,
+/// only if it reconstructs the shape's own footprint at least **twice as
+/// well** (the v1.6 raster plate's bar, applied locally) and the clip as a
+/// whole better. The motion stays code; only the appearance is pixels.
+///
+/// Like the audit, each candidate is scored from small renders of the
+/// footprint ([`vac_compiler::render::Rig`]) against the full
+/// measurement's per-frame tallies, and the result is re-measured in full
+/// and kept only if it measures at least as well as what went in.
+pub fn sprites(original: &[VideoFrame], doc: Document, quality: f32) -> Result<Sprited> {
+    let fid = measure(original, &doc)?;
+    sprites_measured(original, doc, fid, quality)
+}
+
+/// A sprite must reconstruct the shape's footprint this much better than
+/// the vector shape did — `ln 2`, twice as good, the raster plate's bar.
+const SPRITE_MIN_LOCAL_GAIN: f64 = std::f64::consts::LN_2;
+/// Only shapes whose interior the flat fill reconstructs below this PSNR
+/// are tried — the raster plate's 30 dB, applied to appearance: rasters are
+/// for where vectors measurably fail, not for softening the edges of a flat
+/// rectangle keyframed a pixel off (judged on the whole footprint,
+/// `motion_graphics` traded a drawbox square for a PNG).
+const SPRITE_ONLY_BELOW_PSNR_DB: f64 = RASTER_ONLY_BELOW_PSNR_DB;
+/// What a sprite must buy per byte it adds, in the selection rule's
+/// currency, at quality 50 — scaled like every other tolerance by the
+/// dial (×4 per 25 points down, ÷4 per 25 up). `1e-5` is ~0.04 dB of clip
+/// PSNR per KB. Without it the Mandelbrot zoom took 162 KB of PNG for
+/// 0.7 dB; the bouncing ball's sprite buys 0.74 for 1.1 KB, 60× the bar.
+const SPRITE_MIN_GAIN_PER_BYTE: f64 = 1e-5;
+
+/// [`sprites`] on a document whose fidelity is already measured.
+fn sprites_measured(frames: &[VideoFrame], doc: Document, fid: Fidelity, quality: f32) -> Result<Sprited> {
+    let m = 2f64.powf((50.0 - quality.clamp(0.0, 100.0) as f64) / 25.0);
+    let min_gain_per_byte = SPRITE_MIN_GAIN_PER_BYTE * m * m;
+    let unchanged = |document: Document, fidelity: Fidelity| Sprited {
+        document,
+        fidelity,
+        sprites: Vec::new(),
+    };
+    if doc.scenes.len() != 1 || fid.frames.len() != frames.len() {
+        return Ok(unchanged(doc, fid));
+    }
+    let mut rig = vac_compiler::render::Rig::new(&doc)?;
+    let count = rig.frame_count();
+    let idx = aligned_indices(frames, count, doc.canvas.fps);
+    let mut wanted: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (j, &i) in idx.iter().enumerate() {
+        wanted[i].push(j);
+    }
+    let bg = ink_background(frames);
+    let opts = CompareOptions::default();
+    let compared: Vec<f64> = fid.frames.iter().map(|f| f.compared_pixels as f64).collect();
+    let mut sse: Vec<f64> = fid.frames.iter().map(|f| f.residual * 3.0 * f.compared_pixels as f64).collect();
+    let mut inter: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px - f.missing_px) as i64).collect();
+    let mut union: Vec<i64> = fid.frames.iter().map(|f| (f.source_ink_px + f.spurious_px) as i64).collect();
+    let frame_res = |sse: f64, c: f64| if c > 0.0 { sse / (3.0 * c) } else { 0.0 };
+    let frame_iou = |i: i64, u: i64| if u > 0 { i as f64 / u as f64 } else { 1.0 };
+    let mut res_sum: f64 = (0..frames.len()).map(|j| frame_res(sse[j], compared[j])).sum();
+    let mut iou_sum: f64 = (0..frames.len()).map(|j| frame_iou(inter[j], union[j])).sum();
+
+    let mut current = doc.clone();
+    let mut sprited: Vec<String> = Vec::new();
+    let names: Vec<String> = rig.shapes(0).to_vec();
+    // Where every shape paints in every frame, so a region render draws
+    // only the shapes that reach it. A sprite takes its shape's place in
+    // the draw order, so only its own row changes when one is accepted.
+    let mut bounds: Vec<Vec<Option<[u32; 4]>>> =
+        (0..count).map(|i| (0..names.len()).map(|m| rig.bounds(i, m)).collect()).collect();
+    let overlaps = |a: Option<[u32; 4]>, b: [u32; 4]| {
+        a.is_some_and(|a| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3])
+    };
+    for (k, name) in names.iter().enumerate() {
+        if name == "bg" || name == "plate" {
+            continue;
+        }
+        let Some(Statement::Let { shape, .. }) = current.scenes[0]
+            .statements
+            .iter()
+            .find(|st| matches!(st, Statement::Let { name: n, .. } if n == name))
+        else {
+            continue;
+        };
+        if matches!(shape, Shape::Image { .. }) {
+            continue;
+        }
+        let anim = current.scenes[0].statements.iter().find_map(|st| match st {
+            Statement::Animate(a) if a.target == *name => Some(a.clone()),
+            _ => None,
+        });
+        // Translation (and fades) only: a sprite captured in a window that
+        // follows the shape cannot follow it turning, growing or changing
+        // colour.
+        if anim.as_ref().is_some_and(|a| {
+            a.keyframes
+                .iter()
+                .flat_map(|kf| &kf.transforms)
+                .any(|t| matches!(t, Transform::Scale(_) | Transform::Rotate(_) | Transform::Fill(_)))
+        }) {
+            continue;
+        }
+        let alive: Vec<usize> = (0..count)
+            .filter(|&i| !wanted[i].is_empty() && bounds[i][k].is_some())
+            .collect();
+        if alive.is_empty() {
+            continue;
+        }
+        // Does the flat fill describe the shape's *appearance*? Judged on
+        // its interior — fully covered by the shape, two pixels in from
+        // every edge, and visible — where a position or size slightly off
+        // (a motion keyframed a pixel wide) cannot reach. A shape too thin
+        // to have an interior offers no evidence that its fill fails: what
+        // goes wrong with a stroke is its geometry (`outlined.vac`'s ring,
+        // radius 49.8 for 50, gave up 5.7 dB to a PNG copy of itself), and
+        // that is the vector fit's to fix, not a raster's to hide.
+        let (mut in_sse, mut in_px) = (0f64, 0f64);
+        for &i in &alive {
+            let r = bounds[i][k].expect("alive");
+            let rw = (r[2] - r[0]) as i64;
+            let rh = (r[3] - r[1]) as i64;
+            let admit = |m: usize| overlaps(bounds[i][m], r);
+            let with = rig.render_region(i, r, admit);
+            let without = rig.render_region(i, r, |m| m != k && admit(m));
+            let alone = rig.render_region(i, r, |m| m == k);
+            let full = |x: i64, y: i64| {
+                x >= 0 && y >= 0 && x < rw && y < rh && alone[((y * rw + x) * 4 + 3) as usize] == 255
+            };
+            for y in 0..rh {
+                for x in 0..rw {
+                    let q = ((y * rw + x) * 4) as usize;
+                    if with[q..q + 4] == without[q..q + 4] {
+                        continue;
+                    }
+                    if !(-2..=2).all(|dy| (-2..=2).all(|dx| full(x + dx, y + dy))) {
+                        continue;
+                    }
+                    for &j in &wanted[i] {
+                        let src = &frames[j];
+                        let sp = (((r[1] as i64 + y) * src.width as i64 + r[0] as i64 + x) * 4) as usize;
+                        let o = &src.pixels[sp..sp + 4];
+                        if o[3] < vac_metrics::MIN_OPAQUE_ALPHA {
+                            continue;
+                        }
+                        in_sse += (0..3).map(|c| (o[c] as f64 - with[q + c] as f64).powi(2)).sum::<f64>();
+                        in_px += 1.0;
+                    }
+                }
+            }
+        }
+        if in_px == 0.0 || vac_metrics::psnr_from_mse(in_sse / (3.0 * in_px)) >= SPRITE_ONLY_BELOW_PSNR_DB {
+            continue;
+        }
+        let Some(sprite) = capture_sprite(frames, &rig, &wanted, &bounds, k, &alive) else {
+            continue;
+        };
+        let cand = with_sprite(&current, name, &sprite, anim.as_ref());
+        let crig = vac_compiler::render::Rig::new(&cand)?;
+        debug_assert_eq!(crig.shapes(0)[k], *name, "a sprite keeps its shape's place");
+        let cbounds: Vec<Option<[u32; 4]>> = (0..count).map(|i| crig.bounds(i, k)).collect();
+        // Score both versions over the union of their footprints.
+        let mut deltas: Vec<(usize, f64, i64, i64)> = Vec::new();
+        let (mut s0, mut s1, mut i0, mut u0, mut i1, mut u1) = (0f64, 0f64, 0i64, 0i64, 0i64, 0i64);
+        for i in 0..count {
+            if wanted[i].is_empty() {
+                continue;
+            }
+            let r = match (bounds[i][k], cbounds[i]) {
+                (Some(a), Some(b)) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => continue,
+            };
+            let before = rig.render_region(i, r, |m| overlaps(bounds[i][m], r));
+            let after = crig.render_region(i, r, |m| {
+                if m == k {
+                    overlaps(cbounds[i], r)
+                } else {
+                    overlaps(bounds[i][m], r)
+                }
+            });
+            for &j in &wanted[i] {
+                let (a_sse, _, a_i, a_u) = region_tallies(&frames[j], &before, r, bg, &opts);
+                let (b_sse, _, b_i, b_u) = region_tallies(&frames[j], &after, r, bg, &opts);
+                s0 += a_sse;
+                s1 += b_sse;
+                i0 += a_i;
+                u0 += a_u;
+                i1 += b_i;
+                u1 += b_u;
+                if a_sse != b_sse || a_i != b_i || a_u != b_u {
+                    deltas.push((j, b_sse - a_sse, b_i - a_i, b_u - a_u));
+                }
+            }
+        }
+        let local_iou = |i: i64, u: i64| if u > 0 { i as f64 / u as f64 } else { 1.0 };
+        let local_gain =
+            (s0.max(1.0) / s1.max(1.0)).ln() + (local_iou(i1, u1).max(1e-9) / local_iou(i0, u0).max(1e-9)).ln();
+        let (mut res_c, mut iou_c) = (res_sum, iou_sum);
+        for &(j, ds, di, du) in &deltas {
+            res_c += frame_res(sse[j] + ds, compared[j]) - frame_res(sse[j], compared[j]);
+            iou_c += frame_iou(inter[j] + di, union[j] + du) - frame_iou(inter[j], union[j]);
+        }
+        let clip_gain = (res_sum.max(1e-9) / res_c.max(1e-9)).ln() + (iou_c.max(1e-9) / iou_sum.max(1e-9)).ln();
+        let added_bytes = (statement_bytes(&cand, name) - statement_bytes(&current, name)).max(1) as f64;
+        if local_gain >= SPRITE_MIN_LOCAL_GAIN && clip_gain >= min_gain_per_byte * added_bytes {
+            current = cand;
+            rig = crig;
+            for (i, b) in cbounds.into_iter().enumerate() {
+                bounds[i][k] = b;
+            }
+            res_sum = res_c;
+            iou_sum = iou_c;
+            for (j, ds, di, du) in deltas {
+                sse[j] += ds;
+                inter[j] += di;
+                union[j] += du;
+            }
+            sprited.push(name.clone());
+        }
+    }
+    if sprited.is_empty() {
+        return Ok(unchanged(doc, fid));
+    }
+    let sfid = measure(frames, &current)?;
+    if reconstructs_better(&fid, &sfid) {
+        return Ok(unchanged(doc, fid));
+    }
+    Ok(Sprited {
+        document: current,
+        fidelity: sfid,
+        sprites: sprited,
+    })
+}
+
+/// Source bytes of one shape's statements — its `let`, assignments and
+/// `animate` block — as written.
+fn statement_bytes(doc: &Document, name: &str) -> i64 {
+    let mut only = doc.clone();
+    only.scenes[0].statements.retain(|st| match st {
+        Statement::Let { name: n, .. } => n == name,
+        Statement::Assign { target, .. } => target == name,
+        Statement::Animate(a) => a.target == name,
+    });
+    vac_format::write(&only).len() as i64
+}
+
+/// Squared error, compared pixels, ink intersection and ink union of a
+/// rendered region against one source frame — `compare_frame`'s tallies,
+/// over a rectangle.
+fn region_tallies(src: &VideoFrame, img: &[u8], r: [u32; 4], bg: Rgb, opts: &CompareOptions) -> (f64, usize, i64, i64) {
+    let rw = (r[2] - r[0]) as usize;
+    let (mut sse, mut n, mut it, mut un) = (0i64, 0usize, 0i64, 0i64);
+    for y in r[1]..r[3] {
+        for x in r[0]..r[2] {
+            let sp = ((y * src.width + x) * 4) as usize;
+            let o = &src.pixels[sp..sp + 4];
+            if o[3] < vac_metrics::MIN_OPAQUE_ALPHA {
+                continue;
+            }
+            let q = ((y - r[1]) as usize * rw + (x - r[0]) as usize) * 4;
+            let a = &img[q..q + 4];
+            sse += (0..3).map(|c| (o[c] as i64 - a[c] as i64).pow(2)).sum::<i64>();
+            n += 1;
+            let (oi, ai) = (is_ink(o, bg, opts), is_ink(a, bg, opts));
+            it += (oi && ai) as i64;
+            un += (oi || ai) as i64;
+        }
+    }
+    (sse as f64, n, it, un)
+}
+
+/// A captured sprite: its box at the reference frame, the offset of that
+/// box from the shape's anchor there, and the PNG data URI.
+struct Sprite {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    offset: (f32, f32),
+    uri: String,
+}
+
+/// Capture shape `k`'s own pixels: a window the size of its largest
+/// footprint, following its anchor through every frame it is alive in;
+/// per pixel, the median of the source colours where the source differs
+/// from the scene without the shape, opaque where it does so in most
+/// frames.
+fn capture_sprite(
+    frames: &[VideoFrame],
+    rig: &vac_compiler::render::Rig,
+    wanted: &[Vec<usize>],
+    bounds: &[Vec<Option<[u32; 4]>>],
+    k: usize,
+    alive: &[usize],
+) -> Option<Sprite> {
+    use image::ImageEncoder;
+    let area = |b: [u32; 4]| (b[2] - b[0]) as u64 * (b[3] - b[1]) as u64;
+    let iref = *alive.iter().max_by_key(|&&i| area(bounds[i][k].expect("alive")))?;
+    let b = bounds[iref][k]?;
+    let aref = rig.placement(iref, k).position;
+    let (x0, y0) = (b[0] as i64, b[1] as i64);
+    let (w, h) = ((b[2] - b[0]) as i64, (b[3] - b[1]) as i64);
+    let (cw, ch) = (frames[0].width as i64, frames[0].height as i64);
+    let thr = vac_metrics::DEFAULT_INK_THRESHOLD_SQ as i64;
+    let n = (w * h) as usize;
+    let mut samples: Vec<Vec<[u8; 3]>> = vec![Vec::new(); n];
+    let mut seen = vec![0u32; n];
+    for &i in alive {
+        let p = rig.placement(i, k).position;
+        let (dx, dy) = ((p.0 - aref.0).round() as i64, (p.1 - aref.1).round() as i64);
+        let r = [
+            (x0 + dx).clamp(0, cw) as u32,
+            (y0 + dy).clamp(0, ch) as u32,
+            (x0 + dx + w).clamp(0, cw) as u32,
+            (y0 + dy + h).clamp(0, ch) as u32,
+        ];
+        if r[0] >= r[2] || r[1] >= r[3] {
+            continue;
+        }
+        let without = rig.render_region(i, r, |m| {
+            m != k && bounds[i][m].is_some_and(|a| a[0] < r[2] && r[0] < a[2] && a[1] < r[3] && r[1] < a[3])
+        });
+        let rw = (r[2] - r[0]) as i64;
+        for &j in &wanted[i] {
+            let src = &frames[j];
+            for y in r[1] as i64..r[3] as i64 {
+                for x in r[0] as i64..r[2] as i64 {
+                    let sp = ((y * cw + x) * 4) as usize;
+                    let o = &src.pixels[sp..sp + 4];
+                    if o[3] < vac_metrics::MIN_OPAQUE_ALPHA {
+                        continue;
+                    }
+                    let q = ((y - y0 - dy) * w + (x - x0 - dx)) as usize;
+                    let wp = (((y - r[1] as i64) * rw + (x - r[0] as i64)) * 4) as usize;
+                    let s = &without[wp..wp + 4];
+                    let d: i64 = (0..3).map(|c| (o[c] as i64 - s[c] as i64).pow(2)).sum();
+                    seen[q] += 1;
+                    if d > thr {
+                        samples[q].push([o[0], o[1], o[2]]);
+                    }
+                }
+            }
+        }
+    }
+    let mut rgba = vec![0u8; n * 4];
+    let mut opaque = 0usize;
+    for q in 0..n {
+        let v = &samples[q];
+        if v.is_empty() || (v.len() as u32) * 2 <= seen[q] {
+            continue;
+        }
+        for c in 0..3 {
+            let mut ch: Vec<u8> = v.iter().map(|s| s[c]).collect();
+            ch.sort_unstable();
+            rgba[q * 4 + c] = ch[ch.len() / 2];
+        }
+        rgba[q * 4 + 3] = 255;
+        opaque += 1;
+    }
+    if opaque == 0 {
+        return None;
+    }
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&rgba, w as u32, h as u32, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(Sprite {
+        x: x0 as f32,
+        y: y0 as f32,
+        w: w as f32,
+        h: h as f32,
+        offset: (x0 as f32 - aref.0, y0 as f32 - aref.1),
+        uri: format!("data:image/png;base64,{}", vac_format::base64::encode(&png)),
+    })
+}
+
+/// `doc` with shape `name` drawn as `sprite`: the same place in the draw
+/// order, its fill and stroke dropped, its keyframes kept with positions
+/// moved from the shape's anchor to the sprite's top-left corner.
+fn with_sprite(doc: &Document, name: &str, sprite: &Sprite, anim: Option<&vac_format::Animation>) -> Document {
+    let mut out = doc.clone();
+    let stmts = &mut out.scenes[0].statements;
+    stmts.retain(|st| match st {
+        Statement::Assign { target, .. } => target != name,
+        Statement::Animate(a) => a.target != name,
+        _ => true,
+    });
+    let pos = stmts
+        .iter()
+        .position(|st| matches!(st, Statement::Let { name: n, .. } if n == name))
+        .expect("the shape is declared");
+    stmts[pos] = Statement::Let {
+        name: name.to_string(),
+        shape: Shape::Image {
+            x: sprite.x,
+            y: sprite.y,
+            w: sprite.w,
+            h: sprite.h,
+            src: sprite.uri.clone(),
+        },
+    };
+    if let Some(a) = anim {
+        let mut a = a.clone();
+        let round = |v: f32| (v * 10.0).round() / 10.0;
+        for kf in &mut a.keyframes {
+            for t in &mut kf.transforms {
+                if let Transform::Position(px, py) = t {
+                    *px = round(*px + sprite.offset.0);
+                    *py = round(*py + sprite.offset.1);
+                }
+            }
+        }
+        stmts.insert(pos + 1, Statement::Animate(a));
+    }
+    out
 }
 
 /// Close the gaps the audit leaves in `shape_<n>`, `static_<n>` and
@@ -883,6 +1336,9 @@ pub struct Verification {
     /// Shapes the decompiler emitted that the audit (v1.7) measured as not
     /// improving the reconstruction, and took out. 0 for a given document.
     pub audited_out: usize,
+    /// Shapes drawn as sprites of their own pixels (v1.8). For a given
+    /// document, the `image()` shapes other than the plate.
+    pub sprites: usize,
 }
 
 /// Decompile a video, re-render the result, and score it against the
@@ -903,6 +1359,7 @@ pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verifi
         chosen.background,
         chosen.plate,
         chosen.audited_out,
+        chosen.sprites,
     ))
 }
 
@@ -918,12 +1375,18 @@ pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verific
         .scenes
         .iter()
         .flat_map(|s| &s.statements)
-        .any(|st| matches!(st, Statement::Let { shape: Shape::Image { .. }, .. }))
+        .any(|st| matches!(st, Statement::Let { name, shape: Shape::Image { .. } } if name == "plate"))
     {
         Plate::Raster
     } else {
         Plate::Vector
     };
+    let sprite_count = doc
+        .scenes
+        .iter()
+        .flat_map(|s| &s.statements)
+        .filter(|st| matches!(st, Statement::Let { name, shape: Shape::Image { .. } } if name != "plate"))
+        .count();
     Ok(summarise(
         doc,
         fidelity,
@@ -932,6 +1395,7 @@ pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verific
         Background::Auto,
         plate,
         0,
+        sprite_count,
     ))
 }
 
@@ -943,6 +1407,7 @@ fn summarise(
     background: Background,
     plate: Plate,
     audited_out: usize,
+    sprites: usize,
 ) -> Verification {
     let text = vac_format::write(&doc);
     let mut shapes = 0usize;
@@ -972,6 +1437,7 @@ fn summarise(
         animate_blocks,
         keyframes,
         audited_out,
+        sprites,
     }
 }
 

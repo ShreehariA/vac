@@ -71,6 +71,10 @@ pub struct Options {
     /// [`Plate::Auto`], it needs a renderer, so the `vac` facade runs it;
     /// the decompiler on its own ignores it.
     pub audit: bool,
+    /// Draw a shape vectors cannot describe as a sprite of its own pixels
+    /// when that measures clearly better (v1.8). Resolved by the `vac`
+    /// facade, like [`Options::audit`].
+    pub sprites: bool,
 }
 
 /// How the static scene is written (v1.6).
@@ -97,6 +101,7 @@ impl Default for Options {
             quality: track::DEFAULT_QUALITY,
             plate: Plate::Auto,
             audit: true,
+            sprites: true,
         }
     }
 }

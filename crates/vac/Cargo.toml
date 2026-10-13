@@ -11,6 +11,7 @@ vac-compiler.workspace = true
 vac-decompiler.workspace = true
 vac-metrics.workspace = true
 thiserror.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 vac-format.workspace = true

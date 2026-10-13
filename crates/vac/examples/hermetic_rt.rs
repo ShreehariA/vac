@@ -13,7 +13,8 @@ fn main() {
         Ok("vector") => vac::Plate::Vector,
         _ => vac::Plate::Auto,
     };
-    let opts = vac::DecompileOptions { plate, ..Default::default() };
+    let sprites = std::env::var("VAC_SPRITES").as_deref() != Ok("0");
+    let opts = vac::DecompileOptions { plate, sprites, ..Default::default() };
     let recovered = vac::decompile_frames(frames.clone(), &opts).expect("decompile");
     let fid = vac::measure(&frames, &recovered).expect("measure");
     println!("{}", vac::to_string(&recovered));
