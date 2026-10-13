@@ -171,6 +171,10 @@ fn assert_well_formed(sample: &str, doc: &Document) {
                                     assert!(d.is_finite(), "{sample}: non-finite rotation")
                                 }
                                 Transform::Fill(_) => {}
+                                Transform::Clip(x, y, w, h) => assert!(
+                                    [x, y, w, h].iter().all(|v| v.is_finite()) && *w >= 0.0 && *h >= 0.0,
+                                    "{sample}: bad clip window"
+                                ),
                                 Transform::Opacity(o) => assert!(
                                     o.is_finite() && (0.0..=1.0).contains(o),
                                     "{sample}: opacity {o} outside [0,1]"

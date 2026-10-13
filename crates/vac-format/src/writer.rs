@@ -182,6 +182,7 @@ fn fmt_transform(t: &Transform) -> String {
         Transform::Opacity(o) => format!("opacity({})", fmt_num(*o)),
         Transform::Rotate(d) => format!("rotate({})", fmt_num(*d)),
         Transform::Fill(c) => format!("fill({})", fmt_color(c)),
+        Transform::Clip(x, y, w, h) => format!("clip({}, {}, {}, {})", fmt_num(*x), fmt_num(*y), fmt_num(*w), fmt_num(*h)),
     }
 }
 
@@ -326,6 +327,20 @@ mod tests {
         assert!(out.contains("1s -> scale(0.25, 1)"), "{out}");
         assert_eq!(crate::parse(&out).unwrap(), doc);
         assert!(crate::parse(&src.replace("scale(1.5)", "scale(1, 2, 3)")).is_err());
+    }
+
+    /// v1.22: `clip(x, y, w, h)` round-trips, and a negative size is
+    /// refused.
+    #[test]
+    fn clip_round_trips() {
+        let src = "canvas 10x10 @10fps\nscene s {\n  duration 1s\n  let r = rect(0, 0, 4, 2)\n  animate r {\n    0ms -> clip(10, 0, 0, 10)\n    1s -> clip(0, 0, 10, 10)\n    easing: linear\n  }\n}\n";
+        let doc = crate::parse(src).unwrap();
+        let out = write(&doc);
+        assert!(out.contains("0ms -> clip(10, 0, 0, 10)"), "{out}");
+        assert!(out.contains("1s -> clip(0, 0, 10, 10)"), "{out}");
+        assert_eq!(crate::parse(&out).unwrap(), doc);
+        assert!(crate::parse(&src.replace("clip(10, 0, 0, 10)", "clip(10, 0, -1, 10)")).is_err());
+        assert!(crate::parse(&src.replace("clip(10, 0, 0, 10)", "clip(10, 0, 0)")).is_err());
     }
 
     #[test]

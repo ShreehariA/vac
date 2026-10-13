@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.21, default quality 50) and is
+table re-measured 2026-10-13 at v1.22, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -128,6 +128,19 @@ drew. The static layer can't recover the track either: its temporal
 median is the bar's green wherever the bar covers the track for more than
 half the clip. Writing the track as the source has it needs depth order, a
 shape under another, which the tracker does not yet infer.
+
+---
+
+## 6. A picture written once per scene
+
+**Status: open. Corpus row: `slideshow_wipe_push.mp4`.**
+
+A scene is self-contained, so every scene that shows a picture embeds its
+own JPEG of it. The wipe-and-push slideshow shows three photos and writes
+seven: each still shot's plate, and both ends of each transition (283 KB).
+A picture that one scene could name from another would write each photo
+once. Circle and shape wipes (`xfade` circleopen: 29.9 dB) are not handled
+either: v1.22's sweeps are axis-aligned.
 
 ---
 
@@ -450,6 +463,15 @@ shape under another, which the tracker does not yet infer.
   re-chosen, which fixed a regression the corpus check caught in
   `cuts_three_shots`.
 
+- **v1.22 — wipes and pushes.** A window between two still pictures whose
+  every frame is the second coming on along one axis, uncovered by an edge
+  or pushing the first off, is a scene of its own: the wipe under a new
+  `clip(x, y, w, h)` window, the push as two pictures under `position()`.
+  It's gated on replacing at least half the picture, progressing steadily,
+  and still ends in absolute terms, each gate added after a false positive.
+  A one-second wipe went 18.90 → **36.97 dB**, a push 19.48 → **36.79**;
+  the new corpus clip `slideshow_wipe_push` is at **37.23**.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -457,6 +479,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
+| `slideshow_wipe_push.mp4` | 0.9976 | 0.9919 | 12.3 | 37.23 | 0.1% | 7 |
 | `slideshow_dissolve.mp4` | 0.9962 | 0.9634 | 69.4 | 29.72 | 0.2% | 4 |
 | `roll_watercolor.mp4` | 0.9958 | 0.9933 | 16.9 | 35.85 | 0.3% | 1 |
 | `testsrc2.mp4` | 0.9954 | 0.9865 | 357.2 | 22.60 | 0.4% | 63 |

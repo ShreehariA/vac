@@ -248,6 +248,10 @@ pub enum Transform {
     /// A flat fill colour (v1.3), interpolated in RGB between keyframes
     /// that carry one — colour animation.
     Fill(Color),
+    /// The window, in canvas coordinates, outside which the shape is not
+    /// drawn (v1.22): `clip(x, y, w, h)`, interpolated per component. A
+    /// wipe is the incoming picture with its window growing from one edge.
+    Clip(f32, f32, f32, f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

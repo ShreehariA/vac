@@ -235,6 +235,16 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | 75 | 231,150 | 1.9× smaller | 65.2 | 29.99 | 0.9967 | 4 | 103 |
 | 100 | 359,970 | 1.2× smaller | 63.3 | 30.12 | 0.9972 | 4 | 113 |
 
+### `slideshow_wipe_push.mp4` — source file 173 KB
+
+| quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
+|---|---|---|---|---|---|---|---|
+| 0 | 164,469 | 1.1× smaller | 29.6 | 33.41 | 0.9967 | 7 | 30 |
+| 25 | 200,724 | 0.9× smaller | 20.2 | 35.07 | 0.9970 | 7 | 63 |
+| 50 | 282,889 | 0.6× smaller | 12.3 | 37.23 | 0.9976 | 7 | 69 |
+| 75 | 377,972 | 0.5× smaller | 7.5 | 39.38 | 0.9983 | 7 | 78 |
+| 100 | 603,748 | 0.3× smaller | 3.1 | 43.24 | 0.9989 | 7 | 78 |
+
 ### `testsrc2.mp4` — source file 305 KB
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |

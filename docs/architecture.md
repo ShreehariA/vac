@@ -1,6 +1,6 @@
 # How VAC decompiles a video
 
-This is the pipeline as of v1.21: what runs, in what order, and what decides
+This is the pipeline as of v1.22: what runs, in what order, and what decides
 each step. The README is a version-by-version log, and this is the map. One
 rule runs through all of it: **measure, don't classify.** Wherever there is a
 choice, every option is built, rendered back to pixels, and scored against
@@ -31,7 +31,7 @@ video ──► long?  ──► scan once, then a segment at a time  (v1.16)
          fade?   ──► read it, take it out, fit it back on top (v1.13)
             │
             ▼
-      cuts / dissolves ──► each shot alone; each dissolve a scene (v1.12, v1.17)
+      cuts / dissolves / sweeps ──► each shot alone; each transition a scene (v1.12, v1.17, v1.22)
             │
             ▼
          one shot:
@@ -70,6 +70,11 @@ frames usually do. A **dissolve** is a cut spread over frames. Frames a window
 apart differ like a cut, every frame between is a blend of them, and in its
 middle every changing pixel has moved by the same share. That last test is
 what stops a card sliding over a flat background from passing as a dissolve.
+A **sweep** is a wipe or a push (v1.22): between two still frames, every
+frame is the second picture coming on along one axis, uncovered by an edge
+or pushing the first off. Its frames step like cuts, and the cut candidates
+inside it are absorbed. It becomes a scene: the incoming picture under a
+growing `clip()` window, or both pictures under `position()` keyframes.
 Each shot is decompiled alone. Each dissolve becomes a scene between its
 shots: the neighbouring shots' camera plates carried through it, or its edge
 frames frozen, whichever measures better, crossfading with a least-squares

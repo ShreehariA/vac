@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.21)
+## Where VAC is today (v1.22)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -41,7 +41,7 @@ animate shape_1 {
 ```
 
 **What it recovers:** shots, each as its own scene; fades to and from
-black or white; dissolves between shots; rects, ellipses and traced paths, by measured fit;
+black or white; dissolves, wipes and pushes between shots; rects, ellipses and traced paths, by measured fit;
 position, scale (uniform, or stretching along one axis), rotation, opacity
 and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
@@ -76,6 +76,7 @@ keyframes are re-measured by registering its own pixels across frames.
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
 | `progress_bars.mp4` | ffmpeg progress bar and a bar chart rising | 39.9 dB | 0.995 |
 | `cuts_three_shots.mp4` | three corpus clips cut together | 37.7 dB | 0.988 |
+| `slideshow_wipe_push.mp4` | three photos: a wipe, then a push | 37.2 dB | 0.998 |
 | `roll_watercolor.mp4` | a camera rolling 26° over an AI-generated watercolour | 35.9 dB | 0.996 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 32.4 dB | 0.993 |
@@ -2587,3 +2588,72 @@ the format can't say: the grey track the bar fills comes back as a rect
 shrinking from the left, which is what stays visible, not a track under a
 bar. Writing it as the source has it needs depth order, which the tracker
 does not yet infer.
+
+## v1.22 — Wipes and pushes
+
+With cuts, fades and dissolves handled, I made a small matrix of the other
+standard transitions with ffmpeg's `xfade`: the same two photos, a second
+each side of a one-second transition.
+
+| transition | v1.21 | v1.22 |
+|---|---|---|
+| crossfade | 36.88 dB, three scenes | unchanged |
+| wipe (the second photo uncovered from the right) | **18.90 dB**, six scenes, 256 shapes | **36.97 dB**, three scenes |
+| push (the second photo pushing the first off) | **19.48 dB**, six scenes, 469 shapes | **36.79 dB**, three scenes |
+| circle opening | 29.89 dB | unchanged (not handled) |
+
+Between two still pictures, every frame of a wipe or a push steps like a
+cut, so the cut test fired all through one and chopped it into fragments.
+v1.22 looks for a window whose ends are still and whose every frame between
+is the second picture coming on along one axis. That's two models, in four
+directions each:
+
+- **A wipe.** Each pixel is one picture or the other, split at an edge.
+  Each line's cost against either picture, summed by prefix sums, gives
+  the best edge in every frame exactly.
+- **A push.** Both pictures shift together. A push moves whole lines, so
+  its offset is found by matching the lines' mean colours in one dimension,
+  and the frame is checked at that offset.
+
+Both are searched on thumbnails and re-measured to the pixel at full size.
+A wipe is written as the incoming picture under a new transform,
+`clip(x, y, w, h)`: a window in canvas coordinates outside which a shape
+isn't drawn. A push is written as the two pictures side by side under
+`position()` keyframes:
+
+```vac
+let incoming = image(0, 0, 480, 320, "…")    // the wipe
+animate incoming {
+  0ms   -> clip(464, 0, 16, 320)
+  466ms -> clip(240, 0, 240, 320)
+  933ms -> clip(16, 0, 464, 320)
+}
+```
+
+Three gates came out of false positives the tests and the corpus caught:
+
+- **It replaces the picture.** The two ends must differ decisively over
+  half the frame. On a flat background a lone rect sliding *is*,
+  geometrically, a push: the background doesn't care that it moved.
+  `sliding_rect.vac` was taken for one.
+- **Steadily.** No frame may take more than a third of the frame. A pan
+  creeping a line a frame and then a cut jumps most of it at once
+  (`cuts_three_shots`: 15 of 160 lines, then all 160).
+- **Between still frames, in absolute terms.** The window's ends must step
+  no more than three times the clip's typical step. Measured only against
+  the window, a frame in the middle of a wipe was "still" (a 16 px strip is
+  little beside two different pictures) and bounded a false push over it.
+
+Keyframes are pinned at an eighth of the keyframe tolerance, as a camera
+plate's are. ffmpeg's push steps in whole pixels, and simplified to a
+straight line it lost 12 dB on every other frame.
+
+| clip | v1.21 | v1.22 |
+|---|---|---|
+| `slideshow_wipe_push.mp4` (new corpus clip) | 20.28 dB, 477 shapes | **37.23 dB**, five scenes, 7 shapes |
+| `sweep.vac` (new fixture), hermetic | — | **46.16 dB**, five scenes as written |
+
+Every other corpus clip is unchanged. Two things are left. The pictures are
+frozen at the sweep's ends, as v1.17's dissolve pictures were, so motion
+during a sweep isn't followed. And each scene embeds its own copy of a
+picture, so the new clip's three photos are written seven times (283 KB).

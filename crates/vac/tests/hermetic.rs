@@ -146,6 +146,7 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("shots.vac", 0.9998, 0.45),
     ("spin.vac", 0.9932, 1.12),
     ("sprite.vac", 0.9746, 13.39),
+    ("sweep.vac", 0.9981, 1.57),
     ("static_and_moving.vac", 0.9999, 0.01),
     ("textured.vac", 0.9999, 1.51),
     ("triangle.vac", 0.9855, 7.18),

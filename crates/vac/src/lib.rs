@@ -769,12 +769,21 @@ fn add_fade(doc: &mut Document, fade: &Fade, quality: f32) {
 /// clip as one, keeping whichever reconstructs better.
 fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let mut cuts = if opts.shots { cut_candidates(frames) } else { Vec::new() };
+    // v1.22: every frame of a wipe or a push steps like a cut. The cut
+    // candidates inside one are the sweep, not cuts; its edges are.
+    let sweeps: Vec<Sweep> = if opts.shots { sweep_candidates(frames) } else { Vec::new() };
+    cuts.retain(|&c| !sweeps.iter().any(|s| c > s.a && c <= s.b));
+    for s in &sweeps {
+        cuts.push(s.a);
+        cuts.push(s.b + 1);
+    }
     // v1.17: a dissolve is a cut spread over frames. Its frames become a
     // scene of their own between the two shots, and their edges are cuts.
     let dissolves: Vec<(usize, usize)> = if opts.shots {
         dissolve_candidates(frames)
             .into_iter()
             .filter(|&(a, b)| !cuts.iter().any(|&c| c >= a && c <= b + 1))
+            .filter(|&(a, b)| !sweeps.iter().any(|s| a <= s.b + 1 && s.a <= b + 1))
             .collect()
     } else {
         Vec::new()
@@ -789,6 +798,7 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         return decompile_shot(frames, opts);
     }
     let is_dissolve = |w0: usize| dissolves.iter().any(|&(a, _)| a == w0);
+    let sweep_at = |w0: usize| sweeps.iter().copied().find(|s| s.a == w0);
     // v1.12: decompile each shot on its own and the clip as one, side by
     // side, and keep whichever reconstructs better. The clip as one is a
     // safety net against a cut that is not one, and on a long clip with
@@ -807,7 +817,12 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
             .windows(2)
             .map(|w| {
                 let (a, b) = (w[0], w[1]);
-                (!is_dissolve(a)).then(|| scope.spawn(move || decompile_shot(&frames[a..b], opts)))
+                (!is_dissolve(a)).then(|| {
+                    scope.spawn(move || match sweep_at(a) {
+                        Some(sweep) => sweep_shot(frames, sweep, opts),
+                        None => decompile_shot(&frames[a..b], opts),
+                    })
+                })
             })
             .collect();
         (
@@ -854,6 +869,421 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         refined: parts.iter().map(|c| c.refined).sum(),
         moved: parts.iter().map(|c| c.moved).sum(),
         sprites: parts.iter().map(|c| c.sprites).sum(),
+    })
+}
+
+/// How a transition brings the incoming picture on (v1.22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepKind {
+    /// Uncovered by an edge moving across; neither picture moves.
+    Wipe,
+    /// Pushed on, the outgoing picture pushed off ahead of it.
+    Push,
+}
+
+/// The edge a sweep's incoming picture comes on from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Edge {
+    fn horizontal(self) -> bool {
+        matches!(self, Edge::Left | Edge::Right)
+    }
+    /// The incoming picture enters at the high end of its axis.
+    fn from_high(self) -> bool {
+        matches!(self, Edge::Right | Edge::Bottom)
+    }
+}
+
+/// A wipe or a push over frames `[a, b]`, both included: the frames that
+/// show both pictures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Sweep {
+    a: usize,
+    b: usize,
+    kind: SweepKind,
+    from: Edge,
+}
+
+/// The lengths a sweep is looked for at, frames, as for a dissolve.
+const SWEEP_SPANS: [usize; 7] = [8, 12, 16, 24, 32, 48, 64];
+/// The most of the two pictures' difference a sweep may leave unexplained
+/// in any frame between them. A dissolve's midpoint leaves a quarter, so a
+/// blend is never taken for a sweep.
+const SWEEP_MAX_RESIDUAL: f64 = 0.12;
+/// A sweep's window is bounded by still frames: each end steps from its own
+/// neighbour by at most this share of how far the window's ends differ...
+const SWEEP_CALM: f64 = 0.1;
+/// ...and by at most this many times the clip's typical step, plus
+/// [`SWEEP_CALM_NOISE`] of codec noise. Relative to the window alone, a
+/// frame in the middle of a wipe was calm — a 16 px strip is little beside
+/// two whole different pictures — and bounded a false push over it.
+const SWEEP_CALM_STEPS: f64 = 3.0;
+/// Codec noise in a still frame's step, as mean squared error.
+const SWEEP_CALM_NOISE: f64 = 25.0;
+/// A sweep replaces the picture: its two ends must differ decisively (by
+/// 30 levels a channel, as a dissolve's changing pixels) over at least
+/// this share of the frame. On a flat background a lone shape sliding is,
+/// geometrically, a push — the background does not care that it moved —
+/// and `sliding_rect.vac` was taken for one.
+const SWEEP_MIN_COVER: f64 = 0.5;
+
+/// RGB as floats, row-major, for the sweep fits.
+fn rgb_f32(f: &VideoFrame) -> Vec<f32> {
+    f.pixels.chunks_exact(4).flat_map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()
+}
+
+/// Frame `f` as a wipe of `q` over `p` coming on from `from`: how far it
+/// has got, in lines of the sweep's axis, and the squared error left.
+/// Each line's cost against either picture, then the best boundary by
+/// prefix sums: exact for an axis-aligned edge.
+fn wipe_fit(f: &[f32], p: &[f32], q: &[f32], w: usize, h: usize, from: Edge) -> (usize, f64) {
+    let lines = if from.horizontal() { w } else { h };
+    let (mut cp, mut cq) = (vec![0f64; lines], vec![0f64; lines]);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 3;
+            let l = if from.horizontal() { x } else { y };
+            for c in 0..3 {
+                cp[l] += ((f[i + c] - p[i + c]) as f64).powi(2);
+                cq[l] += ((f[i + c] - q[i + c]) as f64).powi(2);
+            }
+        }
+    }
+    let (mut pp, mut pq) = (vec![0f64; lines + 1], vec![0f64; lines + 1]);
+    for l in 0..lines {
+        pp[l + 1] = pp[l] + cp[l];
+        pq[l + 1] = pq[l] + cq[l];
+    }
+    let (tp, tq) = (pp[lines], pq[lines]);
+    let mut best = (f64::INFINITY, 0usize);
+    for b in 0..=lines {
+        // The incoming picture holds lines [b, lines) entering high, [0, b) entering low.
+        let err = if from.from_high() { pp[b] + (tq - pq[b]) } else { pq[b] + (tp - pp[b]) };
+        if err < best.0 {
+            best = (err, b);
+        }
+    }
+    let covered = if from.from_high() { lines - best.1 } else { best.1 };
+    (covered, best.0)
+}
+
+/// Frame `f` as a push of `q` onto `p` from `from`: how far it has got, in
+/// lines, and the squared error left. A push shifts whole lines, so the
+/// offset is found on the lines' mean colours and the frame checked at it.
+fn push_fit(f: &[f32], p: &[f32], q: &[f32], w: usize, h: usize, from: Edge) -> (usize, f64) {
+    let (lines, span) = if from.horizontal() { (w, h) } else { (h, w) };
+    let at = |x: usize, y: usize| (y * w + x) * 3;
+    let profile = |img: &[f32]| -> Vec<[f64; 3]> {
+        let mut out = vec![[0f64; 3]; lines];
+        for y in 0..h {
+            for x in 0..w {
+                let l = if from.horizontal() { x } else { y };
+                for c in 0..3 {
+                    out[l][c] += img[at(x, y) + c] as f64;
+                }
+            }
+        }
+        out.iter_mut().for_each(|v| v.iter_mut().for_each(|c| *c /= span as f64));
+        out
+    };
+    let (pf, pp, pq) = (profile(f), profile(p), profile(q));
+    // Which line of which picture shows at line `l` when the push has got `d` lines in.
+    let source = |l: usize, d: usize| -> (bool, usize) {
+        if from.from_high() {
+            if l + d < lines { (false, l + d) } else { (true, l + d - lines) }
+        } else if l < d {
+            (true, l + lines - d)
+        } else {
+            (false, l - d)
+        }
+    };
+    let mut best = (f64::INFINITY, 0usize);
+    for d in 0..=lines {
+        let err: f64 = (0..lines)
+            .map(|l| {
+                let (incoming, sl) = source(l, d);
+                let v = if incoming { &pq[sl] } else { &pp[sl] };
+                (0..3).map(|c| (pf[l][c] - v[c]).powi(2)).sum::<f64>()
+            })
+            .sum();
+        if err < best.0 {
+            best = (err, d);
+        }
+    }
+    let d = best.1;
+    let mut err = 0f64;
+    for y in 0..h {
+        for x in 0..w {
+            let l = if from.horizontal() { x } else { y };
+            let (incoming, sl) = source(l, d);
+            let (sx, sy) = if from.horizontal() { (sl, y) } else { (x, sl) };
+            let src = if incoming { q } else { p };
+            for c in 0..3 {
+                err += ((f[at(x, y) + c] - src[at(sx, sy) + c]) as f64).powi(2);
+            }
+        }
+    }
+    (d, err)
+}
+
+/// Wipes and pushes (v1.22): a window whose ends are two still pictures and
+/// whose every frame between is the second coming on over the first along
+/// one axis — uncovered by a moving edge, or pushing it off. Each of its
+/// frames steps like a cut, so the cut test fires all through one; found
+/// here, its frames become one scene. Searched on thumbnails, as dissolves
+/// are; the longest window that fits wins.
+fn sweep_candidates(frames: &[VideoFrame]) -> Vec<Sweep> {
+    let n = frames.len();
+    if n < 3 * MIN_SHOT_FRAMES {
+        return Vec::new();
+    }
+    let (w, h) = (frames[0].width, frames[0].height);
+    if frames.iter().any(|f| f.width != w || f.height != h) {
+        return Vec::new();
+    }
+    let thumbs = downscale(frames, (w / 160).max(1));
+    let (tw, th) = (thumbs[0].width as usize, thumbs[0].height as usize);
+    let t: Vec<Vec<f32>> = thumbs.iter().map(rgb_f32).collect();
+    let mse = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| ((x - y) as f64).powi(2)).sum::<f64>() / a.len() as f64;
+    let steps: Vec<f64> = (1..n).map(|i| mse(&t[i - 1], &t[i])).collect();
+    let typical = {
+        let mut s = steps.clone();
+        s.sort_by(f64::total_cmp);
+        s[s.len() / 2]
+    };
+    let still = SWEEP_CALM_STEPS * typical + SWEEP_CALM_NOISE;
+    let models = [
+        (SweepKind::Wipe, Edge::Left),
+        (SweepKind::Wipe, Edge::Right),
+        (SweepKind::Wipe, Edge::Top),
+        (SweepKind::Wipe, Edge::Bottom),
+        (SweepKind::Push, Edge::Left),
+        (SweepKind::Push, Edge::Right),
+        (SweepKind::Push, Edge::Top),
+        (SweepKind::Push, Edge::Bottom),
+    ];
+    let mut found: Vec<(Sweep, f64)> = Vec::new();
+    for &k in &SWEEP_SPANS {
+        if k + 2 * MIN_SHOT_FRAMES > n {
+            continue;
+        }
+        for i in 1..n - k {
+            let (p, q) = (&t[i], &t[i + k]);
+            let span = mse(p, q);
+            if span < CUT_FLOOR_MSE {
+                continue;
+            }
+            let calm = SWEEP_CALM * span.min(still / SWEEP_CALM);
+            if steps[i - 1] > calm || steps.get(i + k).is_some_and(|&s| s > calm) {
+                continue;
+            }
+            let decisive = p
+                .chunks_exact(3)
+                .zip(q.chunks_exact(3))
+                .filter(|(a, b)| a.iter().zip(b.iter()).map(|(x, y)| ((x - y) as f64).powi(2)).sum::<f64>() >= 3.0 * 30.0 * 30.0)
+                .count();
+            if (decisive as f64) < SWEEP_MIN_COVER * (p.len() / 3) as f64 {
+                continue;
+            }
+            let total = span * p.len() as f64;
+            for &(kind, from) in &models {
+                let lines = if from.horizontal() { tw } else { th };
+                let fit = |u: usize| match kind {
+                    SweepKind::Wipe => wipe_fit(&t[u], p, q, tw, th, from),
+                    SweepKind::Push => push_fit(&t[u], p, q, tw, th, from),
+                };
+                // The middle frame first: most windows fail there.
+                let (gm, em) = fit(i + k / 2);
+                if em > SWEEP_MAX_RESIDUAL * total || gm == 0 || gm == lines {
+                    continue;
+                }
+                let mut got = Vec::with_capacity(k - 1);
+                let mut worst = 0f64;
+                let fits = (i + 1..i + k).all(|u| {
+                    let (g, e) = fit(u);
+                    got.push(g);
+                    worst = worst.max(e / total);
+                    e <= SWEEP_MAX_RESIDUAL * total
+                });
+                // Onward only, give or take a line, from little to most, and
+                // steadily: no frame takes more than a third of the frame. A
+                // pan creeping a line a frame and then a cut, or a dissolve's
+                // end, jumps most of it at once (`cuts_three_shots`: 15 of 160
+                // lines, then 160).
+                let onward = got.windows(2).all(|g| g[1] + 1 >= g[0]);
+                let steady = got.windows(2).all(|g| g[1].saturating_sub(g[0]) * 3 <= lines);
+                let from_little = got.first().is_some_and(|&g| g * 3 < lines);
+                let to_most = got.last().is_some_and(|&g| g * 3 > 2 * lines);
+                if !(fits && onward && steady && from_little && to_most) {
+                    continue;
+                }
+                let first = got.iter().position(|&g| g > 0).map(|x| i + 1 + x).unwrap_or(i + 1);
+                let last = got.iter().rposition(|&g| g < lines).map(|x| i + 1 + x).unwrap_or(i + k - 1);
+                if last < first || first < MIN_SHOT_FRAMES || n - (last + 1) < MIN_SHOT_FRAMES {
+                    continue;
+                }
+                found.push((Sweep { a: first, b: last, kind, from }, worst));
+                break;
+            }
+        }
+    }
+    found.sort_by(|x, y| (y.0.b - y.0.a).cmp(&(x.0.b - x.0.a)).then(x.1.total_cmp(&y.1)));
+    let mut kept: Vec<Sweep> = Vec::new();
+    for (s, _) in found {
+        if kept.iter().all(|k| s.b + MIN_SHOT_FRAMES < k.a || s.a > k.b + MIN_SHOT_FRAMES) {
+            kept.push(s);
+        }
+    }
+    kept.sort_by_key(|s| s.a);
+    kept
+}
+
+/// A sweep's frames as a scene of their own (v1.22): the frame before it
+/// and the frame after it as pictures — a wipe the incoming one under a
+/// `clip()` window growing from its edge, a push the two side by side
+/// under `position()` keyframes. How far it has got is re-measured in every
+/// frame at full size, to the pixel, and simplified like any keyframes.
+fn sweep_shot(frames: &[VideoFrame], sweep: Sweep, opts: &DecompileOptions) -> Result<Chosen> {
+    let (a, b) = (sweep.a, sweep.b);
+    let (p, q) = (&frames[a - 1], &frames[(b + 1).min(frames.len() - 1)]);
+    let (w, h) = (p.width as usize, p.height as usize);
+    let tol = vac_decompiler::Tolerances::from_quality(opts.quality);
+    let fps = vac_decompiler::frames::estimate_fps(frames).max(1);
+    let n = b + 1 - a;
+    let time = |i: usize| ((i as u64 * 1000) / fps as u64) as u32;
+    let duration_ms = ((n as u64 * 1000).div_ceil(fps as u64)) as u32;
+    let (pf, qf) = (rgb_f32(p), rgb_f32(q));
+    let lines = if sweep.from.horizontal() { w } else { h };
+    let got: Vec<f32> = (a..=b)
+        .map(|u| {
+            let f = rgb_f32(&frames[u]);
+            (match sweep.kind {
+                SweepKind::Wipe => wipe_fit(&f, &pf, &qf, w, h, sweep.from),
+                SweepKind::Push => push_fit(&f, &pf, &qf, w, h, sweep.from),
+            })
+            .0 as f32
+        })
+        .collect();
+    // Keyframes: the frames where the sweep's progress is not straight,
+    // pinned to an eighth of the keyframe tolerance as a camera plate's
+    // are — a whole picture a pixel off costs far more than one shape (a
+    // push stepping in whole pixels, simplified to a straight line, lost
+    // 12 dB on every other frame).
+    let pin = tol.keyframe_px * 0.125;
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    let mut stack = vec![(0usize, n - 1)];
+    while let Some((x, y)) = stack.pop() {
+        if y <= x + 1 {
+            continue;
+        }
+        let (worst, at) = (x + 1..y)
+            .map(|u| {
+                let r = (time(u) - time(x)) as f32 / (time(y) - time(x)).max(1) as f32;
+                ((got[x] + (got[y] - got[x]) * r - got[u]).abs(), u)
+            })
+            .fold((0.0f32, x), |m, v| if v.0 > m.0 { v } else { m });
+        if worst > pin {
+            keep[at] = true;
+            stack.push((x, at));
+            stack.push((at, y));
+        }
+    }
+    let (wf, hf, lf) = (w as f32, h as f32, lines as f32);
+    let jpeg = |f: &VideoFrame| {
+        vac_decompiler::jpeg_data_uri(f, tol.raster_quality)
+            .ok_or_else(|| Error::Decompile(DecompileError::Other("could not encode a sweep's picture".into())))
+    };
+    let image = |x: f32, y: f32, src: String| Shape::Image { x, y, w: wf, h: hf, src };
+    let keyed = |f: &dyn Fn(f32) -> Vec<Transform>| -> Vec<Keyframe> {
+        (0..n).filter(|&u| keep[u]).map(|u| Keyframe { time_ms: time(u), transforms: f(got[u]) }).collect()
+    };
+    let animate = |target: &str, keyframes: Vec<Keyframe>| {
+        Statement::Animate(Animation {
+            target: target.into(),
+            keyframes,
+            easing: Easing::Linear,
+        })
+    };
+    let mut statements = Vec::new();
+    match sweep.kind {
+        SweepKind::Wipe => {
+            statements.push(Statement::Let { name: "plate".into(), shape: image(0.0, 0.0, jpeg(p)?) });
+            statements.push(Statement::Let { name: "incoming".into(), shape: image(0.0, 0.0, jpeg(q)?) });
+            let window = move |g: f32| -> Vec<Transform> {
+                vec![match sweep.from {
+                    Edge::Left => Transform::Clip(0.0, 0.0, g, hf),
+                    Edge::Right => Transform::Clip(wf - g, 0.0, g, hf),
+                    Edge::Top => Transform::Clip(0.0, 0.0, wf, g),
+                    Edge::Bottom => Transform::Clip(0.0, hf - g, wf, g),
+                }]
+            };
+            statements.push(animate("incoming", keyed(&window)));
+        }
+        SweepKind::Push => {
+            // Where each picture's top-left is once the push has got `g` lines in.
+            let outgoing = move |g: f32| -> (f32, f32) {
+                match sweep.from {
+                    Edge::Right => (-g, 0.0),
+                    Edge::Left => (g, 0.0),
+                    Edge::Bottom => (0.0, -g),
+                    Edge::Top => (0.0, g),
+                }
+            };
+            let incoming = move |g: f32| -> (f32, f32) {
+                match sweep.from {
+                    Edge::Right => (lf - g, 0.0),
+                    Edge::Left => (g - lf, 0.0),
+                    Edge::Bottom => (0.0, lf - g),
+                    Edge::Top => (0.0, g - lf),
+                }
+            };
+            let (x0, y0) = incoming(got[0]);
+            statements.push(Statement::Let { name: "plate".into(), shape: image(0.0, 0.0, jpeg(p)?) });
+            statements.push(animate("plate", keyed(&|g| {
+                let (x, y) = outgoing(g);
+                vec![Transform::Position(x, y)]
+            })));
+            statements.push(Statement::Let { name: "incoming".into(), shape: image(x0, y0, jpeg(q)?) });
+            statements.push(animate("incoming", keyed(&|g| {
+                let (x, y) = incoming(g);
+                vec![Transform::Position(x, y)]
+            })));
+        }
+    }
+    let name = match sweep.kind {
+        SweepKind::Wipe => "wipe",
+        SweepKind::Push => "push",
+    };
+    Ok(Chosen {
+        document: Document {
+            canvas: Canvas {
+                width: p.width,
+                height: p.height,
+                fps,
+            },
+            scenes: vec![Scene {
+                name: name.into(),
+                duration_ms,
+                statements,
+            }],
+        },
+        segmentation: Segmentation::Components,
+        background: Background::Corners,
+        plate: Plate::Raster,
+        static_layer: false,
+        fidelity: None,
+        audited_out: 0,
+        refined: 0,
+        moved: 0,
+        sprites: 0,
     })
 }
 

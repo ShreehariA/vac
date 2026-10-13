@@ -35,6 +35,9 @@ struct ShapeState {
     opacity: f32,
     /// Clockwise degrees about the shape's centre (v0.14).
     rotation: f32,
+    /// The canvas window outside which nothing of the shape is drawn
+    /// (v1.22), `(x, y, w, h)`; `None` draws everywhere.
+    clip: Option<(f32, f32, f32, f32)>,
     /// Decoded pixels of an `image()` shape (v1.6), premultiplied.
     image: Option<std::sync::Arc<Pixmap>>,
 }
@@ -56,6 +59,7 @@ impl ShapeState {
             scale: (1.0, 1.0),
             opacity: 1.0,
             rotation: 0.0,
+            clip: None,
         }
     }
 }
@@ -450,6 +454,11 @@ fn apply_animation(base: &ShapeState, anim: Option<&Animation>, t_ms: u32) -> Sh
     if let Some(r) = sample_channel(anim, t_ms, first_rotation, |a, b, p| a + (b - a) * p) {
         st.rotation = r;
     }
+    if let Some(c) = sample_channel(anim, t_ms, first_clip, |a, b, p| {
+        (a.0 + (b.0 - a.0) * p, a.1 + (b.1 - a.1) * p, a.2 + (b.2 - a.2) * p, a.3 + (b.3 - a.3) * p)
+    }) {
+        st.clip = Some(c);
+    }
     if let Some(c) = sample_channel(anim, t_ms, first_fill, |a: Color, b: Color, p| {
         let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * p).round().clamp(0.0, 255.0) as u8;
         Color { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }
@@ -504,6 +513,12 @@ fn first_position(k: &Keyframe) -> Option<(f32, f32)> {
 fn first_scale(k: &Keyframe) -> Option<(f32, f32)> {
     k.transforms.iter().find_map(|t| match t {
         VTransform::Scale(sx, sy) => Some((*sx, *sy)),
+        _ => None,
+    })
+}
+fn first_clip(k: &Keyframe) -> Option<(f32, f32, f32, f32)> {
+    k.transforms.iter().find_map(|t| match t {
+        VTransform::Clip(x, y, w, h) => Some((*x, *y, *w, *h)),
         _ => None,
     })
 }
@@ -590,8 +605,20 @@ fn placed_path(state: &ShapeState) -> Option<(tiny_skia::Path, Transform)> {
 }
 
 /// The world-space box a shape paints into, before anti-aliasing; `None`
-/// when it paints nothing.
+/// when it paints nothing. Its clip window (v1.22) bounds it.
 fn paint_bounds(state: &ShapeState) -> Option<tiny_skia::Rect> {
+    let r = unclipped_bounds(state)?;
+    match state.clip {
+        None => Some(r),
+        Some((x, y, w, h)) => {
+            let (l, t) = (r.left().max(x), r.top().max(y));
+            let (rt, b) = (r.right().min(x + w), r.bottom().min(y + h));
+            (l < rt && t < b).then(|| tiny_skia::Rect::from_ltrb(l, t, rt, b)).flatten()
+        }
+    }
+}
+
+fn unclipped_bounds(state: &ShapeState) -> Option<tiny_skia::Rect> {
     if state.opacity <= 0.0 {
         return None;
     }
@@ -622,6 +649,21 @@ fn paint_bounds(state: &ShapeState) -> Option<tiny_skia::Rect> {
 /// Draw one shape. `origin` is applied after the shape's own transform:
 /// identity for a full frame, a whole-pixel translation for a region.
 fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState, origin: Transform) {
+    // The clip window (v1.22), in canvas coordinates like the shape, as a
+    // mask over this pixmap. An empty window shows nothing.
+    let mask = match state.clip {
+        None => None,
+        Some((x, y, w, h)) => {
+            if !(w > 0.0 && h > 0.0) {
+                return;
+            }
+            let Some(r) = tiny_skia::Rect::from_xywh(x, y, w, h) else { return };
+            let Some(mut m) = tiny_skia::Mask::new(pixmap.width(), pixmap.height()) else { return };
+            m.fill_path(&PathBuilder::from_rect(r), FillRule::Winding, true, origin);
+            Some(m)
+        }
+    };
+    let mask = mask.as_ref();
     if matches!(state.base, Shape::Image { .. }) {
         let Some(img) = &state.image else { return };
         let Some(ts) = image_transform(state, img) else { return };
@@ -630,7 +672,7 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState, origin: Transform) {
             blend_mode: tiny_skia::BlendMode::SourceOver,
             quality: tiny_skia::FilterQuality::Bilinear,
         };
-        pixmap.draw_pixmap(0, 0, img.as_ref().as_ref(), &paint, ts.post_concat(origin), None);
+        pixmap.draw_pixmap(0, 0, img.as_ref().as_ref(), &paint, ts.post_concat(origin), mask);
         return;
     }
     let Some((path, transform)) = placed_path(state) else {
@@ -678,13 +720,13 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState, origin: Transform) {
                 paint.set_color_rgba8(c.r, c.g, c.b, (c.a as f32 * opacity) as u8);
             }
         }
-        pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
+        pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, mask);
     } else if let Some(fill) = state.fill {
         let mut paint = Paint::default();
         paint.anti_alias = true;
         let a = (fill.a as f32 * opacity) as u8;
         paint.set_color_rgba8(fill.r, fill.g, fill.b, a);
-        pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
+        pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, mask);
     }
 
     if let Some(stroke) = state.stroke {
@@ -696,7 +738,7 @@ fn draw_shape(pixmap: &mut Pixmap, state: &ShapeState, origin: Transform) {
             width: state.stroke_width,
             ..Default::default()
         };
-        pixmap.stroke_path(&path, &paint, &stroke_settings, transform, None);
+        pixmap.stroke_path(&path, &paint, &stroke_settings, transform, mask);
     }
 }
 
@@ -776,6 +818,7 @@ mod tests {
             scale: (1.0, 1.0),
             opacity: 1.0,
             rotation: 0.0,
+            clip: None,
             image: None,
         };
         apply_animation(&base, Some(anim), t)
@@ -882,6 +925,22 @@ mod tests {
         assert_eq!(red(15, 25), 0, "the height is unstretched: 10 to 20");
     }
 
+    /// v1.22: `clip(x, y, w, h)` keeps a shape inside a canvas window, and
+    /// an empty window shows nothing — a wipe is a picture whose window
+    /// grows.
+    #[test]
+    fn a_clip_window_hides_what_is_outside_it() {
+        let doc = vac_format::parse(
+            "canvas 60x30 @10fps\n\nscene main {\n  duration 200ms\n  let r = rect(0, 0, 60, 30)\n  r.fill = #ffffff\n  r.stroke = none\n  animate r {\n    0ms -> clip(40, 0, 20, 30)\n    100ms -> clip(60, 0, 0, 30)\n  }\n}\n",
+        )
+        .unwrap();
+        let frames = render_document(&doc).unwrap();
+        let red = |f: usize, x: u32, y: u32| frames[f].rgba[((y * 60 + x) * 4) as usize];
+        assert_eq!(red(0, 50, 15), 255, "inside the window");
+        assert_eq!(red(0, 30, 15), 0, "outside it");
+        assert_eq!(red(1, 59, 15), 0, "an empty window shows nothing");
+    }
+
     /// The two promises the shape audit (v1.7) rests on, over every
     /// fixture that exercises a different drawing path — rects, ellipses,
     /// stroked paths, gradients, rotation, scale, opacity and an image:
@@ -890,7 +949,7 @@ mod tests {
     #[test]
     fn a_region_renders_as_its_crop_and_a_shape_stays_inside_its_bounds() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/");
-        for name in ["spin.vac", "shaded.vac", "outlined.vac", "textured.vac", "grow.vac", "fade.vac", "color_shift.vac"] {
+        for name in ["spin.vac", "shaded.vac", "outlined.vac", "textured.vac", "grow.vac", "fade.vac", "color_shift.vac", "sweep.vac", "progress.vac"] {
             let src = std::fs::read_to_string(format!("{root}{name}")).unwrap();
             let doc = vac_format::parse(&src).unwrap();
             let full = render_document(&doc).unwrap();

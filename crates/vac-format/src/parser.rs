@@ -23,6 +23,7 @@
 //! transform     = "position" "(" Number "," Number ")"
 //!               | "scale"    "(" Number ("," Number)? ")"
 //!               | "opacity"  "(" Number ")"
+//!               | "clip"     "(" Number "," Number "," Number "," Number ")"
 //! easing_decl   = "easing" ":" Ident
 //! ```
 
@@ -933,6 +934,15 @@ impl Parser {
                 2 => Ok(Transform::Scale(nums[0], nums[1])),
                 n => Err(ParseError::syntax(span, format!("scale() takes (s) or (sx, sy), got {n} args"))),
             },
+            "clip" => {
+                if nums.len() != 4 {
+                    return Err(ParseError::syntax(span, format!("clip() takes (x, y, w, h), got {} args", nums.len())));
+                }
+                if nums[2] < 0.0 || nums[3] < 0.0 {
+                    return Err(ParseError::syntax(span, "clip() width and height must not be negative".to_string()));
+                }
+                Ok(Transform::Clip(nums[0], nums[1], nums[2], nums[3]))
+            }
             "opacity" => {
                 if nums.len() != 1 {
                     return Err(ParseError::syntax(
@@ -953,7 +963,7 @@ impl Parser {
             }
             other => Err(ParseError::syntax(
                 span,
-                format!("unknown transform `{other}` (expected position/scale/opacity/rotate/fill)"),
+                format!("unknown transform `{other}` (expected position/scale/opacity/rotate/fill/clip)"),
             )),
         }
     }

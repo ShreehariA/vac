@@ -122,6 +122,7 @@ v0.1 transforms:
 | `scale(sx, sy)` | per axis | stretches each axis about the anchor (a rect's top-left), so a bar fills as `scale(0, 1)` → `scale(1, 1)`; `scale(s)` is `scale(s, s)` — added v1.21 |
 | `opacity(o)` | `[0, 1]` | multiplies fill/stroke alpha |
 | `rotate(deg)` | degrees, clockwise | turns the shape about its **centre** (rect/ellipse centre, path centroid), independent of the `position` anchor — added v0.14 |
+| `clip(x, y, w, h)` | canvas window | the shape is drawn only inside this rectangle, in canvas coordinates; interpolated per component; an empty window shows nothing — added v1.22 |
 | `fill(#rrggbb)` | colour | sets a flat fill, interpolated in RGB between keyframes that carry one; replaces a gradient fill while it applies — added v1.3 |
 
 **Gradient fills (v1.2).** `fill` takes a colour, `none`, or a two-stop

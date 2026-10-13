@@ -460,6 +460,48 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.22 — wipes and pushes.**
+///
+/// Between two still pictures, every frame of a wipe or a push steps like
+/// a cut, so the cut test fired all through one and a one-second wipe came
+/// back as six scenes and 256 shapes, at 18.9 dB. A window whose ends are
+/// still and whose every frame between is the second picture coming on
+/// along one axis — uncovered by an edge, or pushing the first off — is now
+/// a scene of its own: the wipe as the incoming picture under a growing
+/// `clip()` window, the push as both pictures under `position()` keyframes.
+/// `sweep.vac` holds a picture, a wipe to a second, and a push to a third:
+/// it must come back as five scenes, one clipping and one pushing, at better
+/// than 44 dB.
+#[test]
+fn a_wipe_and_a_push_come_back_as_scenes_of_their_own() {
+    let (_, recovered, fid) = hermetic("sweep.vac");
+    assert_eq!(recovered.scenes.len(), 5, "picture, wipe, picture, push, picture: {}", vac::to_string(&recovered));
+    let clipping = recovered.scenes.iter().filter(|s| {
+        s.statements.iter().any(|st| {
+            matches!(st, Statement::Animate(a) if a.keyframes.len() >= 2 && a.keyframes.iter().all(|k| k.transforms.iter().any(|t| matches!(t, Transform::Clip(..)))))
+        })
+    });
+    assert_eq!(clipping.count(), 1, "one scene is the wipe");
+    let pushing = recovered.scenes.iter().filter(|s| {
+        let moving = s
+            .statements
+            .iter()
+            .filter(|st| {
+                matches!(st, Statement::Animate(a) if {
+                    let xs: Vec<f32> = a.keyframes.iter().filter_map(|k| k.transforms.iter().find_map(|t| match t {
+                        Transform::Position(x, _) => Some(*x),
+                        _ => None,
+                    })).collect();
+                    xs.len() >= 2 && (xs.last().unwrap() - xs.first().unwrap()).abs() > 400.0
+                })
+            })
+            .count();
+        moving == 2
+    });
+    assert_eq!(pushing.count(), 1, "one scene is the push, both pictures moving");
+    assert!(fid.psnr_db > 44.0, "sweep.vac: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.21 — shapes that grow one way.**
 ///
 /// `scale()` was uniform, so a progress bar filling, a chart's bar rising,

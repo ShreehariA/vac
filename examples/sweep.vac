@@ -1,0 +1,35 @@
+// VAC v1.22 fixture: a wipe and a push. One picture holds for a second;
+// a second picture is uncovered over it from the right edge for a second,
+// neither picture moving; it holds; then a third picture pushes it off to
+// the left for a second, the two moving together; it holds. Every frame of
+// either transition steps like a cut: the decompiler must find both, give
+// each its own scene, and write the wipe as a growing `clip()` window and
+// the push as two pictures under `position()` keyframes.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 5s
+
+  let first = image(0, 0, 480, 320, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAACXBIWXMAAAABAAAAAQBPJcTWAAAAgUlEQVR4nGPcu3cvAypgZHRGE3FiQFfD8B9dzV7nfWgiKUrK9+/dZUHXSW0wasGoBaMWjFowKCxwdmZEE2JiYkIT2fsPXY0rhhrnff/RzXFR3Lt3Nx2CyHYlmtA/hlQg+ffANKwaHJgrgaT1vxI08cNO6DXEPwYGb2/vYRDJtLYAANQJG2bLUVDnAAAAAElFTkSuQmCC")
+
+  let second = image(0, 0, 480, 320, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAACXBIWXMAAAABAAAAAQBPJcTWAAACBUlEQVR4nGOsY/jLgA00/WOGs5FVMDOhq//L8B9NhPkfE5zNgtV0KgKoBfMYHNBl7JGYjMgSjhgK/6HrdUBooJcPhosF4gwXgOSWJiUg+ZlTGkh6LHsKJCXYQLIT/cWB5F/Xr0DSovYGkHzGYIzVUKVvV4Hk9jBxdAuAoL2lneHf7Mq6ixySDEVF0kXFYX29q4DiCQmuDO8vLVj48uzNlxOajSd2TcgvK8Dj8OzsbIbXa6ZOvc5SxwBK7/vBogfqGRh+5zDvY2CwBXFnbHr612lVph9Y7sVu+/0gPx65abeuluFvfWpQPQNzI9i9DEdqa+OAjObmRfcYbICM297vGB40M++3ZZC3HYhIdn0BDBxzIKOv7ySyuNFHhvgE3R8emgVVM5HFga5ObL4HZtogi3u8OZydEzwQPtgtwbB7GdjtEiji5/gZzq2/fOSQIAODHQPDIbi4MMNlOPstgy6cvUPEdseKV9TxQW1NLZBsbmnGlEKxwL+RobUp5Zbf9r4+UPIHJtPpktbAZGrEBkqmKz1AyVSM4RAwma5jn40nmapuFQIm05s+4GSKJlddN6evWxpoNIQLyQRAsGDBbkN/8YR48di/MkAumumYbp86dapPmHh2tiaKBR/BpNqmpwghHhAhBS4cw3e8BJJHDqmDJRB5GDncIeAelzaQVN8CYg+zwo4WAABX46R1sbJl7gAAAABJRU5ErkJggg==")
+
+  animate second {
+    0ms    -> clip(480, 0, 0, 320), position(0, 0)
+    1000ms -> clip(480, 0, 0, 320)
+    2000ms -> clip(0, 0, 480, 320)
+    3000ms -> position(0, 0)
+    4000ms -> position(-480, 0)
+    easing: linear
+  }
+
+  let third = image(480, 0, 480, 320, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAACXBIWXMAAAABAAAAAQBPJcTWAAAFRElEQVR4nEVVa2wUZRQ9d+ab2dltkS1QWihteRRREEwllR9iii8I4YfRRIUoGiQoKonhBwQVRYkGk4KJEYIYw0ONEcsjqGi0IJqS8AqICgWagBa0vMqzZR/zut7vm4Kbm9nZb3fPuY9zz9DSJUtTcFJwJbybV49S5iaVnLu94ThwbCgbtgSBAMSIQoQ+/CL8AgoSeRRy5prnYh5F5cB2oFwdQuMk6Gl4gp5EytAIgSNBQqA5LNiABf2KIwQBfJcLgqNgW/pcczNxzLEcCYeEk9SRoGfgGY6ExnORcslVcAWdoBgqghWAmODIB0Q2fEWO4l50BjPiWLgpvlWBoysgnXJGE6TTOoQgLRU4lBL0BC2AlSO+CP8gnTuBc40YeSey/dgTHCJLpw3W0IhD3b2otwJpUYp099PQFQi64ch45Cl4NlwDbecJVxD8g559dLqJ1qjMgKbC6lXR3kbUVLJMizzTlsgMJtCtC3XXDIepQA+2Fz2DEo/SDtIEN4RdILqG8DwK7dS1G+3fU8sz9trW7L9/XmifFG/M4bGHMLyWU65UTGHIgYzdh+sj0JLQMyB1kyCpQHLPCDrgFmBfpUigT+NaG539gfYetN6eSpdn2scnzitf/F6DHW96hb99PV4+FxMGsyhNaIpGFI4ee6I5hf8J9GxN7oxUjqxOFH6nC4fQ0Y4zR6jtJG2sdk82lOyc886oMgfH1x/IrcLPbfunXFw2Ofq8P8o8OIpcRzM5yhBYSkdvo4wo065B7ybqwI3d1PEmNUXWNhdhGsFRa/yRl7MLJqDWF5GjrgON9+PVaq6b++MpujQWWY8FU49WJalbkNlbhsZO9OpSiuBdIWrD1VY62Uw7MtbGYyVDZ1grTwTbl9Afm9aCJ6PQiurTGNWNEmD2GfxFVhd6ilqgGtDSC2FrWFlIouTISnolmsnBbqGOlfTNIdo1hL5bozqvPDBwfvXDL3TikbvRvAzsoGsMYhuTzmPacIHAPXHfpaAIbLbMMnnLMSnoA0KyfPrIkuih+DV71B61ax+enqXWPdpnYLAN5b/h7yrMWQB0g9KIRuDiGIz/Bbevxls8Op/L2ma3+SZUgqzMESdfJOvHiLJsfRaefTc60EIfdAdfdPlPqbMbW1sxqg8Wbnni+Q3NXAGnCrUN2KMwdDoej9q+2uDIWpEBjpHgaWSlF485Jr0dZkGCUIssVY+yLE+sx7AtqKuKFi4c+9Oxkc9uDXbM23GHqm8uH60xystwLkBLBYb5OGa/9FEk+Qp+r0+YYHEVfZesdWB80eeiokKGreGUSXNtH6QuYdGKyytCDLMw7WOr5/D1c0SVd9XBj3DmOhoG4OAn62aG73+J+Snd4SA2uUrIjTK+cQs9KKJYQF505sFKs1el7XrwMn7uKE1px9nDdPzFuLnv6MrKX2ddG7Ium8bADFYeeKOuOPM23jmC+3m63WGEMNRhvCh5S6zDeHpRmz6Lc5ELyN5VsCqhfkO4dBwGjUNNNQ/avCd7ijZ3rv+a9z95qHHG5u4NFgfLefFQlDg66yBg3xiRdDuUFuncAw590gS3PF17sdgQYln9vqzEBMvIqeBMNbJj4trt9GAVZpfet2jyjaYp/OlsfvheriyTv6AYoCArWNReJI4UJhXo5oibK7LN+mmlag2wNl6XxO7FPxyHbXHyLLmDuLQG/ZvinvX+1unRog/jqfUY0I/J1qD5AuvnmrTa+F2gku4rw2EnuSMRG/cqgUOH5AcpedqkxbLYLkWmHDV1PK/Tn70N2cHwSji2dO65At/II5fXz06ZpRD4/wG3hWMlTMytRwAAAABJRU5ErkJggg==")
+
+  animate third {
+    0ms    -> position(480, 0)
+    3000ms -> position(480, 0)
+    4000ms -> position(0, 0)
+    easing: linear
+  }
+}
