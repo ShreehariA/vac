@@ -53,7 +53,53 @@ impl View {
         let (dx, dy) = ((p.0 - self.offset.0) / self.scale, (p.1 - self.offset.1) / self.scale);
         (cs * dx + sn * dy, -sn * dx + cs * dy)
     }
+
+    /// `self` after `first`: the view of the reference `first` sees, as
+    /// the frame `self` is a view of `first`'s frame sees it (v1.25).
+    pub fn after(&self, first: View) -> View {
+        View {
+            scale: self.scale * first.scale,
+            angle: self.angle + first.angle,
+            offset: self.to_frame(first.offset),
+        }
+    }
+
+    /// The view that undoes this one: frame points to reference points.
+    pub fn inverse(&self) -> View {
+        let o = self.to_reference((0.0, 0.0));
+        View {
+            scale: 1.0 / self.scale,
+            angle: -self.angle,
+            offset: o,
+        }
+    }
 }
+
+/// How much of a `w × h` frame shows the frame it is a view of, by `rel`:
+/// the share of a grid of its points that land inside that frame.
+fn overlap(rel: View, w: u32, h: u32) -> f32 {
+    let (wf, hf) = (w as f32, h as f32);
+    let n = 12;
+    let mut inside = 0;
+    for j in 0..n {
+        for i in 0..n {
+            let p = ((i as f32 + 0.5) * wf / n as f32, (j as f32 + 0.5) * hf / n as f32);
+            let q = rel.to_reference(p);
+            inside += (q.0 >= 0.0 && q.1 >= 0.0 && q.0 < wf && q.1 < hf) as usize;
+        }
+    }
+    inside as f32 / (n * n) as f32
+}
+
+/// Below this much overlap with the frame it is tracked against, a frame
+/// becomes the one the next frames are tracked against (v1.25). Tracked
+/// against one reference frame only, a scroll or pan longer than a frame
+/// had nothing left to match once it left that frame's view: a credits
+/// roll lost its camera 40 frames in.
+const CAMERA_REKEY_OVERLAP: f32 = 0.6;
+/// A frame whose match costs this many times the median of the matches so
+/// far is searched again from where the motion so far puts it (v1.25).
+const CAMERA_RETRY_COST: f64 = 1.5;
 
 /// Frames whose views move no corner of the canvas this far (pixels) are
 /// a still camera: the static plate already covers them.
@@ -312,20 +358,69 @@ pub fn track_every(frames: &[VideoFrame], reference: usize, stride: usize) -> Ve
     let stride = stride.max(1);
     let rp = pyramid(&frames[reference], levels);
     let mut views = vec![View::IDENTITY; frames.len()];
+    let (fw, fh) = (frames[0].width, frames[0].height);
     let walk = |order: &mut dyn Iterator<Item = usize>, views: &mut Vec<View>| {
         let mut prev = View::IDENTITY;
+        let mut before: Option<View> = None;
+        let mut costs: Vec<f64> = Vec::new();
+        // The frame tracked against, and its own view of the reference.
+        let mut key_pyramid: Option<Vec<Level>> = None;
+        let mut key_view = View::IDENTITY;
         for t in order {
             let fp = pyramid(&frames[t], levels);
-            let mut v = at_level(prev, levels - 1);
-            for k in (finest..levels).rev() {
-                if k != levels - 1 {
-                    v = at_level(from_level(v, k + 1), k);
+            let kp = key_pyramid.as_ref().unwrap_or(&rp);
+            // v1.25: where the motion so far says the frame will be.
+            let predicted = match before {
+                Some(b) => View {
+                    scale: prev.scale * (prev.scale / b.scale),
+                    angle: prev.angle + (prev.angle - b.angle),
+                    offset: (prev.offset.0 * 2.0 - b.offset.0, prev.offset.1 * 2.0 - b.offset.1),
+                },
+                None => prev,
+            };
+            // Coarse to fine from one guess, and what it costs at the end.
+            let descend = |guess: View| -> (View, f64) {
+                let mut v = at_level(guess, levels - 1);
+                for k in (finest..levels).rev() {
+                    if k != levels - 1 {
+                        v = at_level(from_level(v, k + 1), k);
+                    }
+                    let stride = if k == 0 { 2 } else { 1 };
+                    v = search(&fp[k], &kp[k], v, 1.0, 0.01, stride, true);
                 }
-                let stride = if k == 0 { 2 } else { 1 };
-                v = search(&fp[k], &rp[k], v, 1.0, 0.01, stride, true);
+                let c = cost(&fp[finest], &kp[finest], v, 2);
+                (v, c)
+            };
+            // From the last view, as through v1.24; and when that match is
+            // markedly worse than the last frame's, again from where the motion
+            // so far puts the frame, the better kept. Searched from the
+            // prediction always, a pan stepping in whole source pixels
+            // overshot into worse basins (fade_through_black lost 0.4 dB);
+            // never, thin text scrolling over a flat ground left the last
+            // view outside the basin and stuck.
+            let (mut v, mut c) = descend(prev.after(key_view.inverse()));
+            let typical = {
+                let mut sorted = costs.clone();
+                sorted.sort_by(f64::total_cmp);
+                sorted.get(sorted.len() / 2).copied()
+            };
+            if let (Some(_), Some(lc)) = (before, typical) {
+                if c > CAMERA_RETRY_COST * lc {
+                    let (u, cu) = descend(predicted.after(key_view.inverse()));
+                    if cu < c {
+                        (v, c) = (u, cu);
+                    }
+                }
             }
-            prev = from_level(v, finest);
+            costs.push(c);
+            let rel = from_level(v, finest);
+            before = Some(prev);
+            prev = rel.after(key_view);
             views[t] = prev;
+            if overlap(rel, fw, fh) < CAMERA_REKEY_OVERLAP {
+                key_pyramid = Some(fp);
+                key_view = prev;
+            }
         }
     };
     walk(&mut (reference..frames.len()).step_by(stride), &mut views);
@@ -452,7 +547,8 @@ pub fn keyframes(views: &[View], times: &[u32], w: u32, h: u32, tol_px: f32, rec
 }
 
 /// A camera moves the whole picture: at least this fraction of a frame's
-/// pixels must be explained better by its view than by a still camera.
+/// pixels must be explained better by its view than by a still camera,
+/// or its evidence must be spread over the picture ([`MIN_CAMERA_SPREAD`]).
 /// On `sprite.vac` — one textured tile sliding over a flat background —
 /// the tracker follows the tile, because nothing else has texture to hold
 /// on to, but only the ~7% of pixels the tile covers at either end of its
@@ -497,6 +593,64 @@ pub fn support(frames: &[VideoFrame], reference: usize, views: &[View], sample: 
     }
     fractions.sort_by(|a, b| a.total_cmp(b));
     fractions[fractions.len() / 2]
+}
+
+/// Cells across and down the grid [`spread_support`] counts evidence in.
+const SPREAD_GRID: usize = 6;
+/// ...or at least this share of [`spread_support`]'s cells must be evidence
+/// for it (v1.25). Measured: one tile over a flat ground (`sprite.vac`)
+/// 0.11, a bouncing logo 0.14; a credits roll 0.56, real pans, zooms and
+/// rolls 0.94 to 1.00.
+pub const MIN_CAMERA_SPREAD: f32 = 0.35;
+
+/// A camera's evidence spread over the picture (v1.25). On a flat ground a
+/// camera can only be seen where there is something to see: a credits
+/// roll's text is a tenth of its pixels, and a scroll longer than a frame
+/// soon leaves the reference behind, so [`support`] measured it at 0. Each
+/// sampled frame is compared with the one sampled before it, through the
+/// views between them; the frame is cut into a grid, and a cell is evidence
+/// for the camera when the pixels the camera explains better than a still
+/// camera outnumber the ones a still camera explains better, and are
+/// there at all. The median, over the frames, of the share of cells that
+/// are. One object moving over a flat ground is evidence in the few cells
+/// it crosses; a camera's is spread wherever the picture has detail.
+pub fn spread_support(frames: &[VideoFrame], views: &[View], sample: &[usize]) -> f32 {
+    let (w, h) = (frames[0].width as usize, frames[0].height as usize);
+    let mut shares: Vec<f32> = Vec::new();
+    for pair in sample.windows(2) {
+        let (a, t) = (pair[0], pair[1]);
+        // Frame t as a view of frame a.
+        let rel = views[t].after(views[a].inverse());
+        if motion_px(&[rel], w as u32, h as u32) < MIN_CAMERA_MOTION_PX {
+            continue;
+        }
+        let (ra, ft) = (Level::from_frame(&frames[a]), Level::from_frame(&frames[t]));
+        let mut cells = vec![(0usize, 0usize); SPREAD_GRID * SPREAD_GRID];
+        for y in (0..h).step_by(2) {
+            for x in (0..w).step_by(2) {
+                let p = (x as f32 + 0.5, y as f32 + 0.5);
+                let (Some(cam), Some(still)) = (ra.sample(rel.to_reference(p)), ra.sample(p)) else {
+                    continue;
+                };
+                let i = (y * w + x) * 3;
+                let d = |c: [f32; 3]| (0..3).map(|k| (ft.px[i + k] - c[k]).powi(2)).sum::<f32>();
+                let (dc, ds) = (d(cam), d(still));
+                let cell = (y * SPREAD_GRID / h) * SPREAD_GRID + x * SPREAD_GRID / w;
+                if dc + SUPPORT_MARGIN_SQ < ds {
+                    cells[cell].0 += 1;
+                } else if ds + SUPPORT_MARGIN_SQ < dc {
+                    cells[cell].1 += 1;
+                }
+            }
+        }
+        let evidence = cells.iter().filter(|(for_cam, against)| *for_cam > 0 && for_cam > against).count();
+        shares.push(evidence as f32 / cells.len() as f32);
+    }
+    if shares.is_empty() {
+        return 0.0;
+    }
+    shares.sort_by(f32::total_cmp);
+    shares[shares.len() / 2]
 }
 
 /// How far the views move the canvas: the largest displacement of any of
@@ -851,6 +1005,44 @@ mod tests {
             }
         }
         assert!(motion_px(&got, w, h) > MIN_CAMERA_MOTION_PX);
+    }
+
+    /// v1.25: a scroll three frames long. Tracked against frame 0 alone, a
+    /// frame that has left frame 0's view has nothing to match; tracked
+    /// against a key frame refreshed when the overlap runs low, and searched
+    /// from where the motion so far puts it, every frame is found.
+    #[test]
+    fn a_scroll_longer_than_a_frame_is_followed() {
+        let (w, h) = (160u32, 120u32);
+        let texture = |x: f32, y: f32| -> [u8; 3] {
+            let r = 128.0 + 100.0 * (x * 0.11).sin() * (y * 0.07).cos();
+            let g = 128.0 + 100.0 * (x * 0.05 + y * 0.09).sin();
+            let b = 128.0 + 100.0 * ((x - y) * 0.06).cos();
+            [r as u8, g as u8, b as u8]
+        };
+        let truth: Vec<View> = (0..30).map(|t| View { scale: 1.0, angle: 0.0, offset: (0.0, -12.0 * t as f32) }).collect();
+        let frames: Vec<VideoFrame> = truth
+            .iter()
+            .map(|v| {
+                let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let q = v.to_reference((x as f32 + 0.5, y as f32 + 0.5));
+                        let c = texture(q.0, q.1);
+                        pixels.extend_from_slice(&[c[0], c[1], c[2], 255]);
+                    }
+                }
+                VideoFrame { width: w, height: h, pixels, delay_ms: 33 }
+            })
+            .collect();
+        let got = track(&frames, 0);
+        for (t, (g, v)) in got.iter().zip(&truth).enumerate() {
+            for c in [(0.0, 0.0), (w as f32, 0.0), (0.0, h as f32), (w as f32, h as f32)] {
+                let (a, b) = (g.to_frame(c), v.to_frame(c));
+                let err = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+                assert!(err < 0.5, "frame {t}: corner {c:?} off by {err:.2} px ({g:?} vs {v:?})");
+            }
+        }
     }
 
     /// v1.19: a fine texture under a known 1.0 → 1.4 zoom. The median

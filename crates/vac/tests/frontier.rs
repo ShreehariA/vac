@@ -460,6 +460,32 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.25 — a camera that keeps going.**
+///
+/// The camera tracked every frame against frame 0 alone, so a scroll or pan
+/// longer than a frame had nothing to match once it left frame 0's view,
+/// and sparse text over a flat ground left the last frame's view outside the
+/// basin the search climbs; and a camera needed a fifth of every frame's
+/// pixels to agree with it, where a credits roll's text is a tenth of them.
+/// Tracking now refreshes its key frame when the overlap runs low and
+/// searches from where the motion so far puts each frame, and a camera's
+/// evidence may instead be spread over the picture, measured from a denser
+/// first look. A credits roll came back as 245 fragments at 24.2 dB.
+/// `credits.vac` scrolls six lines of real text up three frames' height
+/// from an empty first frame: it came back as 45 letter shapes at 24.5 dB,
+/// and must come back as one camera plate at better than 30 dB. (Flat
+/// rectangles standing in for glyphs did not test this: vectors describe
+/// them, at 34.5 dB, and plates are only tried below 30.)
+#[test]
+fn a_credits_roll_comes_back_as_a_camera() {
+    let (_, recovered, fid) = hermetic("credits.vac");
+    let stmts: Vec<&Statement> = recovered.scenes.iter().flat_map(|s| &s.statements).collect();
+    let camera = stmts.iter().any(|st| matches!(st, Statement::Animate(a) if a.target == "plate"));
+    let shapes = stmts.iter().filter(|st| matches!(st, Statement::Let { .. })).count();
+    assert!(camera, "the roll is a camera over its sheet ({shapes} shapes, {:.2} dB)", fid.psnr_db);
+    assert!(fid.psnr_db > 30.0, "credits.vac: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.24 — a background that changes colour.**
 ///
 /// A shot's background was one colour, its median, though every frame's is

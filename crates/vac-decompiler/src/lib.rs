@@ -293,7 +293,11 @@ pub fn prepare_raster(
 }
 
 /// Frames the camera's first look tracks before deciding the camera moves.
-const CAMERA_PROBE_FRAMES: usize = 12;
+/// 12 through v1.24; a credits roll scrolls 35 to 47 px between twelve
+/// samples of three seconds, too far for its first step to find, and a
+/// look that loses the scroll measures no spread (v1.25: 0.11 at 12, 0.44
+/// at 30).
+const CAMERA_PROBE_FRAMES: usize = 30;
 
 /// [`prepare`] for a moving camera (v1.10): track every frame's view of
 /// the first, build the mosaic they see, and strip from each frame every
@@ -319,7 +323,9 @@ pub fn prepare_camera(
     }
     // A camera moves the whole picture, not one object in it.
     let sampled: Vec<usize> = (0..frames.len()).step_by(stride).collect();
-    if camera::support(&frames, 0, &probe, &sampled) < camera::MIN_CAMERA_SUPPORT {
+    if camera::support(&frames, 0, &probe, &sampled) < camera::MIN_CAMERA_SUPPORT
+        && camera::spread_support(&frames, &probe, &sampled) < camera::MIN_CAMERA_SPREAD
+    {
         return Ok(None);
     }
     let views = camera::track(&frames, 0);
