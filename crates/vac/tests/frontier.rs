@@ -460,6 +460,50 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.17 — dissolves.**
+///
+/// A dissolve is a cut spread over frames: no single step looks like a cut,
+/// so through v1.16 a two-photo slideshow with a one-second dissolve came
+/// back as one shot, one camera trying to follow two photographs, at 19.1 dB
+/// and 371 shapes. Frames a dissolve apart now differ like a cut while every
+/// frame between them is a blend `(1 − β)·before + β·after` with `β`
+/// rising; the dissolve becomes a scene of its own between the two shots —
+/// the frame before it and the frame after it as pictures, the second's
+/// opacity fitted to every frame by least squares. The slideshow: three
+/// scenes at 29.1 dB.
+///
+/// `dissolve.vac` holds one picture, dissolves into another over a second,
+/// and holds that: three scenes, the middle one dissolving with an opacity
+/// that rises from 0 to 1, and no shot on either side mistaken for a fade.
+#[test]
+fn a_dissolve_comes_back_as_a_scene_between_its_two_shots() {
+    let (_, recovered, fid) = hermetic("dissolve.vac");
+    assert_eq!(recovered.scenes.len(), 3, "a picture, the dissolve, the next picture");
+    let middle = &recovered.scenes[1];
+    let rising = middle.statements.iter().find_map(|st| match st {
+        Statement::Animate(a) if a.target == "incoming" => Some(a),
+        _ => None,
+    });
+    let opacity = |k: &vac::Keyframe| {
+        k.transforms.iter().find_map(|t| match t {
+            Transform::Opacity(o) => Some(*o),
+            _ => None,
+        })
+    };
+    let rising = rising.expect("the dissolve's incoming picture fades in");
+    let (first, last) = (rising.keyframes.first().unwrap(), rising.keyframes.last().unwrap());
+    assert!(opacity(first).is_some_and(|o| o < 0.1) && opacity(last).is_some_and(|o| o > 0.9), "0 -> 1: {rising:?}");
+    assert!((900..=1100).contains(&middle.duration_ms), "the dissolve lasts its second: {} ms", middle.duration_ms);
+    for scene in &recovered.scenes {
+        assert!(
+            !scene.statements.iter().any(|st| matches!(st, Statement::Let { name, .. } if name == "fade")),
+            "{}: a dissolve is not a fade",
+            scene.name
+        );
+    }
+    assert!(fid.psnr_db > 44.0, "dissolve.vac PSNR {:.2}", fid.psnr_db);
+}
+
 /// **FIXED in v1.15 — a camera that rolls.**
 ///
 /// The camera of v1.10 could zoom and pan but not turn: a photo rolled 26°

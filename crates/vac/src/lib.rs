@@ -765,10 +765,27 @@ fn add_fade(doc: &mut Document, fade: &Fade, quality: f32) {
 /// Decompile a clip that may contain cuts: the shots on their own, and the
 /// clip as one, keeping whichever reconstructs better.
 fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
-    let cuts = if opts.shots { cut_candidates(frames) } else { Vec::new() };
+    let mut cuts = if opts.shots { cut_candidates(frames) } else { Vec::new() };
+    // v1.17: a dissolve is a cut spread over frames. Its frames become a
+    // scene of their own between the two shots, and their edges are cuts.
+    let dissolves: Vec<(usize, usize)> = if opts.shots {
+        dissolve_candidates(frames)
+            .into_iter()
+            .filter(|&(a, b)| !cuts.iter().any(|&c| c >= a && c <= b + 1))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for &(a, b) in &dissolves {
+        cuts.push(a);
+        cuts.push(b + 1);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
     if cuts.is_empty() {
         return decompile_shot(frames, opts);
     }
+    let is_dissolve = |w0: usize| dissolves.iter().any(|&(a, _)| a == w0);
     // v1.12: decompile each shot on its own and the clip as one, side by
     // side, and keep whichever reconstructs better. The clip as one is a
     // safety net against a cut that is not one, and on a long clip with
@@ -784,8 +801,15 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         let parts: Vec<_> = edges
             .windows(2)
             .map(|w| {
-                let shot = &frames[w[0]..w[1]];
-                scope.spawn(move || decompile_shot(shot, opts))
+                let (a, b) = (w[0], w[1]);
+                let dissolving = is_dissolve(a);
+                scope.spawn(move || {
+                    if dissolving {
+                        dissolve_shot(frames, a, b, opts)
+                    } else {
+                        decompile_shot(&frames[a..b], opts)
+                    }
+                })
             })
             .collect();
         (
@@ -820,6 +844,228 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         refined: parts.iter().map(|c| c.refined).sum(),
         moved: parts.iter().map(|c| c.moved).sum(),
         sprites: parts.iter().map(|c| c.sprites).sum(),
+    })
+}
+
+/// The lengths a dissolve is looked for at, frames: about a quarter of a
+/// second to two seconds at 30 fps.
+const DISSOLVE_SPANS: [usize; 7] = [8, 12, 16, 24, 32, 48, 64];
+/// Frames a dissolve apart must differ this many times more than frames
+/// that far apart usually do. Lower than a cut's [`CUT_RATIO`]: under a
+/// camera move, frames 32 apart already differ a lot (a Ken Burns
+/// slideshow's dissolve stood out 6×, not 10×), and the blend test below,
+/// not this, is what tells a dissolve from motion — a moving picture's
+/// in-between frames are shifted copies of its ends, not mixtures of them.
+const DISSOLVE_RATIO: f64 = 3.0;
+/// In the frames midway through a dissolve, at least this fraction of the
+/// changing pixels must have changed by the frame's own share.
+const DISSOLVE_MIN_TOGETHER: f64 = 0.6;
+/// The frames inside a dissolve must be this close to blends of the frames
+/// either side of it: the mean of their residual's energy, as a fraction of
+/// the two pictures' difference.
+const DISSOLVE_MAX_RESIDUAL: f64 = 0.15;
+
+/// Where the clip dissolves from one shot to the next (v1.17): `(a, b)`,
+/// the first and last frames that show both. A dissolve is a cut spread over
+/// frames, so no one step is a cut; but frames `k` apart, across it, differ
+/// as much as a cut does, and every frame inside it is a blend
+/// `(1 − β)·before + β·after` with `β` rising from 0 to 1. Looked for on
+/// thumbnails, verified on them, at each of [`DISSOLVE_SPANS`].
+fn dissolve_candidates(frames: &[VideoFrame]) -> Vec<(usize, usize)> {
+    let n = frames.len();
+    if n < 3 * MIN_SHOT_FRAMES {
+        return Vec::new();
+    }
+    let (w, h) = (frames[0].width, frames[0].height);
+    if frames.iter().any(|f| f.width != w || f.height != h) {
+        return Vec::new();
+    }
+    let thumbs = downscale(frames, (w / 160).max(1));
+    let px = |f: &VideoFrame| -> Vec<f64> { f.pixels.chunks_exact(4).flat_map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect() };
+    let t: Vec<Vec<f64>> = thumbs.iter().map(px).collect();
+    let mse = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>() / a.len() as f64;
+    let steps: Vec<f64> = (1..n).map(|i| mse(&t[i - 1], &t[i])).collect();
+    let mut found: Vec<(usize, usize, f64)> = Vec::new();
+    for &k in &DISSOLVE_SPANS {
+        // Room for a shot on either side.
+        if k + 2 * MIN_SHOT_FRAMES > n {
+            continue;
+        }
+        let across: Vec<f64> = (0..n - k).map(|i| mse(&t[i], &t[i + k])).collect();
+        let mut sorted = across.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let bar = (DISSOLVE_RATIO * sorted[sorted.len() / 2]).max(CUT_FLOOR_MSE);
+        for i in 0..n - k {
+            if across[i] < bar || i == 0 || i + k >= n {
+                continue;
+            }
+            // No single step inside may be a cut: that is a cut, not a
+            // dissolve.
+            if steps[i..i + k].iter().any(|&s| s >= across[i] * 0.5) {
+                continue;
+            }
+            let (p, q) = (&t[i], &t[i + k]);
+            let d: Vec<f64> = p.iter().zip(q).map(|(x, y)| y - x).collect();
+            let dd: f64 = d.iter().map(|v| v * v).sum::<f64>().max(1e-9);
+            let mut betas = Vec::new();
+            let mut resid = 0f64;
+            for u in i + 1..i + k {
+                let f = &t[u];
+                let beta = f.iter().zip(p).zip(&d).map(|((fv, pv), dv)| (fv - pv) * dv).sum::<f64>() / dd;
+                let r: f64 = f.iter().zip(p).zip(&d).map(|((fv, pv), dv)| (fv - pv - beta * dv).powi(2)).sum::<f64>();
+                resid += r / dd;
+                betas.push(beta);
+            }
+            let resid = resid / (k - 1) as f64;
+            let rising = betas.first().is_some_and(|&b| b < 0.35) && betas.last().is_some_and(|&b| b > 0.65);
+            if resid > DISSOLVE_MAX_RESIDUAL || !rising {
+                continue;
+            }
+            // Simultaneity: a dissolve moves every changing pixel at once,
+            // in proportion; an edge sweeping across moves each pixel all at
+            // once at its own moment. In the frames midway through, most
+            // changing pixels must sit near the frame's β, not at 0 or 1 —
+            // a flat card sliding over a flat background fits the blend in
+            // the mean and fails this.
+            let (mut agree, mut counted) = (0usize, 0usize);
+            for (j, u) in (i + 1..i + k).enumerate() {
+                let beta = betas[j];
+                if !(0.25..=0.75).contains(&beta) {
+                    continue;
+                }
+                let f = &t[u];
+                for px in 0..p.len() / 3 {
+                    let dv: f64 = (0..3).map(|c| d[px * 3 + c] * d[px * 3 + c]).sum();
+                    if dv < 3.0 * 30.0 * 30.0 {
+                        continue;
+                    }
+                    let r = (0..3).map(|c| (f[px * 3 + c] - p[px * 3 + c]) * d[px * 3 + c]).sum::<f64>() / dv;
+                    counted += 1;
+                    agree += ((r - beta).abs() <= 0.25) as usize;
+                }
+            }
+            if counted == 0 || (agree as f64) < DISSOLVE_MIN_TOGETHER * counted as f64 {
+                continue;
+            }
+            // The frames that show both: from the first that has left the
+            // shot before to the last that has not reached the shot after.
+            let first = betas.iter().position(|&b| b > 0.03).map(|x| i + 1 + x).unwrap_or(i + 1);
+            let last = betas.iter().rposition(|&b| b < 0.97).map(|x| i + 1 + x).unwrap_or(i + k - 1);
+            if last < first || first < MIN_SHOT_FRAMES || n - (last + 1) < MIN_SHOT_FRAMES {
+                continue;
+            }
+            found.push((first, last, resid));
+        }
+    }
+    // Of any that overlap, the longest that fits: a dissolve's extent is
+    // its longest window, and shorter windows inside it fit too.
+    found.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)).then(a.2.total_cmp(&b.2)));
+    let mut kept: Vec<(usize, usize)> = Vec::new();
+    for (a, b, _) in found {
+        if kept.iter().all(|&(c, d)| b + MIN_SHOT_FRAMES < c || a > d + MIN_SHOT_FRAMES) {
+            kept.push((a, b));
+        }
+    }
+    kept.sort_unstable();
+    kept
+}
+
+/// A dissolve's frames `[a, b)` as a scene of their own: the frame before
+/// it and the frame after it, both as full-canvas pictures, the second
+/// drawn over the first with its opacity fitted to every frame by least
+/// squares — `β = Σ (F − P)·(Q − P) / Σ |Q − P|²` — and simplified like any
+/// opacity channel.
+fn dissolve_shot(frames: &[VideoFrame], a: usize, b: usize, opts: &DecompileOptions) -> Result<Chosen> {
+    let (p, q) = (&frames[a - 1], &frames[b.min(frames.len() - 1)]);
+    let tol = vac_decompiler::Tolerances::from_quality(opts.quality);
+    let fps = vac_decompiler::frames::estimate_fps(frames).max(1);
+    let (w, h) = (p.width as f32, p.height as f32);
+    let picture = |f: &VideoFrame| {
+        vac_decompiler::jpeg_data_uri(f, tol.raster_quality)
+            .ok_or_else(|| Error::Decompile(DecompileError::Other("could not encode a dissolve's picture".into())))
+    };
+    let (from, to) = (picture(p)?, picture(q)?);
+    let n = b - a;
+    let beta: Vec<f32> = frames[a..b]
+        .iter()
+        .map(|f| {
+            let (mut num, mut den) = (0f64, 0f64);
+            for ((fp, pp), qp) in f.pixels.chunks_exact(4).zip(p.pixels.chunks_exact(4)).zip(q.pixels.chunks_exact(4)).step_by(2) {
+                for c in 0..3 {
+                    let dv = qp[c] as f64 - pp[c] as f64;
+                    num += (fp[c] as f64 - pp[c] as f64) * dv;
+                    den += dv * dv;
+                }
+            }
+            if den > 0.0 { (num / den).clamp(0.0, 1.0) as f32 } else { 0.5 }
+        })
+        .collect();
+    let time = |i: usize| ((i as u64 * 1000) / fps as u64) as u32;
+    let opacity_tol = tol.opacity_levels / 255.0;
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    let mut stack = vec![(0usize, n - 1)];
+    while let Some((x, y)) = stack.pop() {
+        if y <= x + 1 {
+            continue;
+        }
+        let (worst, at) = (x + 1..y)
+            .map(|t| {
+                let u = (time(t) - time(x)) as f32 / (time(y) - time(x)).max(1) as f32;
+                ((beta[x] + (beta[y] - beta[x]) * u - beta[t]).abs(), t)
+            })
+            .fold((0.0f32, x), |m, v| if v.0 > m.0 { v } else { m });
+        if worst > opacity_tol {
+            keep[at] = true;
+            stack.push((x, at));
+            stack.push((at, y));
+        }
+    }
+    let round = |v: f32| (v * 1000.0).round() / 1000.0;
+    let statements = vec![
+        Statement::Let {
+            name: "plate".into(),
+            shape: Shape::Image { x: 0.0, y: 0.0, w, h, src: from },
+        },
+        Statement::Let {
+            name: "incoming".into(),
+            shape: Shape::Image { x: 0.0, y: 0.0, w, h, src: to },
+        },
+        Statement::Animate(Animation {
+            target: "incoming".into(),
+            keyframes: (0..n)
+                .filter(|&i| keep[i])
+                .map(|i| Keyframe {
+                    time_ms: time(i),
+                    transforms: vec![Transform::Opacity(round(beta[i]))],
+                })
+                .collect(),
+            easing: Easing::Linear,
+        }),
+    ];
+    let document = Document {
+        canvas: Canvas {
+            width: p.width,
+            height: p.height,
+            fps,
+        },
+        scenes: vec![Scene {
+            name: "dissolve".into(),
+            duration_ms: ((n as u64 * 1000).div_ceil(fps as u64)) as u32,
+            statements,
+        }],
+    };
+    Ok(Chosen {
+        document,
+        segmentation: Segmentation::Components,
+        background: Background::Corners,
+        plate: Plate::Raster,
+        fidelity: None,
+        audited_out: 0,
+        refined: 0,
+        moved: 0,
+        sprites: 0,
     })
 }
 

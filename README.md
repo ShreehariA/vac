@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.16)
+## Where VAC is today (v1.17)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -41,7 +41,7 @@ animate shape_1 {
 ```
 
 **What it recovers:** shots, each as its own scene; fades to and from
-black or white; rects, ellipses and traced paths, by measured fit;
+black or white; dissolves between shots; rects, ellipses and traced paths, by measured fit;
 position, scale, rotation, opacity and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
@@ -76,6 +76,7 @@ keyframes are re-measured by registering its own pixels across frames.
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 30.3 dB | 0.992 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
 | `cuts_three_shots.mp4` | three corpus clips cut together | 29.2 dB | 0.956 |
+| `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.1 dB | 0.996 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
@@ -2319,3 +2320,46 @@ boundary. In a deliberately tiny budget test (1-second segments) the
 sliding card lost 9 dB, because each slice's static layer read the slow
 card as scenery. At the real budget, forced splits only start past 5.4 s
 of continuous 720p shot.
+
+## v1.17 — Dissolves
+
+Cuts and fades were handled; dissolves, the third standard transition, were
+not. A dissolve is a cut spread over frames. No single step from one frame to
+the next looks like a cut, so through v1.16 a two-photo slideshow with a
+one-second dissolve came back as one shot: a single camera trying to follow
+two photographs, at 19.1 dB and 371 shapes.
+
+v1.17 looks for what a dissolve is, at window lengths from 8 to 64 frames:
+
+1. **A cut across it.** Frames a window apart differ at least three times
+   more than frames that far apart usually do. That's lower than a cut's
+   10×, because under a camera move frames 32 apart already differ a lot;
+   the slideshow's dissolve stood out 6×. No single step inside may be a
+   cut.
+2. **A blend inside it.** Every frame between is `(1 − β)·before + β·after`
+   to within 15% of the two pictures' difference, with `β` rising from near
+   0 to near 1.
+3. **Everything at once.** In the frames midway through, at least 60% of
+   the changing pixels must have changed by the frame's own share `β`. A
+   dissolve moves every pixel together; an edge sweeping across moves each
+   pixel all at once at its own moment. Without this test, a flat card
+   sliding over a flat background (`late_entry.vac`) passed the blend test
+   in the mean and was cut into three dissolves.
+
+Of overlapping candidates, the longest that fits wins, since a dissolve's
+extent is its longest window and shorter windows inside it fit too. The
+dissolve becomes a scene of its own between the two shots: the frame before
+it and the frame after it as pictures, the second drawn over the first with
+its opacity fitted to every frame by least squares and simplified like any
+opacity channel. The split is still kept only if it measures better than the
+clip as one.
+
+| clip | v1.16 | v1.17 |
+|---|---|---|
+| `slideshow_dissolve.mp4` (new corpus clip) | 19.06 dB, 371 shapes, 438 KB | **29.09 dB**, three scenes, 6 shapes, **166 KB** |
+| `dissolve.vac` (new fixture), hermetic | — | **47.78 dB**, three scenes, opacity 0.03 → 0.97 |
+
+Every other corpus clip is unchanged. One thing is left: the dissolve's
+pictures are frozen at its ends, so motion during the dissolve isn't
+followed. The slideshow's worst frame (21.1 dB) is mid-dissolve, where the
+first photo is still zooming.

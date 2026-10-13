@@ -406,6 +406,10 @@ pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32, pla
 }
 
 /// A frame as a `data:image/jpeg;base64,` URI at the given JPEG quality.
+pub fn jpeg_data_uri(f: &frames::VideoFrame, quality: u8) -> Option<String> {
+    raster_data_uri(f, quality)
+}
+
 fn raster_data_uri(f: &frames::VideoFrame, quality: u8) -> Option<String> {
     let rgb: Vec<u8> = f.pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
     let mut buf = Vec::new();

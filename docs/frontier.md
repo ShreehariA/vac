@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.16, default quality 50) and is
+table re-measured 2026-10-13 at v1.17, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -93,6 +93,19 @@ there. In a deliberately tiny-budget test (1 s slices) the sliding card
 lost 9 dB to each slice's static layer reading the slow card as scenery.
 Overlapping the slices, or carrying the static layer and tracks across them,
 would close this.
+
+---
+
+## 4. Motion during a dissolve
+
+**Status: open. Corpus row: `slideshow_dissolve.mp4`.**
+
+v1.17 writes a dissolve as the frame before it and the frame after it,
+crossfading. Both pictures are frozen, so a camera still moving through the
+dissolve isn't followed. The slideshow's worst frame (21.1 dB, against
+29.1 for the clip) is mid-dissolve, where the first photo is still zooming.
+Carrying each shot's camera, or its shapes, into the dissolve under the
+fitted crossfade would follow it.
 
 ---
 
@@ -370,6 +383,15 @@ would close this.
   twice. The test requires a shot-at-a-time decompile of `shots.vac` to match
   it held whole exactly.
 
+- **v1.17 — dissolves.** A dissolve is a cut spread over frames. Frames a
+  window apart now count as one when they differ like a cut while every
+  frame between is a blend of them, with every changing pixel moving by the
+  same share at once (a sliding card fits the blend in the mean and fails
+  that). The dissolve becomes a scene of its own, its two end pictures
+  crossfading with a least-squares opacity. The new corpus clip
+  `slideshow_dissolve` (a Ken Burns zoom dissolving into a pan) went 19.06 →
+  **29.09 dB**, 371 shapes → 6.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -377,6 +399,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
+| `slideshow_dissolve.mp4` | 0.9955 | 0.9634 | 80.1 | 29.09 | 0.3% | 6 |
 | `testsrc2.mp4` | 0.9951 | 0.9859 | 372.7 | 22.42 | 0.4% | 64 |
 | `roll_watercolor.mp4` | 0.9951 | 0.9921 | 30.8 | 33.25 | 0.4% | 1 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
