@@ -25,23 +25,33 @@ use crate::frames::VideoFrame;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View {
     pub scale: f32,
+    /// The camera's roll (v1.15), radians, clockwise on screen.
+    pub angle: f32,
     pub offset: (f32, f32),
 }
 
 impl View {
     pub const IDENTITY: View = View {
         scale: 1.0,
+        angle: 0.0,
         offset: (0.0, 0.0),
     };
 
-    /// Where reference point `q` appears in the frame.
+    /// Where reference point `q` appears in the frame:
+    /// `scale · R(angle) · q + offset`.
     pub fn to_frame(&self, q: (f32, f32)) -> (f32, f32) {
-        (self.scale * q.0 + self.offset.0, self.scale * q.1 + self.offset.1)
+        let (sn, cs) = self.angle.sin_cos();
+        (
+            self.scale * (cs * q.0 - sn * q.1) + self.offset.0,
+            self.scale * (sn * q.0 + cs * q.1) + self.offset.1,
+        )
     }
 
     /// The reference point shown at frame point `p`.
     pub fn to_reference(&self, p: (f32, f32)) -> (f32, f32) {
-        ((p.0 - self.offset.0) / self.scale, (p.1 - self.offset.1) / self.scale)
+        let (sn, cs) = self.angle.sin_cos();
+        let (dx, dy) = ((p.0 - self.offset.0) / self.scale, (p.1 - self.offset.1) / self.scale);
+        (cs * dx + sn * dy, -sn * dx + cs * dy)
     }
 }
 
@@ -191,10 +201,13 @@ fn cost(frame: &Level, reference: &Level, v: View, stride: usize) -> f64 {
 /// Pattern search for the view minimising [`cost`], from `start`, at one
 /// pyramid level. Offsets step from `offset_step` level pixels and scale
 /// from `scale_step`, halving whenever no neighbour improves.
-fn search(frame: &Level, reference: &Level, start: View, offset_step: f32, scale_step: f32, stride: usize) -> View {
+fn search(frame: &Level, reference: &Level, start: View, offset_step: f32, scale_step: f32, stride: usize, turns: bool) -> View {
     let mut v = start;
     let mut best = cost(frame, reference, v, stride);
+    // The turn steps as the scale does: a turn of `ss` radians moves the
+    // frame's edge about as far as a zoom of `ss`.
     let (mut os, mut ss) = (offset_step, scale_step);
+    let centre = (frame.w as f32 * 0.5, frame.h as f32 * 0.5);
     for _ in 0..400 {
         let mut moved = false;
         let trials = [
@@ -202,11 +215,14 @@ fn search(frame: &Level, reference: &Level, start: View, offset_step: f32, scale
             View { offset: (v.offset.0 - os, v.offset.1), ..v },
             View { offset: (v.offset.0, v.offset.1 + os), ..v },
             View { offset: (v.offset.0, v.offset.1 - os), ..v },
-            // Scale about the frame centre, so a zoom does not also drift.
-            zoom_about(v, 1.0 + ss, (frame.w as f32 * 0.5, frame.h as f32 * 0.5)),
-            zoom_about(v, 1.0 - ss, (frame.w as f32 * 0.5, frame.h as f32 * 0.5)),
+            // Scale and turn about the frame centre, so a zoom or a roll
+            // does not also drift.
+            zoom_about(v, 1.0 + ss, centre),
+            zoom_about(v, 1.0 - ss, centre),
+            turn_about(v, ss, centre),
+            turn_about(v, -ss, centre),
         ];
-        for t in trials {
+        for t in trials.into_iter().take(if turns { 8 } else { 6 }) {
             let c = cost(frame, reference, t, stride);
             if c < best {
                 best = c;
@@ -228,8 +244,21 @@ fn search(frame: &Level, reference: &Level, start: View, offset_step: f32, scale
 /// `v`, zoomed by `factor` about frame point `c`.
 fn zoom_about(v: View, factor: f32, c: (f32, f32)) -> View {
     View {
-        scale: v.scale * factor,
         offset: (c.0 + (v.offset.0 - c.0) * factor, c.1 + (v.offset.1 - c.1) * factor),
+        scale: v.scale * factor,
+        ..v
+    }
+}
+
+/// `v`, turned by `delta` radians (clockwise on screen) about frame point
+/// `c`.
+fn turn_about(v: View, delta: f32, c: (f32, f32)) -> View {
+    let (sn, cs) = delta.sin_cos();
+    let (dx, dy) = (v.offset.0 - c.0, v.offset.1 - c.1);
+    View {
+        angle: v.angle + delta,
+        offset: (c.0 + cs * dx - sn * dy, c.1 + sn * dx + cs * dy),
+        ..v
     }
 }
 
@@ -237,8 +266,8 @@ fn zoom_about(v: View, factor: f32, c: (f32, f32)) -> View {
 fn at_level(v: View, k: usize) -> View {
     let f = (1u32 << k) as f32;
     View {
-        scale: v.scale,
         offset: (v.offset.0 / f, v.offset.1 / f),
+        ..v
     }
 }
 
@@ -246,8 +275,8 @@ fn at_level(v: View, k: usize) -> View {
 fn from_level(v: View, k: usize) -> View {
     let f = (1u32 << k) as f32;
     View {
-        scale: v.scale,
         offset: (v.offset.0 * f, v.offset.1 * f),
+        ..v
     }
 }
 
@@ -293,7 +322,7 @@ pub fn track_every(frames: &[VideoFrame], reference: usize, stride: usize) -> Ve
                     v = at_level(from_level(v, k + 1), k);
                 }
                 let stride = if k == 0 { 2 } else { 1 };
-                v = search(&fp[k], &rp[k], v, 1.0, 0.01, stride);
+                v = search(&fp[k], &rp[k], v, 1.0, 0.01, stride, true);
             }
             prev = from_level(v, finest);
             views[t] = prev;
@@ -312,7 +341,17 @@ pub fn track_every(frames: &[VideoFrame], reference: usize, stride: usize) -> Ve
 /// (0.06 px without the ball). The mosaic is the median of all frames, so
 /// the ball is gone from it; aligning to it, from the first pass's views,
 /// takes the bias out.
-pub fn refine_views(frames: &[VideoFrame], m: &Mosaic, first: &[View]) -> Vec<View> {
+/// A camera whose views never turn more than this (degrees) does not roll:
+/// a pure zoom picks up a few hundredths of a degree of noise when turns are
+/// searched, and is re-measured without them.
+pub const MIN_ROLL_DEG: f32 = 0.25;
+
+/// Whether the views turn the camera enough to call it a roll.
+pub fn rolls(views: &[View]) -> bool {
+    views.iter().any(|v| v.angle.to_degrees().abs() >= MIN_ROLL_DEG)
+}
+
+pub fn refine_views(frames: &[VideoFrame], m: &Mosaic, first: &[View], turns: bool) -> Vec<View> {
     let finest = finest_level(frames[0].width);
     let levels = finest + 2;
     let mut base = Level::from_frame(&m.image);
@@ -330,34 +369,61 @@ pub fn refine_views(frames: &[VideoFrame], m: &Mosaic, first: &[View]) -> Vec<Vi
                     v = at_level(from_level(v, k + 1), k);
                 }
                 let stride = if k == 0 { 2 } else { 1 };
-                v = search(&fp[k], &mp[k], v, 0.5, 0.004, stride);
+                v = search(&fp[k], &mp[k], v, 0.5, 0.004, stride, turns);
             }
             from_level(v, finest)
         })
         .collect()
 }
 
-/// The frames at which the camera must be pinned so that interpolating
-/// linearly in time between them (what the renderer does with `position()`
-/// and `scale()` keyframes) keeps every canvas corner within `tol_px` of
+/// The plate's own keyframe values for a view: what its `position()`,
+/// `scale()` and `rotate()` must be for the renderer — which turns an
+/// image about its box's centre, then anchors it at its top-left corner,
+/// scales and moves it — to draw the box `(x, y, w, h)` where the view
+/// puts it.
+pub fn plate_params(v: View, rect: (f32, f32, f32, f32)) -> ((f32, f32), f32, f32) {
+    let (x0, y0, w, h) = rect;
+    let c = (x0 + w * 0.5, y0 + h * 0.5);
+    let (sn, cs) = v.angle.sin_cos();
+    let rc = (cs * c.0 - sn * c.1, sn * c.0 + cs * c.1);
+    let pos = (
+        v.offset.0 - v.scale * (c.0 - rc.0 - x0),
+        v.offset.1 - v.scale * (c.1 - rc.1 - y0),
+    );
+    (pos, v.scale, v.angle)
+}
+
+/// The view the renderer draws for the plate's keyframe values — the
+/// inverse of [`plate_params`].
+fn view_of_plate(pos: (f32, f32), scale: f32, angle: f32, rect: (f32, f32, f32, f32)) -> View {
+    let (x0, y0, w, h) = rect;
+    let c = (x0 + w * 0.5, y0 + h * 0.5);
+    let (sn, cs) = angle.sin_cos();
+    let rc = (cs * c.0 - sn * c.1, sn * c.0 + cs * c.1);
+    View {
+        scale,
+        angle,
+        offset: (pos.0 + scale * (c.0 - rc.0 - x0), pos.1 + scale * (c.1 - rc.1 - y0)),
+    }
+}
+
+/// The frames at which the camera must be pinned so that the renderer,
+/// interpolating the plate's `position()`, `scale()` and `rotate()` linearly
+/// in time between them, keeps every canvas corner within `tol_px` of
 /// where its own view puts it. Always includes the first and last frame.
-pub fn keyframes(views: &[View], times: &[u32], w: u32, h: u32, tol_px: f32) -> Vec<usize> {
+pub fn keyframes(views: &[View], times: &[u32], w: u32, h: u32, tol_px: f32, rect: (f32, f32, f32, f32)) -> Vec<usize> {
     let n = views.len();
     if n <= 2 {
         return (0..n).collect();
     }
+    let params: Vec<((f32, f32), f32, f32)> = views.iter().map(|&v| plate_params(v, rect)).collect();
     let corners = [(0.0, 0.0), (w as f32, 0.0), (0.0, h as f32), (w as f32, h as f32)];
     let err = |a: usize, b: usize, t: usize| -> f32 {
         let span = times[b].saturating_sub(times[a]).max(1) as f32;
         let u = (times[t].saturating_sub(times[a]) as f32 / span).clamp(0.0, 1.0);
-        let (va, vb) = (views[a], views[b]);
-        let v = View {
-            scale: va.scale + (vb.scale - va.scale) * u,
-            offset: (
-                va.offset.0 + (vb.offset.0 - va.offset.0) * u,
-                va.offset.1 + (vb.offset.1 - va.offset.1) * u,
-            ),
-        };
+        let l = |x: f32, y: f32| x + (y - x) * u;
+        let ((pa, sa, ra), (pb, sb, rb)) = (params[a], params[b]);
+        let v = view_of_plate((l(pa.0, pb.0), l(pa.1, pb.1)), l(sa, sb), l(ra, rb), rect);
         corners
             .iter()
             .map(|&p| {
@@ -585,7 +651,7 @@ mod tests {
         let truth: Vec<View> = (0..12)
             .map(|t| {
                 let s = 1.0 + 0.015 * t as f32;
-                View { scale: s, offset: (80.0 * (1.0 - s) + 0.8 * t as f32, 60.0 * (1.0 - s) - 0.5 * t as f32) }
+                View { scale: s, angle: 0.0, offset: (80.0 * (1.0 - s) + 0.8 * t as f32, 60.0 * (1.0 - s) - 0.5 * t as f32) }
             })
             .collect();
         let frames: Vec<VideoFrame> = truth

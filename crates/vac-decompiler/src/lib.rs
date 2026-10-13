@@ -312,7 +312,16 @@ pub fn prepare_camera(
     let Some(first) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b], 1.0) else {
         return Ok(None);
     };
-    let views = camera::refine_views(&frames, &first, &views);
+    // A camera that never turns by a quarter degree is a zoom or a pan
+    // with noise in its angle: re-measured without turns, it is written
+    // without `rotate()`.
+    let turns = camera::rolls(&views);
+    let views: Vec<camera::View> = if turns {
+        views
+    } else {
+        views.into_iter().map(|v| camera::View { angle: 0.0, ..v }).collect()
+    };
+    let views = camera::refine_views(&frames, &first, &views, turns);
     // One mosaic pixel per reference pixel. A denser mosaic keeps more of
     // a zoom's late detail but was measured a poor trade at the default
     // quality: the Ken Burns clip +0.8 dB for +54% bytes, the Mandelbrot
@@ -364,13 +373,17 @@ pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32, pla
                 times.push(t);
                 t = t.saturating_add(f.delay_ms);
             }
-            let keys = camera::keyframes(views, &times, w as u32, h as u32, tol.keyframe_px * 0.125);
+            let rect = (m.x, m.y, m.w, m.h);
+            let keys = camera::keyframes(views, &times, w as u32, h as u32, tol.keyframe_px * 0.125, rect);
             Some(track::RasterPlate {
                 uri,
-                rect: (m.x, m.y, m.w, m.h),
+                rect,
                 camera: keys
                     .into_iter()
-                    .map(|i| (times[i], views[i].to_frame((m.x, m.y)), views[i].scale))
+                    .map(|i| {
+                        let (pos, scale, angle) = camera::plate_params(views[i], rect);
+                        (times[i], pos, scale, angle.to_degrees())
+                    })
                     .collect(),
             })
         }),

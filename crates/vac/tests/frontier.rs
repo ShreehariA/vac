@@ -460,6 +460,58 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.15 — a camera that rolls.**
+///
+/// The camera of v1.10 could zoom and pan but not turn: a photo rolled 26°
+/// over three seconds (`roll_watercolor.mp4`) fell back to a still plate
+/// and 588 shapes at 18.5 dB. A view is now `scale · R(angle) · q + offset`,
+/// tracked with turns about the frame centre alongside zooms, and written
+/// as the plate's own `rotate()` keyframes (the renderer turns an image
+/// about its box's centre, so position follows the angle). The clip: one
+/// camera plate at 33.3 dB.
+///
+/// `camera_roll.vac` turns a detailed scene 12° about the frame centre while
+/// a ball crosses it: the turn must come back as `rotate()` keyframes on
+/// track with the source, the ball as the shape it is; a camera that never
+/// rolls (`camera.vac`) must not be written with `rotate()`.
+#[test]
+fn a_rolling_camera_comes_back_as_rotate_keyframes() {
+    let (_, recovered, fid) = hermetic("camera_roll.vac");
+    let stmts: Vec<&Statement> = recovered.scenes.iter().flat_map(|s| &s.statements).collect();
+    let camera = stmts
+        .iter()
+        .find_map(|st| match st {
+            Statement::Animate(a) if a.target == "plate" => Some(a),
+            _ => None,
+        })
+        .expect("the plate is keyframed: the camera");
+    for k in &camera.keyframes {
+        let turn = k.transforms.iter().find_map(|t| match t {
+            Transform::Rotate(d) => Some(*d),
+            _ => None,
+        });
+        let expected = 12.0 * k.time_ms as f32 / 2000.0;
+        assert!(
+            turn.is_some_and(|d| (d - expected).abs() < 0.5),
+            "at {} ms the camera has turned {turn:?}, the source {expected:.2}",
+            k.time_ms
+        );
+    }
+    let ball = stmts.iter().find_map(|st| match st {
+        Statement::Let { shape: vac::Shape::Ellipse { rx, .. }, .. } => Some(*rx),
+        _ => None,
+    });
+    assert!(ball.is_some_and(|r| (r - 20.0).abs() <= 0.5), "the ball, on top: {ball:?}");
+    assert!(fid.psnr_db > 44.0, "camera_roll.vac PSNR {:.2}", fid.psnr_db);
+
+    let (_, zoom, _) = hermetic("camera.vac");
+    let rolls = zoom.scenes.iter().flat_map(|s| &s.statements).any(|st| {
+        matches!(st, Statement::Animate(a) if a.target == "plate"
+            && a.keyframes.iter().flat_map(|k| &k.transforms).any(|t| matches!(t, Transform::Rotate(_))))
+    });
+    assert!(!rolls, "camera.vac zooms without rolling");
+}
+
 /// **PARTLY FIXED in v1.14 — HD frames are searched small.**
 ///
 /// Every candidate of the measured search decompiles and measures the whole

@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.14, default quality 50) and is
+table re-measured 2026-10-13 at v1.15, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -351,6 +351,15 @@ shot, holding only the shot's frames, is the next step.
   decompile). A 3 s 720p pan: 64 → **33 s**, 2.44 → **1.66 GB**, 44.3 →
   44.7 dB. The corpus is byte-for-byte unchanged.
 
+- **v1.15 — a camera that rolls.** A view is `scale · R(angle) · q +
+  offset`, tracked with turns about the frame centre. It is written as the
+  plate's `rotate()` keyframes, simplified against what the renderer will
+  draw: the renderer turns an image about its box's centre, so position
+  follows the angle. A camera that never turns by a quarter degree is
+  re-measured without turns and stays `rotate()`-free. The new corpus clip
+  `roll_watercolor` (a photo rolling 26°) went 18.49 → **33.25 dB**, 588
+  shapes → one plate.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -359,15 +368,16 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
 | `testsrc2.mp4` | 0.9951 | 0.9859 | 372.7 | 22.42 | 0.4% | 64 |
+| `roll_watercolor.mp4` | 0.9951 | 0.9921 | 30.8 | 33.25 | 0.4% | 1 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
-| `kenburns_watercolor.mp4` | 0.9920 | 0.9899 | 60.9 | 30.29 | 0.6% | 2 |
-| `fade_through_black.mp4` | 0.9919 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
+| `kenburns_watercolor.mp4` | 0.9921 | 0.9899 | 60.9 | 30.29 | 0.6% | 2 |
+| `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
 | `real_bouncing_ball.gif` | 0.9905 | 0.9885 | 1.5 | 46.37 | 0.6% | 2 |
-| `mandelbrot.mp4` | 0.9896 | 0.9842 | 149.3 | 26.39 | 0.6% | 2 |
+| `mandelbrot.mp4` | 0.9898 | 0.9843 | 149.2 | 26.39 | 0.5% | 2 |
 | `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `pan_portrait.mp4` | 0.9697 | 0.9580 | 3.7 | 42.47 | 1.5% | 1 |
+| `pan_portrait.mp4` | 0.9699 | 0.9580 | 3.6 | 42.51 | 1.5% | 1 |
 | `cuts_three_shots.mp4` | 0.9555 | 0.8438 | 78.8 | 29.17 | 0.7% | 8 |
 | `real_newtons_cradle.gif` | 0.9204 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |

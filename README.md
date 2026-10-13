@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.14)
+## Where VAC is today (v1.15)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -47,7 +47,8 @@ gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
 scenery becomes one embedded `image()` with the moving shapes still written
 as code on top. When the whole picture moves, that image is moved by a
-measured camera, written as `position()` and `scale()` keyframes. A mover no
+measured camera that zooms, pans and rolls, written as `position()`,
+`scale()` and `rotate()` keyframes. A mover no
 flat fill can describe, like a shaded ball, keeps its keyframes and is drawn
 as its own pixels.
 
@@ -71,6 +72,7 @@ keyframes are re-measured by registering its own pixels across frames.
 | `fade_through_black.mp4` | a card fading out, then a photo pan fading in | 42.2 dB | 0.992 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
+| `roll_watercolor.mp4` | a camera rolling 26° over an AI-generated watercolour | 33.3 dB | 0.995 |
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 30.3 dB | 0.992 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
 | `cuts_three_shots.mp4` | three corpus clips cut together | 29.2 dB | 0.956 |
@@ -2241,3 +2243,34 @@ from the half-size decision with the camera and the ball exactly placed, at
 test really exercises the small search. Every corpus clip is below the
 threshold and byte-for-byte unchanged. Long HD clips are still open: they
 need decompiling shot by shot without holding every frame at once.
+
+## v1.15 — A camera that rolls
+
+The v1.10 camera could zoom and pan but not turn. A photo rolling 26° over
+three seconds (`roll_watercolor.mp4`, made with ffmpeg's `rotate`) fell back
+to a still plate and 588 shapes at 18.5 dB.
+
+A view is now `scale · R(angle) · q + offset`:
+
+- **Tracking** tries turns about the frame centre alongside zooms, stepping
+  the angle the way it steps the scale.
+- **Writing** has a subtlety. The renderer turns an image about its box's
+  centre and then anchors it at its top-left corner, so the plate's
+  `position()` depends on the angle. And because the renderer interpolates
+  position, scale and rotation independently, the keyframe simplifier now
+  measures its error on the plate's own `position`/`scale`/`rotate` values,
+  converted back into the view the renderer will actually draw, not on the
+  camera's internal parameters.
+- **A camera that doesn't roll stays rotation-free.** With turns searched,
+  a pure zoom picks up a few hundredths of a degree of noise. If no view
+  turns by a quarter degree, the angles are zeroed and the views
+  re-measured without turns, so `camera.vac` is still written without
+  `rotate()`.
+
+| | v1.14 | v1.15 |
+|---|---|---|
+| `roll_watercolor.mp4` (new corpus clip) | 18.49 dB, still plate, 588 shapes, 615 KB | **33.25 dB**, one camera plate, **73 KB** |
+| `camera_roll.vac` (new fixture), hermetic | — | **47.31 dB**, IoU 1.000, every keyframe within 0.5° of the source |
+
+The other camera clips moved by hundredths of a dB, since every camera is
+now tracked with turns available before the angle is judged.

@@ -235,9 +235,10 @@ pub struct RasterPlate {
     pub uri: String,
     /// Its box `(x, y, w, h)`.
     pub rect: (f32, f32, f32, f32),
-    /// The camera: `(time ms, box top-left, scale)` per keyframe. Empty
-    /// for a still camera.
-    pub camera: Vec<(u32, (f32, f32), f32)>,
+    /// The camera: `(time ms, position, scale, rotation in degrees)` per
+    /// keyframe — the plate's own values, rotation about its box's centre.
+    /// Empty for a still camera.
+    pub camera: Vec<(u32, (f32, f32), f32, f32)>,
 }
 
 pub fn build_document(
@@ -311,17 +312,22 @@ pub fn build_document(
         });
         if !plate.camera.is_empty() {
             let round = |v: f32, p: f32| (v * p).round() / p;
+            // A camera that never rolls is written without `rotate()`.
+            let rolls = plate.camera.iter().any(|k| k.3.abs() >= 0.05);
             statements.push(Statement::Animate(Animation {
                 target: "plate".into(),
                 keyframes: plate
                     .camera
                     .iter()
-                    .map(|&(t, (px, py), sc)| Keyframe {
-                        time_ms: t,
-                        transforms: vec![
+                    .map(|&(t, (px, py), sc, deg)| {
+                        let mut transforms = vec![
                             Transform::Position(round(px, 100.0), round(py, 100.0)),
                             Transform::Scale(round(sc, 10000.0)),
-                        ],
+                        ];
+                        if rolls {
+                            transforms.push(Transform::Rotate(round(deg, 100.0)));
+                        }
+                        Keyframe { time_ms: t, transforms }
                     })
                     .collect(),
                 easing: Easing::Linear,

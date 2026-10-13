@@ -10,13 +10,13 @@ fn main() {
     let mut views = camera::track(&frames, 0);
     if std::env::var_os("TWO_PASS").is_some() {
         let m = camera::mosaic(&frames, &views, [0, 0, 0], 1.0).unwrap();
-        views = camera::refine_views(&frames, &m, &views);
+        views = camera::refine_views(&frames, &m, &views, true);
     }
     let mut worst = 0f32;
     for (t, v) in views.iter().enumerate() {
         let ms = (t as f32 * 1000.0 / 30.0).floor();
         let s = 1.0 + 0.5 * ms / 2000.0;
-        let truth = View { scale: s, offset: (260.0 * (1.0 - s), 150.0 * (1.0 - s)) };
+        let truth = View { scale: s, angle: 0.0, offset: (260.0 * (1.0 - s), 150.0 * (1.0 - s)) };
         let err = [(0.0f32, 0.0f32), (480.0, 0.0), (0.0, 320.0), (480.0, 320.0)]
             .iter()
             .map(|&c| {
