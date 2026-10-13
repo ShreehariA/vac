@@ -144,6 +144,20 @@ twice as well, the scenery becomes one `plate = image(...)` with the moving
 shapes still written as code on top. The source stays one self-contained
 file.
 
+Since v1.10 a plate can also move: under a moving camera the scenery is one
+mosaic `image()`, possibly larger than the canvas, and the camera is an
+ordinary `animate plate` block of `position()` and `scale()` keyframes,
+interpolated linearly. A zoom about a fixed point is a pair of keyframes:
+
+```vac
+let plate = image(0, 0, 480, 320, "data:image/jpeg;base64,...")
+animate plate {
+  0ms -> position(0, 0), scale(1)
+  2s  -> position(-130, -75), scale(1.5)
+  easing: linear
+}
+```
+
 Since v1.8 the same primitive also carries **sprites**: a PNG with an alpha
 channel, standing in for one moving shape whose flat fill measurably fails
 to describe its interior (a shaded ball, a textured tile). The sprite keeps

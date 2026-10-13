@@ -36,6 +36,7 @@
 //! Scale/opacity estimation and proper contour tracing build on this
 //! same skeleton in later versions.
 
+pub mod camera;
 pub mod detect;
 pub mod frames;
 pub mod frames_mp4;
@@ -89,6 +90,10 @@ pub enum Plate {
     /// The clip's temporal-median frame as one JPEG `image()`: the escape
     /// hatch for scenery no vector primitive can describe.
     Raster,
+    /// The scene under a moving camera (v1.10): every frame warped back by
+    /// its measured view into one mosaic, a JPEG `image()` whose
+    /// `position()` and `scale()` keyframes are the camera.
+    Camera,
     /// Decide by measurement — resolved by the `vac` facade, which keeps
     /// the raster plate only when it reconstructs clearly better. On its
     /// own the decompiler treats it as `Vector`.
@@ -165,6 +170,11 @@ pub fn decompile_frames(
             return Ok(finish(&prepared, opts.segmentation, opts.quality, Plate::Raster));
         }
     }
+    if opts.plate == Plate::Camera {
+        if let Some(prepared) = prepare_camera(frames.clone(), opts.background)? {
+            return Ok(finish(&prepared, opts.segmentation, opts.quality, Plate::Camera));
+        }
+    }
     let prepared = prepare(frames, opts.static_layer, opts.background)?;
     Ok(finish(&prepared, opts.segmentation, opts.quality, opts.plate))
 }
@@ -180,6 +190,8 @@ pub struct Prepared {
     scene: Option<layer::StaticLayer>,
     ground: Option<(frames::VideoFrame, vac_format::Color)>,
     background: Background,
+    /// The camera and the mosaic it sees, for [`Plate::Camera`].
+    camera: Option<(camera::Mosaic, Vec<camera::View>)>,
 }
 
 /// Measure and strip the static layer, and take the ground median.
@@ -218,6 +230,7 @@ pub fn prepare(
         scene,
         ground,
         background,
+        camera: None,
     })
 }
 
@@ -242,19 +255,108 @@ pub fn prepare_raster(
         scene: None,
         ground: Some((median, bg)),
         background,
+        camera: None,
+    }))
+}
+
+/// Frames the camera's first look tracks before deciding the camera moves.
+const CAMERA_PROBE_FRAMES: usize = 12;
+
+/// [`prepare`] for a moving camera (v1.10): track every frame's view of
+/// the first, build the mosaic they see, and strip from each frame every
+/// pixel that shows the mosaic there, so detection sees only what moves
+/// against the scene. `None` when the camera does not move — measured
+/// first on a dozen frames, so a still clip pays little — or the scene it
+/// sees is unreasonably large.
+pub fn prepare_camera(
+    mut frames: Vec<frames::VideoFrame>,
+    background: Background,
+) -> Result<Option<Prepared>, DecompileError> {
+    if frames.is_empty() {
+        return Err(DecompileError::Other("no frames in input".into()));
+    }
+    let (w, h) = (frames[0].width, frames[0].height);
+    if frames.len() < 8 || frames.iter().any(|f| f.width != w || f.height != h) {
+        return Ok(None);
+    }
+    let stride = (frames.len() / CAMERA_PROBE_FRAMES).max(1);
+    let probe = camera::track_every(&frames, 0, stride);
+    if camera::motion_px(&probe, w, h) < camera::MIN_CAMERA_MOTION_PX {
+        return Ok(None);
+    }
+    // A camera moves the whole picture, not one object in it.
+    let sampled: Vec<usize> = (0..frames.len()).step_by(stride).collect();
+    if camera::support(&frames, 0, &probe, &sampled) < camera::MIN_CAMERA_SUPPORT {
+        return Ok(None);
+    }
+    let views = camera::track(&frames, 0);
+    if camera::motion_px(&views, w, h) < camera::MIN_CAMERA_MOTION_PX {
+        return Ok(None);
+    }
+    let bg = detect::background_of(&frames[0], background);
+    // Two passes: frame 0 carries its own movers into the first estimate,
+    // the median mosaic does not.
+    let Some(first) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b]) else {
+        return Ok(None);
+    };
+    let views = camera::refine_views(&frames, &first, &views);
+    let Some(mosaic) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b]) else {
+        return Ok(None);
+    };
+    for (f, v) in frames.iter_mut().zip(&views) {
+        let seen = camera::warp(&mosaic, *v, w, h);
+        layer::strip_against(f, &seen, bg);
+    }
+    Ok(Some(Prepared {
+        frames,
+        scene: None,
+        ground: None,
+        background,
+        camera: Some((mosaic, views)),
     }))
 }
 
 /// Detect, track and emit, on frames already prepared.
 pub fn finish(prepared: &Prepared, segmentation: Segmentation, quality: f32, plate: Plate) -> Document {
     let tol = track::Tolerances::from_quality(quality);
-    // A raster plate is the raw temporal median — the scene with its
-    // movers removed — as a JPEG, when the clip has one.
+    let (w, h) = prepared
+        .frames
+        .first()
+        .map(|f| (f.width as f32, f.height as f32))
+        .unwrap_or((0.0, 0.0));
     let raster = match plate {
+        // A raster plate is the raw temporal median — the scene with its
+        // movers removed — as a JPEG, when the clip has one.
         Plate::Raster => prepared
             .ground
             .as_ref()
-            .and_then(|(m, _)| raster_data_uri(m, tol.raster_quality)),
+            .and_then(|(m, _)| raster_data_uri(m, tol.raster_quality))
+            .map(|uri| track::RasterPlate {
+                uri,
+                rect: (0.0, 0.0, w, h),
+                camera: Vec::new(),
+            }),
+        // Under a moving camera, the mosaic, and the views as keyframes —
+        // pinned to a quarter of the keyframe tolerance, because a whole
+        // picture misregistered by a pixel costs far more than one shape.
+        Plate::Camera => prepared.camera.as_ref().and_then(|(m, views)| {
+            let uri = raster_data_uri(&m.image, tol.raster_quality)?;
+            let mut times = Vec::with_capacity(prepared.frames.len());
+            let mut t = 0u32;
+            for f in &prepared.frames {
+                times.push(t);
+                t = t.saturating_add(f.delay_ms);
+            }
+            let keys = camera::keyframes(views, &times, w as u32, h as u32, tol.keyframe_px * 0.125);
+            Some(track::RasterPlate {
+                uri,
+                rect: (m.x, m.y, m.w, m.h),
+                camera: keys
+                    .into_iter()
+                    .map(|i| (times[i], views[i].to_frame((m.x, m.y)), views[i].scale))
+                    .collect(),
+            })
+        }),
         Plate::Vector | Plate::Auto => None,
     };
     let detections = detect::detect_all(

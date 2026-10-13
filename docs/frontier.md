@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.9, default quality 50) and is
+table re-measured 2026-10-13 at v1.10, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -30,17 +30,18 @@ scores the reverse.
 
 ---
 
-## 1. Fractals and full-frame motion
+## 1. Content that changes every frame
 
-**Status: open. Corpus row: `mandelbrot.mp4`.**
+**Status: open, much reduced. Corpus row: `mandelbrot.mp4`.**
 
-v1.2 gradients describe lit and fading surfaces, and v1.6's raster plate
-covers static scenery no vector can describe (photographs, textures). What
-remains is content that is neither vector-shaped nor static. The Mandelbrot
-zoom changes every pixel every frame, so there is no static plate to keep
-(a plate scores 12.7 dB against the vector 11.9 dB, short of the bar) and no
-shape to track. A codec for it would need per-frame raster or a description
-of the fractal itself.
+v1.10's camera turned the Mandelbrot zoom from 33 flat shapes at 12.0 dB
+into one image under a measured zoom at **26.4 dB** (ink IoU 0.770 →
+0.990). What remains is what a camera cannot explain. The zoom reveals
+detail the first frames never showed, and the set's interior colours cycle
+from frame to frame. The single mosaic, the median of every frame warped
+back, is blurred by the first and averages away the second (frame 89 is
+the worst, at 24.5 dB). A finer mosaic, or plates that change over time,
+would be next.
 
 ---
 
@@ -275,6 +276,23 @@ always true; only one of them was measurable.
   three numbers off a perfect reconstruction and refinement has to put each
   back to within 0.1 px from the pixels alone.
 
+- **v1.10 — a camera.** (Was half of open item 1.) A clip whose whole
+  picture moves together is one image seen through a moving camera. Each
+  frame's view of the scene (`p = scale · q + offset`) is measured by a
+  robust coarse-to-fine pattern search. Every frame is warped back and the
+  per-pixel median is the scene, a mosaic that can be larger than the frame.
+  The views are re-measured against that mosaic, because frame 0's own movers
+  biased the first estimate by 1.5 px, and the camera becomes `position()` +
+  `scale()` keyframes on one `image()`. Two measured gates keep it honest.
+  The camera has to move the canvas by 2 px or more, which a dozen-frame
+  probe settles quickly for still clips. And it has to explain at least 20%
+  of the picture better than a still camera: `sprite.vac`'s lone textured
+  tile drags the tracker along but scores 3%. Then, like any plate, it must
+  reconstruct twice as well as the vectors. `mandelbrot` 12.0 → **26.4
+  dB**; the new `camera.vac` (a zoomed scene with a ball crossing it) comes
+  back as exactly two keyframes and the ball, at 48.3 dB (43.2 dB through
+  MP4, against 22.4 dB for a still plate).
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -285,12 +303,12 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `testsrc2.mp4` | 0.9951 | 0.9859 | 374.0 | 22.40 | 0.4% | 64 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
 | `real_bouncing_ball.gif` | 0.9900 | 0.9858 | 2.4 | 44.36 | 0.6% | 2 |
+| `mandelbrot.mp4` | 0.9897 | 0.9843 | 149.9 | 26.37 | 0.5% | 1 |
 | `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
 | `real_newtons_cradle.gif` | 0.9203 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
-| `mandelbrot.mp4` | 0.7695 | 0.3976 | 4087.2 | 12.02 | 12.5% | 33 |
 | `real_pendulum.gif` | 0.6398 | 0.5409 | 334.8 | 22.88 | 5.0% | 27 |
 | `real_double_pendulum.gif` | 0.5943 | 0.4017 | 464.2 | 21.46 | 8.3% | 419 |
 

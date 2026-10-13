@@ -227,13 +227,26 @@ pub struct Track {
     active: bool,
 }
 
+/// A raster plate (v1.6): the scenery as one embedded image, and — under a
+/// moving camera (v1.10) — the keyframes that move it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasterPlate {
+    /// The image, as a `data:` URI.
+    pub uri: String,
+    /// Its box `(x, y, w, h)`.
+    pub rect: (f32, f32, f32, f32),
+    /// The camera: `(time ms, box top-left, scale)` per keyframe. Empty
+    /// for a still camera.
+    pub camera: Vec<(u32, (f32, f32), f32)>,
+}
+
 pub fn build_document(
     frames: &[VideoFrame],
     detections: &[Detection],
     layer: Option<&StaticLayer>,
     ground: Option<(&VideoFrame, Color)>,
     tol: &Tolerances,
-    raster: Option<String>,
+    raster: Option<RasterPlate>,
 ) -> Document {
     let canvas = Canvas {
         width: frames[0].width,
@@ -290,17 +303,30 @@ pub fn build_document(
     // background, ground and scenery — and the moving shapes are drawn on
     // top of it as usual.
     let rastered = raster.is_some();
-    if let Some(src) = raster {
+    if let Some(plate) = raster {
+        let (x, y, w, h) = plate.rect;
         statements.push(Statement::Let {
             name: "plate".into(),
-            shape: Shape::Image {
-                x: 0.0,
-                y: 0.0,
-                w: canvas.width as f32,
-                h: canvas.height as f32,
-                src,
-            },
+            shape: Shape::Image { x, y, w, h, src: plate.uri },
         });
+        if !plate.camera.is_empty() {
+            let round = |v: f32, p: f32| (v * p).round() / p;
+            statements.push(Statement::Animate(Animation {
+                target: "plate".into(),
+                keyframes: plate
+                    .camera
+                    .iter()
+                    .map(|&(t, (px, py), sc)| Keyframe {
+                        time_ms: t,
+                        transforms: vec![
+                            Transform::Position(round(px, 100.0), round(py, 100.0)),
+                            Transform::Scale(round(sc, 10000.0)),
+                        ],
+                    })
+                    .collect(),
+                easing: Easing::Linear,
+            }));
+        }
     } else {
         statements.push(Statement::Let {
             name: "bg".into(),

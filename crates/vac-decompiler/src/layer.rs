@@ -435,13 +435,20 @@ pub fn strip_plate(frames: &mut [VideoFrame], plate: &VideoFrame, bg: Color) {
         if f.width != plate.width || f.height != plate.height {
             continue;
         }
-        for i in 0..(f.width * f.height) as usize {
-            if plate_visible(&f.pixels, &plate.pixels, i) {
-                f.pixels[i * 4] = bg.r;
-                f.pixels[i * 4 + 1] = bg.g;
-                f.pixels[i * 4 + 2] = bg.b;
-                f.pixels[i * 4 + 3] = 255;
-            }
+        strip_against(f, &plate.pixels, bg);
+    }
+}
+
+/// Blank to `bg` every pixel of `frame` that shows `plate` (same size,
+/// RGBA) there — one frame of [`strip_plate`], for a plate that differs
+/// from frame to frame (a camera's, v1.10).
+pub fn strip_against(frame: &mut VideoFrame, plate: &[u8], bg: Color) {
+    for i in 0..(frame.width * frame.height) as usize {
+        if plate[i * 4 + 3] >= MIN_OPAQUE_ALPHA && plate_visible(&frame.pixels, plate, i) {
+            frame.pixels[i * 4] = bg.r;
+            frame.pixels[i * 4 + 1] = bg.g;
+            frame.pixels[i * 4 + 2] = bg.b;
+            frame.pixels[i * 4 + 3] = 255;
         }
     }
 }

@@ -121,6 +121,18 @@ jobs:
           # Measured 2026-10-13: 37.15 dB with the sprite, 26.00 dB as a flat rect.
           python3 -c 'import json,sys; d=json.load(open("target/ci/sprite.fidelity.json"))["result"]; p=d["psnr_db"]; print("sprite.mp4: %.2f dB" % p); sys.exit("sprite below 33 dB: %.2f" % p) if p < 33 else None'
 
+      # v1.10: a clip whose whole picture moves is one image under a moving
+      # camera. Measured 2026-10-13: camera.vac through MP4 reconstructs at
+      # 43.19 dB with the camera, 22.44 dB as a still plate, 12.90 as vectors.
+      - name: Camera motion (v1.10)
+        run: |
+          cargo run --release -q -p vac-cli -- compile   examples/camera.vac  target/ci/camera.mp4
+          cargo run --release -q -p vac-cli -- decompile target/ci/camera.mp4 target/ci/camera.mp4.vac
+          grep -q 'animate plate' target/ci/camera.mp4.vac
+          cargo run --release -q -p vac-cli -- verify target/ci/camera.mp4 --vac target/ci/camera.mp4.vac --json \
+            > target/ci/camera.fidelity.json
+          python3 -c 'import json,sys; d=json.load(open("target/ci/camera.fidelity.json"))["result"]; p=d["psnr_db"]; print("camera.mp4: %.2f dB, plate %s" % (p, d["plate"])); sys.exit("camera below 38 dB: %.2f" % p) if p < 38 or d["plate"] != "Camera" else None'
+
       - name: Smoke-test the rect classifier (v0.4.1)
         run: |
           cargo run --release -p vac-cli -- compile   examples/sliding_rect.vac target/ci/sliding_rect.mp4

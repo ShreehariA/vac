@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.9)
+## Where VAC is today (v1.10)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -45,8 +45,10 @@ position, scale, rotation, opacity and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
 scenery becomes one embedded `image()` with the moving shapes still written
-as code on top. A mover no flat fill can describe, like a shaded ball, keeps
-its keyframes and is drawn as its own pixels.
+as code on top. When the whole picture moves, that image is moved by a
+measured camera, written as `position()` and `scale()` keyframes. A mover no
+flat fill can describe, like a shaded ball, keeps its keyframes and is drawn
+as its own pixels.
 
 **How it decides:** by measurement, not classification. Every ambiguous
 choice is tried several ways: segmentation, background rule, raster versus
@@ -67,10 +69,10 @@ and stroke width are nudged to wherever the pixels agree best.
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
+| `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.640 |
 | `testsrc2.mp4` | ffmpeg test card with noise | 22.4 dB | 0.995 |
 | `real_double_pendulum.gif` | Wikimedia diagram with trails | 21.5 dB | 0.594 |
-| `mandelbrot.mp4` | ffmpeg fractal zoom | 12.0 dB | 0.770 |
 
 What it still gets wrong is listed, measured, in `docs/frontier.md`. The
 rate–distortion curves are in `docs/rate-distortion.md`. The sections after
@@ -1963,3 +1965,59 @@ off a perfect reconstruction (the ring's radius, the moving frame's
 keyframes, the card border's width), and refinement must put each back to
 within 0.1 px from the pixels alone. `vac::refine(frames, doc)` runs it on
 any document, and `--no-refine` turns it off.
+
+## v1.10 — A camera
+
+A clip whose whole picture moves together is one image seen through a
+moving camera. Through v1.9 VAC had no way to say so. The static layer
+found nothing static, and the Mandelbrot zoom came back as 33 flat shapes
+at 12 dB, although frame 0, magnified, explains every later frame at
+23–29 dB.
+
+v1.10 measures the camera instead of classifying the clip:
+
+1. **Track.** Each frame's *view* of the scene (where each scene point
+   appears in it, `p = scale · q + offset`) is found by a coarse-to-fine
+   pattern search over a three-level pyramid. The error is robust, capped
+   per pixel, so a mover can't drag the camera with it.
+2. **Mosaic.** Every frame is warped back by its view, and the per-pixel
+   median of all of them is the scene: a mosaic, larger than the frame when
+   the camera pans.
+3. **Re-track.** Frame 0 carries its own movers into the first estimate. On
+   the new `camera.vac` fixture a crossing ball dragged the zoom 1.5 px off
+   by the end. The median mosaic has no ball, so every view is re-measured
+   against it, which leaves 0.18 px.
+4. **Write.** The mosaic becomes one `image()`, and the views become
+   `position()` + `scale()` keyframes, simplified until no canvas corner is
+   off by more than a quarter pixel. Movers are found against the warped
+   mosaic and stay code on top.
+
+```vac
+let plate = image(0, 0, 480, 320, "data:image/jpeg;base64,...")
+animate plate {
+  0ms    -> position(-0.85, -0.92), scale(0.9995)
+  1966ms -> position(-129.47, -75.28), scale(1.492)
+  easing: linear
+}
+let shape_0 = ellipse(80, 250, 20, 20)
+```
+
+That is `camera.vac` decompiled: its straight 1.5× zoom comes back as two
+keyframes, and the ball as the shape it is.
+
+Two measured gates come before the usual "twice as good as the vectors"
+bar. The camera has to move the canvas by 2 px or more; a dozen-frame probe
+settles that, so a still clip pays well under a second. And it has to
+explain at least 20% of the picture better than a still camera would. On
+`sprite.vac` the tracker happily follows the lone textured tile over its
+flat background, but only 3% of the picture agrees, and the tile stays a
+sprite.
+
+| clip | v1.9 | v1.10 |
+|---|---|---|
+| `mandelbrot.mp4` | 12.02 dB, ink IoU 0.770, 33 shapes | **26.37 dB**, IoU **0.990**, one image + 16 camera keyframes |
+| `camera.vac` (new fixture), hermetic | 12.9 dB as vectors | **48.32 dB**, IoU **1.000** |
+| `camera.vac` through MP4 | 12.9 dB vectors, 22.4 dB still plate | **43.19 dB** |
+
+Every other clip is unchanged. `--plate camera` forces a camera, and
+`--plate raster` a still plate.

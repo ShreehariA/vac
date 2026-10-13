@@ -82,6 +82,7 @@ enum PlateArg {
     Auto,
     Vector,
     Raster,
+    Camera,
 }
 
 impl From<PlateArg> for vac::Plate {
@@ -90,6 +91,7 @@ impl From<PlateArg> for vac::Plate {
             PlateArg::Auto => vac::Plate::Auto,
             PlateArg::Vector => vac::Plate::Vector,
             PlateArg::Raster => vac::Plate::Raster,
+            PlateArg::Camera => vac::Plate::Camera,
         }
     }
 }
@@ -146,10 +148,11 @@ enum Cmd {
         /// (larger, more faithful source), lower fewer and coarser.
         #[arg(long, default_value_t = 50.0, value_parser = parse_quality)]
         quality: f32,
-        /// How the static scene is written. `auto` (the default) keeps
-        /// vector shapes unless they reconstruct under 30 dB and a raster
-        /// plate — one JPEG `image()` of the scenery, movers still drawn as
-        /// code on top — reconstructs at least twice as well.
+        /// How the scenery is written. `auto` (the default) keeps vector
+        /// shapes unless they reconstruct under 30 dB and a raster plate —
+        /// one JPEG `image()` of the scenery, still (`raster`) or moved by
+        /// a measured camera (`camera`), movers drawn as code on top —
+        /// reconstructs at least twice as well.
         #[arg(long, value_enum, default_value_t = PlateArg::Auto)]
         plate: PlateArg,
         /// Skip the shape audit (v1.7), which measures every emitted shape
@@ -209,10 +212,11 @@ enum Cmd {
         /// (larger, more faithful source), lower fewer and coarser.
         #[arg(long, default_value_t = 50.0, value_parser = parse_quality)]
         quality: f32,
-        /// How the static scene is written. `auto` (the default) keeps
-        /// vector shapes unless they reconstruct under 30 dB and a raster
-        /// plate — one JPEG `image()` of the scenery, movers still drawn as
-        /// code on top — reconstructs at least twice as well.
+        /// How the scenery is written. `auto` (the default) keeps vector
+        /// shapes unless they reconstruct under 30 dB and a raster plate —
+        /// one JPEG `image()` of the scenery, still (`raster`) or moved by
+        /// a measured camera (`camera`), movers drawn as code on top —
+        /// reconstructs at least twice as well.
         #[arg(long, value_enum, default_value_t = PlateArg::Auto)]
         plate: PlateArg,
         /// Skip the shape audit (v1.7), which measures every emitted shape

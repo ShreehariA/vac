@@ -460,6 +460,60 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.10 — a camera.**
+///
+/// A clip whose whole picture moves together is one image seen through a
+/// moving camera. Through v1.9 VAC could not say so: the Mandelbrot zoom
+/// came back as 33 flat shapes at 12 dB. The camera is now measured — each
+/// frame's view of the scene, by a robust coarse-to-fine search, refined
+/// against the median mosaic so movers in the first frame cannot bias it —
+/// and written as `position()` and `scale()` keyframes on one plate.
+///
+/// `camera.vac` zooms a detailed scene 1.5x about (260, 150) while a ball
+/// crosses it. The camera must come back as the straight zoom it is, and
+/// the ball as the shape it is, on top.
+#[test]
+fn a_moving_camera_comes_back_as_keyframes_on_one_image() {
+    let (_, recovered, fid) = hermetic("camera.vac");
+    let stmts: Vec<&Statement> = recovered.scenes.iter().flat_map(|s| &s.statements).collect();
+    assert!(
+        stmts.iter().any(|st| matches!(st, Statement::Let { name, shape: vac::Shape::Image { .. } } if name == "plate")),
+        "the scene becomes one plate"
+    );
+    let camera = stmts
+        .iter()
+        .find_map(|st| match st {
+            Statement::Animate(a) if a.target == "plate" => Some(a),
+            _ => None,
+        })
+        .expect("the plate is keyframed: the camera");
+    assert!(camera.keyframes.len() <= 4, "a straight zoom needs few keyframes, got {}", camera.keyframes.len());
+    let last = camera.keyframes.last().unwrap();
+    let scale = last.transforms.iter().find_map(|t| match t {
+        Transform::Scale(s) => Some(*s),
+        _ => None,
+    });
+    // At the last frame (1966 ms) the source camera is at 1 + 0.5 * 1966 / 2000.
+    let expected = 1.0 + 0.5 * last.time_ms as f32 / 2000.0;
+    assert!(scale.is_some_and(|s| (s - expected).abs() < 0.005), "final zoom {scale:?}, expected {expected:.4}");
+    let ball = stmts.iter().find_map(|st| match st {
+        Statement::Let { shape: vac::Shape::Ellipse { rx, ry, .. }, .. } => Some((*rx, *ry)),
+        _ => None,
+    });
+    assert!(
+        ball.is_some_and(|(rx, ry)| (rx - 20.0).abs() <= 0.5 && (ry - 20.0).abs() <= 0.5),
+        "the ball, on top: {ball:?}"
+    );
+    assert!(fid.psnr_db > 40.0, "camera.vac PSNR {:.2}", fid.psnr_db);
+
+    // A still scene keeps a still plate.
+    let (_, still, _) = hermetic("textured.vac");
+    assert!(
+        !still.scenes.iter().flat_map(|s| &s.statements).any(|st| matches!(st, Statement::Animate(a) if a.target == "plate")),
+        "textured.vac's camera does not move"
+    );
+}
+
 /// **FIXED in v1.9 — the fit is whatever reconstructs best.**
 ///
 /// Through v1.8 every shape's geometry was estimated from its blob and

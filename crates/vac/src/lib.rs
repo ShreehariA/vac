@@ -388,35 +388,58 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     {
         return Ok(best);
     }
-    let Some(prepared) = vac_decompiler::prepare_raster(frames.to_vec(), best.background)? else {
-        return Ok(best);
+    // Each plate is tried on the winning vector candidate's segmentation
+    // and background: the still raster plate (v1.6) and, when the whole
+    // picture moves, the camera's mosaic (v1.10). The better of them is
+    // kept only if it beats the vectors clearly — or when asked for.
+    let mut plated: Vec<Chosen> = Vec::new();
+    let has_plate = |doc: &Document| {
+        doc.scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .any(|st| matches!(st, Statement::Let { name, shape: Shape::Image { .. } } if name == "plate"))
     };
-    let doc = vac_decompiler::finish(&prepared, best.segmentation, opts.quality, Plate::Raster);
-    let has_plate = doc
-        .scenes
-        .iter()
-        .flat_map(|s| &s.statements)
-        .any(|st| matches!(st, Statement::Let { shape: Shape::Image { .. }, .. }));
-    if !has_plate {
-        return Ok(best);
-    }
-    let fid = measure(frames, &doc)?;
-    let vector = best.fidelity.as_ref().expect("measured");
-    let keep_raster = opts.plate == Plate::Raster || improvement(&fid, vector) >= RASTER_MIN_GAIN;
-    Ok(if keep_raster {
-        Chosen {
+    let tries: &[Plate] = match opts.plate {
+        Plate::Raster => &[Plate::Raster],
+        Plate::Camera => &[Plate::Camera],
+        _ => &[Plate::Raster, Plate::Camera],
+    };
+    for &plate in tries {
+        let prepared = match plate {
+            Plate::Camera => vac_decompiler::prepare_camera(frames.to_vec(), best.background)?,
+            _ => vac_decompiler::prepare_raster(frames.to_vec(), best.background)?,
+        };
+        let Some(prepared) = prepared else { continue };
+        let doc = vac_decompiler::finish(&prepared, best.segmentation, opts.quality, plate);
+        if !has_plate(&doc) {
+            continue;
+        }
+        let fid = measure(frames, &doc)?;
+        plated.push(Chosen {
             document: doc,
             segmentation: best.segmentation,
             background: best.background,
-            plate: Plate::Raster,
+            plate,
             fidelity: Some(fid),
             audited_out: 0,
             refined: 0,
             sprites: 0,
+        });
+    }
+    let top = plated.into_iter().reduce(|a, b| {
+        if reconstructs_better(b.fidelity.as_ref().expect("measured"), a.fidelity.as_ref().expect("measured")) {
+            b
+        } else {
+            a
         }
-    } else {
-        best
-    })
+    });
+    let Some(top) = top else {
+        return Ok(best);
+    };
+    let vector = best.fidelity.as_ref().expect("measured");
+    let keep = opts.plate != Plate::Auto
+        || improvement(top.fidelity.as_ref().expect("measured"), vector) >= RASTER_MIN_GAIN;
+    Ok(if keep { top } else { best })
 }
 
 /// What the shape audit (v1.7) did to a document.
@@ -1735,15 +1758,13 @@ pub fn verify_document<P: AsRef<Path>>(path: P, doc: Document) -> Result<Verific
     let frames = load_video_frames(path)?;
     let source_frames = frames.len();
     let fidelity = measure(&frames, &doc)?;
-    let plate = if doc
-        .scenes
-        .iter()
-        .flat_map(|s| &s.statements)
-        .any(|st| matches!(st, Statement::Let { name, shape: Shape::Image { .. } } if name == "plate"))
-    {
-        Plate::Raster
-    } else {
+    let stmts = || doc.scenes.iter().flat_map(|s| &s.statements);
+    let plate = if !stmts().any(|st| matches!(st, Statement::Let { name, shape: Shape::Image { .. } } if name == "plate")) {
         Plate::Vector
+    } else if stmts().any(|st| matches!(st, Statement::Animate(a) if a.target == "plate")) {
+        Plate::Camera
+    } else {
+        Plate::Raster
     };
     let sprite_count = doc
         .scenes
