@@ -78,6 +78,9 @@ pub struct Options {
     /// Re-measure every mover's keyframes by registering its own pixels
     /// from frame to frame (v1.11). Resolved by the `vac` facade.
     pub motion: bool,
+    /// Find the clip's cuts and decompile each shot as its own scene, when
+    /// that measures better (v1.12). Resolved by the `vac` facade.
+    pub shots: bool,
     /// Draw a shape vectors cannot describe as a sprite of its own pixels
     /// when that measures clearly better (v1.8). Resolved by the `vac`
     /// facade, like [`Options::audit`].
@@ -114,6 +117,7 @@ impl Default for Options {
             audit: true,
             refine: true,
             motion: true,
+            shots: true,
             sprites: true,
         }
     }

@@ -460,6 +460,40 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.12 — shots.**
+///
+/// Real video is cut together from shots, and through v1.11 VAC decompiled
+/// every clip as one: a static layer and tracks smeared across the cuts.
+/// Three corpus clips spliced together (`cuts_three_shots.mp4`) came back
+/// at 22.3 dB with a frame scoring ink IoU 0.000. Frames that differ from
+/// the one before far more than the clip's frames usually do are now cut
+/// candidates; each shot is decompiled on its own — every pass, its own
+/// plate or camera — and the shots become scenes, kept when that measures
+/// better than the clip as one shot.
+///
+/// `shots.vac` cuts between three unrelated pictures. Each must come back as
+/// its own scene, as long as its shot, holding exactly its own shapes; a
+/// clip with no cut must stay one scene.
+#[test]
+fn each_shot_comes_back_as_its_own_scene() {
+    let (_, recovered, fid) = hermetic("shots.vac");
+    assert_eq!(recovered.scenes.len(), 3, "three shots, three scenes");
+    for (scene, want) in recovered.scenes.iter().zip([1usize, 1, 2]) {
+        assert_eq!(scene.duration_ms, 1000, "{} lasts its shot", scene.name);
+        let shapes = scene
+            .statements
+            .iter()
+            .filter(|st| matches!(st, Statement::Let { name, .. } if name != "bg"))
+            .count();
+        assert_eq!(shapes, want, "{} holds exactly its own shapes", scene.name);
+    }
+    assert!(fid.psnr_db > 45.0, "shots.vac PSNR {:.2}", fid.psnr_db);
+    for single in ["two_balls.vac", "spin.vac", "camera.vac"] {
+        let (_, one, _) = hermetic(single);
+        assert_eq!(one.scenes.len(), 1, "{single} has no cut and must stay one scene");
+    }
+}
+
 /// **FIXED in v1.11 — motion, measured from the pixels.**
 ///
 /// The tracker keyframes a shape from its blob's centroid and second

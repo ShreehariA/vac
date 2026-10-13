@@ -75,6 +75,16 @@ motion graphics the readable source is far smaller than the H.264 it came
 from. For a test card full of noise it is barely smaller at the default
 quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
+### `cuts_three_shots.mp4` — source file 56 KB
+
+| quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
+|---|---|---|---|---|---|---|---|
+| 0 | 17,216 | 3.3× smaller | 69.7 | 29.70 | 0.9596 | 9 | 12 |
+| 25 | 20,336 | 2.8× smaller | 69.3 | 29.73 | 0.9603 | 9 | 19 |
+| 50 | 27,875 | 2.1× smaller | 78.8 | 29.17 | 0.9555 | 8 | 36 |
+| 75 | 37,753 | 1.5× smaller | 75.7 | 29.34 | 0.9587 | 8 | 58 |
+| 100 | 61,262 | 0.9× smaller | 75.7 | 29.34 | 0.9595 | 8 | 64 |
+
 ### `kenburns_watercolor.mp4` — source file 396 KB
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |

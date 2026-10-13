@@ -250,6 +250,132 @@ struct Chosen {
 /// rate–distortion mode decision against the frames it is encoding. No
 /// content classifier decides; the reconstruction does.
 fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
+    let cuts = if opts.shots { cut_candidates(frames) } else { Vec::new() };
+    if cuts.is_empty() {
+        return decompile_shot(frames, opts);
+    }
+    // v1.12: decompile each shot on its own and the clip as one, side by
+    // side, and keep whichever reconstructs better.
+    let mut edges = vec![0usize];
+    edges.extend(&cuts);
+    edges.push(frames.len());
+    let (whole, parts): (Result<Chosen>, Vec<Result<Chosen>>) = std::thread::scope(|scope| {
+        let whole = scope.spawn(|| decompile_shot(frames, opts));
+        let parts: Vec<_> = edges
+            .windows(2)
+            .map(|w| {
+                let shot = &frames[w[0]..w[1]];
+                scope.spawn(move || decompile_shot(shot, opts))
+            })
+            .collect();
+        (
+            whole.join().expect("whole-clip decompile panicked"),
+            parts.into_iter().map(|h| h.join().expect("shot decompile panicked")).collect(),
+        )
+    });
+    let whole = whole?;
+    let parts: Vec<Chosen> = parts.into_iter().collect::<Result<_>>()?;
+    let merged = merge_shots(frames, &edges, parts.iter().map(|c| &c.document));
+    let fid = measure(frames, &merged)?;
+    let whole_fid = match &whole.fidelity {
+        Some(f) => f.clone(),
+        None => measure(frames, &whole.document)?,
+    };
+    if !reconstructs_better(&fid, &whole_fid) {
+        return Ok(Chosen {
+            fidelity: Some(whole_fid),
+            ..whole
+        });
+    }
+    let first = &parts[0];
+    Ok(Chosen {
+        document: merged,
+        segmentation: first.segmentation,
+        background: first.background,
+        plate: first.plate,
+        fidelity: Some(fid),
+        audited_out: parts.iter().map(|c| c.audited_out).sum(),
+        refined: parts.iter().map(|c| c.refined).sum(),
+        moved: parts.iter().map(|c| c.moved).sum(),
+        sprites: parts.iter().map(|c| c.sprites).sum(),
+    })
+}
+
+/// A cut differs from the frame before it at least this many times more
+/// than the clip's typical step from one frame to the next...
+const CUT_RATIO: f64 = 10.0;
+/// ...and by at least this much (per-channel MSE: 20 levels RMS), so a
+/// still clip's sensor noise is not a cut.
+const CUT_FLOOR_MSE: f64 = 400.0;
+/// No shot shorter than this: a flash is two cuts a frame apart, not a
+/// shot.
+const MIN_SHOT_FRAMES: usize = 6;
+
+/// Where the clip may cut to a new shot (v1.12): frames that differ from
+/// the frame before them far more than the clip's frames typically differ
+/// from each other. These are candidates only — `decompile_chosen` keeps a
+/// split only when it measures better than the clip as one shot.
+fn cut_candidates(frames: &[VideoFrame]) -> Vec<usize> {
+    if frames.len() < 2 * MIN_SHOT_FRAMES {
+        return Vec::new();
+    }
+    let (w, h) = (frames[0].width, frames[0].height);
+    if frames.iter().any(|f| f.width != w || f.height != h) {
+        return Vec::new();
+    }
+    let step = |a: &VideoFrame, b: &VideoFrame| -> f64 {
+        let (mut s, mut n) = (0f64, 0f64);
+        for i in (0..(w * h) as usize).step_by(3) {
+            for c in 0..3 {
+                let d = a.pixels[i * 4 + c] as f64 - b.pixels[i * 4 + c] as f64;
+                s += d * d;
+            }
+            n += 3.0;
+        }
+        s / n.max(1.0)
+    };
+    let diffs: Vec<f64> = (1..frames.len()).map(|i| step(&frames[i - 1], &frames[i])).collect();
+    let mut sorted = diffs.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let typical = sorted[sorted.len() / 2];
+    let bar = (CUT_RATIO * typical).max(CUT_FLOOR_MSE);
+    let mut cuts: Vec<usize> = Vec::new();
+    for (k, &d) in diffs.iter().enumerate() {
+        let i = k + 1;
+        let since = cuts.last().copied().unwrap_or(0);
+        if d >= bar && i - since >= MIN_SHOT_FRAMES && frames.len() - i >= MIN_SHOT_FRAMES {
+            cuts.push(i);
+        }
+    }
+    cuts
+}
+
+/// The shots' documents as the scenes of one: the canvas and frame rate
+/// of the whole clip, each scene exactly as long as its shot's frames.
+fn merge_shots<'a>(frames: &[VideoFrame], edges: &[usize], parts: impl Iterator<Item = &'a Document>) -> Document {
+    let fps = vac_decompiler::frames::estimate_fps(frames).max(1);
+    let mut scenes = Vec::new();
+    for (n, (part, w)) in parts.zip(edges.windows(2)).enumerate() {
+        let count = (w[1] - w[0]) as u64;
+        let mut scene = part.scenes[0].clone();
+        scene.name = format!("shot_{}", n + 1);
+        // ceil(count * 1000 / fps): the renderer draws floor(duration *
+        // fps / 1000) frames, so this is exactly `count` of them.
+        scene.duration_ms = ((count * 1000 + fps as u64 - 1) / fps as u64) as u32;
+        scenes.push(scene);
+    }
+    Document {
+        canvas: Canvas {
+            width: frames[0].width,
+            height: frames[0].height,
+            fps,
+        },
+        scenes,
+    }
+}
+
+/// Decompile one shot: the measured search, then every pass.
+fn decompile_shot(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let chosen = choose(frames, opts)?;
     if !opts.audit && !opts.refine && !opts.motion && !opts.sprites {
         return Ok(chosen);

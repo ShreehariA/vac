@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.11, default quality 50) and is
+table re-measured 2026-10-13 at v1.12, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -307,6 +307,16 @@ always true; only one of them was measurable.
   `real_bouncing_ball` 44.36 → **46.37 dB**; `real_double_pendulum` IoU
   0.594 → **0.621**; `crossing.vac` IoU 0.979 → **0.9999**.
 
+- **v1.12 — shots.** Every clip used to be decompiled as one scene, with a
+  static layer and tracks smeared across the cuts. Frames that differ from
+  the one before at least ten times more than usual are now cut candidates.
+  Each shot is decompiled on its own by the whole pipeline, and the shots
+  become scenes, each exactly as long as its frames. The split is kept when
+  it measures better than one scene. The new corpus clip `cuts_three_shots`
+  (three clips spliced) went 22.30 → **29.17 dB**, IoU 0.746 → **0.956**,
+  104 → 8 shapes; the `shots.vac` fixture comes back as its three scenes at
+  51.6 dB.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -323,6 +333,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
 | `pan_portrait.mp4` | 0.9697 | 0.9580 | 3.7 | 42.47 | 1.5% | 1 |
+| `cuts_three_shots.mp4` | 0.9555 | 0.8438 | 78.8 | 29.17 | 0.7% | 8 |
 | `real_newtons_cradle.gif` | 0.9204 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
 | `real_pendulum.gif` | 0.6430 | 0.5445 | 331.5 | 22.93 | 4.8% | 27 |

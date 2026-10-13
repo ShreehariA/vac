@@ -1,0 +1,67 @@
+// VAC v1.12 fixture: three shots cut together. Each scene is its own
+// picture — a ball crossing a dark room, a panel rising over a pale one, two
+// balls passing on black — so nothing carries across a cut. The decompiler
+// must find the cuts and give each shot its own scene.
+
+canvas 480x320 @30fps
+
+scene first {
+  duration 1s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1b2233
+
+  let ball = ellipse(60, 160, 26, 26)
+  ball.fill = #e94560
+  ball.stroke = none
+
+  animate ball {
+    0ms -> position(60, 160)
+    1s  -> position(420, 160)
+    easing: linear
+  }
+}
+
+scene second {
+  duration 1s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #e8e4da
+
+  let panel = rect(140, 250, 200, 60)
+  panel.fill = #2a7f62
+  panel.stroke = none
+
+  animate panel {
+    0ms -> position(140, 250)
+    1s  -> position(140, 40)
+    easing: linear
+  }
+}
+
+scene third {
+  duration 1s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #000000
+
+  let left = ellipse(80, 120, 18, 18)
+  left.fill = #ffd166
+  left.stroke = none
+
+  let right = ellipse(400, 200, 18, 18)
+  right.fill = #06d6a0
+  right.stroke = none
+
+  animate left {
+    0ms -> position(80, 120)
+    1s  -> position(400, 120)
+    easing: linear
+  }
+
+  animate right {
+    0ms -> position(400, 200)
+    1s  -> position(80, 200)
+    easing: linear
+  }
+}

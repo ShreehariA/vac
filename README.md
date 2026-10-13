@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.11)
+## Where VAC is today (v1.12)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -40,7 +40,8 @@ animate shape_1 {
 }
 ```
 
-**What it recovers:** rects, ellipses and traced paths, by measured fit;
+**What it recovers:** shots, each as its own scene; rects, ellipses and
+traced paths, by measured fit;
 position, scale, rotation, opacity and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
@@ -71,6 +72,7 @@ keyframes are re-measured by registering its own pixels across frames.
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 30.3 dB | 0.992 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
+| `cuts_three_shots.mp4` | three corpus clips cut together | 29.2 dB | 0.956 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
@@ -2096,3 +2098,49 @@ background rules are now prepared side by side, all six candidates run
 concurrently, and the still and camera plates are tried in parallel. The
 corpus run went from about 145 s to 104 s (the Ken Burns clip 42 → 26 s),
 and every clip's output is byte-for-byte what the baseline recorded.
+
+## v1.12 — Shots
+
+Real video is cut together from shots, and through v1.11 VAC decompiled
+every clip as one. The static layer looked for a scene that held across the
+cut, and tracks smeared from one shot into the next. Three corpus clips
+spliced together (`cuts_three_shots.mp4`, the commands are in
+`docs/v0.4-capability-matrix.md`) came back at 22.3 dB as 104 shapes, with
+one frame scoring ink IoU 0.000.
+
+v1.12 finds the cuts and lets each shot be its own picture:
+
+1. **Candidates.** A frame that differs from the one before it at least ten
+   times more than the clip's frames typically do (and by at least 20
+   levels RMS) is a cut candidate. No shot is shorter than 6 frames, so a
+   flash isn't a shot.
+2. **Shots.** Each shot is decompiled on its own by the whole pipeline: its
+   own measured search, plate or camera, audit, refinement, motion and
+   sprites. The shots run in parallel with each other and with a
+   single-scene decompile of the whole clip.
+3. **Measure.** The shots become the scenes of one document. Each scene is
+   exactly as long as its shot's frames: `ceil(frames × 1000 / fps)` ms,
+   because the renderer draws `floor(duration × fps / 1000)` frames. The
+   split is kept only if it reconstructs better than the clip as one shot.
+
+```vac
+scene shot_1 {                      scene shot_2 {
+  duration 1500ms                     duration 1500ms
+  let bg = rect(0, 0, 480, 320)       let plate = image(-1, -1, 552, 322, "…")
+  let static_0 = rect(211, …)         animate plate { … }   // the camera pans
+  …                                 }
+}                                   scene shot_3 { … the sliding card … }
+```
+
+| clip | one scene | shots |
+|---|---|---|
+| `cuts_three_shots.mp4` | 22.30 dB, IoU 0.746, 104 shapes, 56 KB | **29.17 dB**, IoU **0.956**, 8 shapes, **28 KB** |
+| `shots.vac` (new fixture, hermetic) | — | **51.55 dB**, three scenes, exactly their shapes |
+
+The pan shot's mosaic is 552 px wide because its camera pans. The middle
+shot became a camera plate while the other two stayed vector shapes, each
+shot choosing for itself. No other corpus clip has a cut candidate, so none
+changed or slowed down. The test cuts between three unrelated pictures and
+requires three scenes, each as long as its shot and holding exactly its own
+shapes; clips without a cut must stay one scene. `--no-shots` decompiles
+the clip as one scene.
