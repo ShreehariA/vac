@@ -460,6 +460,45 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.13 — fades.**
+///
+/// A fade blends the whole picture toward black or white, and through v1.12
+/// it broke everything downstream of it: the sliding card faded out scored
+/// 24.4 dB instead of 44.6, and a photo pan faded in lost its camera (frame
+/// 0 was black) and came back as 115 shapes. The fade is now measured — a
+/// mean reading and a chained per-pixel one, decided by measurement — taken
+/// out of the frames, the picture decompiled (shots, camera and all), and
+/// drawn back on top as a canvas-sized rect whose opacity is fitted, frame
+/// by frame, to the reconstruction itself.
+///
+/// `fade_through.vac` fades one shot out to black and the next in from it.
+/// Both shots must come back as scenes, each with its fade drawn on top and
+/// its own content intact; a shape fading on its own (`fade.vac`) is not a
+/// fade of the picture.
+#[test]
+fn a_fade_through_black_comes_back_as_two_faded_scenes() {
+    let (_, recovered, fid) = hermetic("fade_through.vac");
+    assert_eq!(recovered.scenes.len(), 2, "the fade hid a cut between two shots");
+    for scene in &recovered.scenes {
+        let names: Vec<&str> = scene
+            .statements
+            .iter()
+            .filter_map(|st| match st {
+                Statement::Let { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names.last(), Some(&"fade"), "{}: the fade is drawn on top of everything: {names:?}", scene.name);
+        assert_eq!(names.len(), 3, "{}: background, its one shape, the fade: {names:?}", scene.name);
+    }
+    assert!(fid.psnr_db > 45.0, "fade_through.vac PSNR {:.2}", fid.psnr_db);
+    let (_, one, _) = hermetic("fade.vac");
+    assert!(
+        !one.scenes.iter().flat_map(|s| &s.statements).any(|st| matches!(st, Statement::Let { name, .. } if name == "fade")),
+        "fade.vac fades one shape, not the picture"
+    );
+}
+
 /// **FIXED in v1.12 — shots.**
 ///
 /// Real video is cut together from shots, and through v1.11 VAC decompiled

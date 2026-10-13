@@ -11,6 +11,7 @@
 # what it cost. Only the first group says whether VAC is getting better.
 input	hash	frames	ink_iou	worst_iou	residual	psnr_db	missing_ink	spurious_ink	shapes	animate	keyframes	vac_bytes
 cuts_three_shots.mp4	c50edbbf315dad89	135	0.9555	0.8438	78.79	29.17	0.0136	0.0072	8	3	36	27875
+fade_through_black.mp4	ec55263902afd342	120	0.9919	0.9286	3.90	42.22	0.0057	0.0043	5	4	54	28731
 kenburns_watercolor.mp4	d3e11c78c6647265	90	0.9920	0.9899	60.86	30.29	0.0022	0.0058	2	2	92	62834
 mandelbrot.mp4	1951394d7cf69b49	90	0.9896	0.9842	149.30	26.39	0.0044	0.0057	2	2	19	34353
 motion_graphics.mp4	a0fcfb9bcc8dfbfa	90	0.9773	0.9565	4.33	41.76	0.0084	0.0146	4	3	9	801

@@ -128,6 +128,7 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("color_shift.vac", 0.9998, 0.14),
     ("crossing.vac", 0.9999, 0.00),
     ("diagonal.vac", 0.9995, 0.03),
+    ("fade_through.vac", 0.9999, 0.75),
     ("fade.vac", 1.0000, 0.01),
     ("grow.vac", 0.9769, 13.11),
     ("late_entry.vac", 1.0000, 0.00),

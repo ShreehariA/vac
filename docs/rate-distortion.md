@@ -85,6 +85,16 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | 75 | 37,753 | 1.5× smaller | 75.7 | 29.34 | 0.9587 | 8 | 58 |
 | 100 | 61,262 | 0.9× smaller | 75.7 | 29.34 | 0.9595 | 8 | 64 |
 
+### `fade_through_black.mp4` — source file 78 KB
+
+| quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
+|---|---|---|---|---|---|---|---|
+| 0 | 17,084 | 4.7× smaller | 5.4 | 40.80 | 0.9817 | 5 | 15 |
+| 25 | 20,457 | 3.9× smaller | 4.6 | 41.49 | 0.9905 | 5 | 25 |
+| 50 | 28,731 | 2.8× smaller | 3.9 | 42.22 | 0.9919 | 5 | 54 |
+| 75 | 39,033 | 2.0× smaller | 3.7 | 42.43 | 0.9942 | 5 | 92 |
+| 100 | 62,501 | 1.3× smaller | 3.5 | 42.71 | 0.9948 | 5 | 103 |
+
 ### `kenburns_watercolor.mp4` — source file 396 KB
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |

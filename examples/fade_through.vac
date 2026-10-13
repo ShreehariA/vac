@@ -1,0 +1,56 @@
+// VAC v1.13 fixture: a fade through black between two shots. The first
+// shot fades out over its last half second; the second fades in over its
+// first. In between, the picture is gone, so nothing but the fade ties the
+// two together. The decompiler must take the fade out, find the cut it was
+// hiding, and draw the fade back on top of each scene.
+
+canvas 480x320 @30fps
+
+scene first {
+  duration 1500ms
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #2b3a67
+
+  let ball = ellipse(80, 160, 30, 30)
+  ball.fill = #f2c14e
+  ball.stroke = none
+
+  animate ball {
+    0ms    -> position(80, 160)
+    1500ms -> position(400, 160)
+    easing: linear
+  }
+
+  let fade = rect(0, 0, 480, 320)
+  fade.fill = #000000
+  fade.stroke = none
+
+  animate fade {
+    0ms    -> opacity(0)
+    1000ms -> opacity(0)
+    1500ms -> opacity(1)
+    easing: linear
+  }
+}
+
+scene second {
+  duration 1500ms
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #e9d8a6
+
+  let card = rect(160, 110, 160, 100)
+  card.fill = #9b2226
+  card.stroke = none
+
+  let fade = rect(0, 0, 480, 320)
+  fade.fill = #000000
+  fade.stroke = none
+
+  animate fade {
+    0ms   -> opacity(1)
+    500ms -> opacity(0)
+    easing: linear
+  }
+}

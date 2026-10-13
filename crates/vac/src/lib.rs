@@ -250,6 +250,368 @@ struct Chosen {
 /// rate–distortion mode decision against the frames it is encoding. No
 /// content classifier decides; the reconstruction does.
 fn decompile_chosen(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
+    let fades = if opts.fades { fade_track(frames) } else { Vec::new() };
+    if fades.is_empty() {
+        return decompile_cuts(frames, opts);
+    }
+    // v1.13: decompile the clip as it is and with each reading of its fade
+    // taken out, side by side, and keep whichever reconstructs the frames
+    // as they are best.
+    let (plain, faded): (Result<Chosen>, Vec<Result<Chosen>>) = std::thread::scope(|scope| {
+        let plain = scope.spawn(|| decompile_cuts(frames, opts));
+        let faded: Vec<_> = fades
+            .iter()
+            .map(|fade| {
+                scope.spawn(move || -> Result<Chosen> {
+                    let unfaded = unfade(frames, fade);
+                    let mut c = decompile_cuts(&unfaded, opts)?;
+                    let fitted = fit_fade(frames, &c.document, fade)?;
+                    add_fade(&mut c.document, &fitted, opts.quality);
+                    c.fidelity = Some(measure(frames, &c.document)?);
+                    Ok(c)
+                })
+            })
+            .collect();
+        (
+            plain.join().expect("decompile panicked"),
+            faded.into_iter().map(|h| h.join().expect("faded decompile panicked")).collect(),
+        )
+    });
+    let plain = plain?;
+    let plain_fid = match &plain.fidelity {
+        Some(f) => f.clone(),
+        None => measure(frames, &plain.document)?,
+    };
+    let mut best = Chosen {
+        fidelity: Some(plain_fid),
+        ..plain
+    };
+    for candidate in faded {
+        let candidate = candidate?;
+        if reconstructs_better(
+            candidate.fidelity.as_ref().expect("measured"),
+            best.fidelity.as_ref().expect("measured"),
+        ) {
+            best = candidate;
+        }
+    }
+    Ok(best)
+}
+
+/// A fade (v1.13): the picture blended toward one colour,
+/// `frame = alpha · picture + (1 − alpha) · colour`, alpha per frame.
+struct Fade {
+    colour: [f32; 3],
+    alpha: Vec<f32>,
+}
+
+/// A clip fades when some frame keeps at most this much of its picture.
+const FADE_MAX_ALPHA: f32 = 0.85;
+/// A frame keeping less than this of its picture is too faded to recover
+/// it from: it borrows its nearest recoverable neighbour's.
+const FADE_MIN_ALPHA: f32 = 0.08;
+/// A frame within this of its full picture is taken as unfaded.
+const FADE_FULL_ALPHA: f32 = 0.97;
+/// A frame whose pixels vary less than this about their mean (RMS levels)
+/// is one flat colour: the fade at its deepest.
+const FADE_FLAT_RMS: f32 = 2.5;
+
+/// Measure a fade, two ways. Each frame's mean colour, projected onto the
+/// line from the fade colour to the frame farthest from it, says how much
+/// of the picture the frame keeps; black and white are both tried, and the
+/// one whose line explains the means better is the fade colour. That
+/// reading is fooled by anything that moves, so a second one chains each
+/// frame's robust ratio to the frame before. Neither always wins — the
+/// chain is exact over a still background and drifts under a moving
+/// camera — so both are returned, to be decided by measurement. Empty when
+/// no frame fades far enough to matter.
+fn fade_track(frames: &[VideoFrame]) -> Vec<Fade> {
+    if frames.len() < 6 {
+        return Vec::new();
+    }
+    let means: Vec<[f32; 3]> = frames
+        .iter()
+        .map(|f| {
+            let mut m = [0f64; 3];
+            let mut n = 0f64;
+            for p in f.pixels.chunks_exact(4).step_by(3) {
+                for c in 0..3 {
+                    m[c] += p[c] as f64;
+                }
+                n += 1.0;
+            }
+            [(m[0] / n) as f32, (m[1] / n) as f32, (m[2] / n) as f32]
+        })
+        .collect();
+    let mut best: Option<(f32, Fade)> = None;
+    for colour in [[0f32, 0.0, 0.0], [255f32, 255.0, 255.0]] {
+        let off = |m: &[f32; 3]| [m[0] - colour[0], m[1] - colour[1], m[2] - colour[2]];
+        let len2 = |d: [f32; 3]| d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        let r = (0..means.len()).max_by(|&a, &b| len2(off(&means[a])).total_cmp(&len2(off(&means[b])))).expect("frames");
+        let dir = off(&means[r]);
+        let full = len2(dir);
+        if full < 3.0 * 15.0 * 15.0 {
+            continue;
+        }
+        let mut resid = 0f32;
+        let alpha: Vec<f32> = means
+            .iter()
+            .map(|m| {
+                let d = off(m);
+                let a = ((d[0] * dir[0] + d[1] * dir[1] + d[2] * dir[2]) / full).clamp(0.0, 1.0);
+                resid += len2([d[0] - a * dir[0], d[1] - a * dir[1], d[2] - a * dir[2]]);
+                if a >= FADE_FULL_ALPHA {
+                    1.0
+                } else {
+                    a
+                }
+            })
+            .collect();
+        if best.as_ref().is_none_or(|b| resid < b.0) {
+            best = Some((resid, Fade { colour, alpha }));
+        }
+    }
+    // Frames that are all one colour are the fade itself, at its deepest:
+    // they name the fade colour outright, and they divide the clip into
+    // stretches that each fade toward or away from their own picture — a
+    // fade through black out of one shot and into the next. Without any,
+    // the means' choice of colour stands.
+    let contrast: Vec<f32> = frames
+        .iter()
+        .zip(&means)
+        .map(|(f, m)| {
+            let (mut v, mut n) = (0f64, 0f64);
+            for p in f.pixels.chunks_exact(4).step_by(3) {
+                for c in 0..3 {
+                    v += (p[c] as f64 - m[c] as f64).powi(2);
+                }
+                n += 3.0;
+            }
+            (v / n.max(1.0)).sqrt() as f32
+        })
+        .collect();
+    // Only black or white: a plain dark-blue opening frame is a title
+    // card, not a fade.
+    let near_extreme = |m: &[f32; 3]| m.iter().all(|&v| v <= 32.0) || m.iter().all(|&v| v >= 223.0);
+    let flat: Vec<bool> = contrast
+        .iter()
+        .zip(&means)
+        .map(|(&c, m)| c < FADE_FLAT_RMS && near_extreme(m))
+        .collect();
+    let colour = match best.as_ref() {
+        _ if flat.iter().any(|&f| f) => {
+            let mut picked: Vec<[f32; 3]> = (0..frames.len()).filter(|&i| flat[i]).map(|i| means[i]).collect();
+            picked.sort_by(|a, b| (a[0] + a[1] + a[2]).total_cmp(&(b[0] + b[1] + b[2])));
+            picked[picked.len() / 2]
+        }
+        Some((_, f)) => f.colour,
+        None => return Vec::new(),
+    };
+    let dist = |m: &[f32; 3]| ((0..3).map(|c| (m[c] - colour[c]).powi(2)).sum::<f32>()).sqrt();
+    // How much the picture faded from frame a to frame b: the median of the
+    // pixels' ratios of distance from the fade colour, over pixels far
+    // enough from it to measure; between frames too dark for that, the
+    // ratio of their mean colours' distances.
+    let step = |i: usize| -> f32 {
+        let (a, b) = (&frames[i - 1], &frames[i]);
+        let mut ratios: Vec<f32> = Vec::new();
+        for (pa, pb) in a.pixels.chunks_exact(4).zip(b.pixels.chunks_exact(4)).step_by(2) {
+            let da: f32 = (0..3).map(|c| pa[c] as f32 - colour[c]).map(|v| v * v).sum();
+            if da < 3.0 * 25.0 * 25.0 {
+                continue;
+            }
+            let dot: f32 = (0..3).map(|c| (pb[c] as f32 - colour[c]) * (pa[c] as f32 - colour[c])).sum();
+            ratios.push(dot / da);
+        }
+        if ratios.len() >= 64 {
+            let mid = ratios.len() / 2;
+            ratios.select_nth_unstable_by(mid, |x, y| x.total_cmp(y));
+            ratios[mid].max(0.0)
+        } else {
+            let da = dist(&means[i - 1]).max(1e-3);
+            dist(&means[i]) / da
+        }
+    };
+    // Chain the steps through each stretch between flat frames, and scale
+    // each stretch so its fullest frame keeps all of its picture.
+    let mut alpha = vec![0f32; frames.len()];
+    let mut start = 0usize;
+    while start < frames.len() {
+        if flat[start] {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end + 1 < frames.len() && !flat[end + 1] {
+            end += 1;
+        }
+        alpha[start] = 1.0;
+        for i in start + 1..=end {
+            alpha[i] = alpha[i - 1] * step(i);
+        }
+        let peak = alpha[start..=end].iter().cloned().fold(0.0f32, f32::max).max(1e-6);
+        for a in alpha[start..=end].iter_mut() {
+            *a = (*a / peak).clamp(0.0, 1.0);
+            if *a >= FADE_FULL_ALPHA {
+                *a = 1.0;
+            }
+        }
+        start = end + 1;
+    }
+    let mut out: Vec<Fade> = Vec::new();
+    if let Some((_, mean_fade)) = best {
+        if mean_fade.alpha.iter().cloned().fold(1.0, f32::min) <= FADE_MAX_ALPHA {
+            out.push(mean_fade);
+        }
+    }
+    if alpha.iter().cloned().fold(1.0, f32::min) <= FADE_MAX_ALPHA {
+        out.push(Fade { colour, alpha });
+    }
+    out
+}
+
+/// The frames with the fade taken out: each pixel's picture recovered from
+/// `(frame − (1 − alpha) · colour) / alpha`; a frame too faded to recover
+/// borrows its nearest recoverable neighbour's picture.
+fn unfade(frames: &[VideoFrame], fade: &Fade) -> Vec<VideoFrame> {
+    let mut out: Vec<VideoFrame> = frames.to_vec();
+    for (f, &a) in out.iter_mut().zip(&fade.alpha) {
+        if a >= 1.0 || a < FADE_MIN_ALPHA {
+            continue;
+        }
+        for p in f.pixels.chunks_exact_mut(4) {
+            for c in 0..3 {
+                let v = (p[c] as f32 - (1.0 - a) * fade.colour[c]) / a;
+                p[c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    let ok: Vec<usize> = (0..frames.len()).filter(|&i| fade.alpha[i] >= FADE_MIN_ALPHA).collect();
+    if ok.is_empty() {
+        return frames.to_vec();
+    }
+    for i in 0..frames.len() {
+        if fade.alpha[i] < FADE_MIN_ALPHA {
+            let near = *ok.iter().min_by_key(|&&j| (j as i64 - i as i64).abs()).expect("one recoverable frame");
+            let pixels = out[near].pixels.clone();
+            out[i].pixels = pixels;
+        }
+    }
+    out
+}
+
+/// The fade, measured against the picture as reconstructed: with the
+/// reconstruction `P`, the source `F` and the fade colour `C`, the opacity
+/// the fade needs in each frame has a closed form, the least-squares
+/// `o = Σ (F − P)·(C − P) / Σ |C − P|²`. The reading that took the fade out
+/// only has to be good enough to decompile the picture; the fade drawn back
+/// on top is fitted to what was actually decompiled. A frame whose
+/// reconstruction is too close to the fade colour to measure keeps the
+/// reading's value.
+fn fit_fade(frames: &[VideoFrame], doc: &Document, fade: &Fade) -> Result<Fade> {
+    let count = vac_compiler::render::frame_count(doc);
+    let idx = aligned_indices(frames, count, doc.canvas.fps);
+    let mut wanted: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (j, &i) in idx.iter().enumerate() {
+        wanted[i].push(j);
+    }
+    let mut alpha = fade.alpha.clone();
+    let c = fade.colour;
+    vac_compiler::render::render_document_each(doc, |i, r| {
+        for &j in &wanted[i] {
+            let f = &frames[j];
+            let (mut num, mut den) = (0f64, 0f64);
+            for (pf, pr) in f.pixels.chunks_exact(4).zip(r.rgba.chunks_exact(4)).step_by(2) {
+                for k in 0..3 {
+                    let (fv, pv) = (pf[k] as f64, pr[k] as f64);
+                    num += (fv - pv) * (c[k] as f64 - pv);
+                    den += (c[k] as f64 - pv).powi(2);
+                }
+            }
+            let n = (f.pixels.len() / 8).max(1) as f64;
+            if den / n > 3.0 * 20.0 * 20.0 {
+                let o = (num / den).clamp(0.0, 1.0) as f32;
+                alpha[j] = if 1.0 - o >= FADE_FULL_ALPHA { 1.0 } else { 1.0 - o };
+            }
+        }
+        Ok(())
+    })?;
+    Ok(Fade {
+        colour: fade.colour,
+        alpha,
+    })
+}
+
+/// Draw the fade on top of every scene: a canvas-sized rect in the fade
+/// colour, its opacity keyframed to `1 − alpha` over the scene's frames,
+/// simplified until no frame's opacity is off by more than the dial's
+/// opacity tolerance.
+fn add_fade(doc: &mut Document, fade: &Fade, quality: f32) {
+    let fps = doc.canvas.fps.max(1) as u64;
+    let tol = vac_decompiler::Tolerances::from_quality(quality).opacity_levels / 255.0;
+    let (w, h) = (doc.canvas.width as f32, doc.canvas.height as f32);
+    let colour = Color::rgb(fade.colour[0] as u8, fade.colour[1] as u8, fade.colour[2] as u8);
+    let mut first = 0usize;
+    for scene in &mut doc.scenes {
+        let n = ((scene.duration_ms as u64 * fps) / 1000).max(1) as usize;
+        let alpha: Vec<f32> = (first..first + n).map(|i| fade.alpha.get(i).copied().unwrap_or(1.0)).collect();
+        first += n;
+        if alpha.iter().all(|&a| a >= 1.0) {
+            continue;
+        }
+        let time = |i: usize| ((i as u64 * 1000) / fps) as u32;
+        let mut keep = vec![false; n];
+        keep[0] = true;
+        keep[n - 1] = true;
+        let mut stack = vec![(0usize, n - 1)];
+        while let Some((a, b)) = stack.pop() {
+            if b <= a + 1 {
+                continue;
+            }
+            let (worst, at) = (a + 1..b)
+                .map(|t| {
+                    let u = (time(t) - time(a)) as f32 / (time(b) - time(a)).max(1) as f32;
+                    ((alpha[a] + (alpha[b] - alpha[a]) * u - alpha[t]).abs(), t)
+                })
+                .fold((0.0f32, a), |m, x| if x.0 > m.0 { x } else { m });
+            if worst > tol {
+                keep[at] = true;
+                stack.push((a, at));
+                stack.push((at, b));
+            }
+        }
+        let round = |v: f32| (v * 1000.0).round() / 1000.0;
+        scene.statements.push(Statement::Let {
+            name: "fade".into(),
+            shape: Shape::Rect { x: 0.0, y: 0.0, w, h },
+        });
+        scene.statements.push(Statement::Assign {
+            target: "fade".into(),
+            property: Property::Fill,
+            value: Value::Color(colour),
+        });
+        scene.statements.push(Statement::Assign {
+            target: "fade".into(),
+            property: Property::Stroke,
+            value: Value::None,
+        });
+        scene.statements.push(Statement::Animate(Animation {
+            target: "fade".into(),
+            keyframes: (0..n)
+                .filter(|&i| keep[i])
+                .map(|i| Keyframe {
+                    time_ms: time(i),
+                    transforms: vec![Transform::Opacity(round(1.0 - alpha[i]))],
+                })
+                .collect(),
+            easing: Easing::Linear,
+        }));
+    }
+}
+
+/// Decompile a clip that may contain cuts: the shots on their own, and the
+/// clip as one, keeping whichever reconstructs better.
+fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let cuts = if opts.shots { cut_candidates(frames) } else { Vec::new() };
     if cuts.is_empty() {
         return decompile_shot(frames, opts);

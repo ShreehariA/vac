@@ -81,6 +81,10 @@ pub struct Options {
     /// Find the clip's cuts and decompile each shot as its own scene, when
     /// that measures better (v1.12). Resolved by the `vac` facade.
     pub shots: bool,
+    /// Measure a fade to or from black or white, decompile the picture
+    /// with it taken out, and draw the fade on top, when that measures
+    /// better (v1.13). Resolved by the `vac` facade.
+    pub fades: bool,
     /// Draw a shape vectors cannot describe as a sprite of its own pixels
     /// when that measures clearly better (v1.8). Resolved by the `vac`
     /// facade, like [`Options::audit`].
@@ -118,6 +122,7 @@ impl Default for Options {
             refine: true,
             motion: true,
             shots: true,
+            fades: true,
             sprites: true,
         }
     }

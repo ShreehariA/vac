@@ -48,6 +48,7 @@ struct Knobs {
     refine: bool,
     motion: bool,
     shots: bool,
+    fades: bool,
     sprites: bool,
 }
 
@@ -180,6 +181,9 @@ enum Cmd {
         /// its cuts into shots (v1.12).
         #[arg(long)]
         no_shots: bool,
+        /// Never take a fade out of the picture and draw it on top (v1.13).
+        #[arg(long)]
+        no_fades: bool,
         /// Rate control: instead of a fixed quality, find the smallest
         /// source whose reconstruction reaches this PSNR (dB).
         #[arg(long, value_name = "DB", conflicts_with = "quality")]
@@ -252,6 +256,9 @@ enum Cmd {
         /// its cuts into shots (v1.12).
         #[arg(long)]
         no_shots: bool,
+        /// Never take a fade out of the picture and draw it on top (v1.13).
+        #[arg(long)]
+        no_fades: bool,
         /// Write PNG triptychs — source | reconstruction | ink map — of
         /// the worst-IoU frame, the worst-PSNR frame and the middle frame
         /// into this directory. In the ink map, white is ink both agree
@@ -285,6 +292,7 @@ fn main() -> Result<()> {
             no_refine,
             no_motion,
             no_shots,
+            no_fades,
             target_psnr,
         } => run_decompile(
             &input,
@@ -300,6 +308,7 @@ fn main() -> Result<()> {
                 refine: !no_refine,
                 motion: !no_motion,
                 shots: !no_shots,
+                fades: !no_fades,
             },
             target_psnr,
         ),
@@ -317,6 +326,7 @@ fn main() -> Result<()> {
             no_refine,
             no_motion,
             no_shots,
+            no_fades,
             dump,
             vac: given,
         } => {
@@ -330,6 +340,7 @@ fn main() -> Result<()> {
                 refine: !no_refine,
                 motion: !no_motion,
                 shots: !no_shots,
+                fades: !no_fades,
             };
             if let Some(file) = &given {
                 let doc = vac::read(file).with_context(|| format!("reading {}", file.display()))?;
@@ -366,9 +377,9 @@ fn run_verify(
     knobs: Knobs,
 ) -> Result<()> {
     if ab {
-        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, sprites: knobs.sprites })
+        let on = vac::verify(input, &vac::DecompileOptions { static_layer: true, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, fades: knobs.fades, sprites: knobs.sprites })
             .with_context(|| format!("verifying {} with layering", input.display()))?;
-        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, sprites: knobs.sprites })
+        let off = vac::verify(input, &vac::DecompileOptions { static_layer: false, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, fades: knobs.fades, sprites: knobs.sprites })
             .with_context(|| format!("verifying {} without layering", input.display()))?;
         if json {
             println!("{{");
@@ -382,7 +393,7 @@ fn run_verify(
         return Ok(());
     }
 
-    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, sprites: knobs.sprites })
+    let v = vac::verify(input, &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, fades: knobs.fades, sprites: knobs.sprites })
         .with_context(|| format!("verifying {}", input.display()))?;
     if json {
         println!("{{");
@@ -618,7 +629,7 @@ fn run_decompile(
 fn run_dump(input: &Path, dir: &Path, static_layer: bool, knobs: Knobs) -> Result<()> {
     let frames = vac::load_video_frames(input)
         .with_context(|| format!("loading {}", input.display()))?;
-    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, sprites: knobs.sprites })?;
+    let doc = vac::decompile_frames(frames.clone(), &vac::DecompileOptions { static_layer, segmentation: knobs.segmentation, background: knobs.background, quality: knobs.quality, plate: knobs.plate, audit: knobs.audit, refine: knobs.refine, motion: knobs.motion, shots: knobs.shots, fades: knobs.fades, sprites: knobs.sprites })?;
     dump_frames(input, dir, &frames, &doc)
 }
 

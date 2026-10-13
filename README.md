@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.12)
+## Where VAC is today (v1.13)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -40,8 +40,8 @@ animate shape_1 {
 }
 ```
 
-**What it recovers:** shots, each as its own scene; rects, ellipses and
-traced paths, by measured fit;
+**What it recovers:** shots, each as its own scene; fades to and from
+black or white; rects, ellipses and traced paths, by measured fit;
 position, scale, rotation, opacity and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
@@ -68,6 +68,7 @@ keyframes are re-measured by registering its own pixels across frames.
 | `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 46.4 dB | 0.991 |
 | `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
 | `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.970 |
+| `fade_through_black.mp4` | a card fading out, then a photo pan fading in | 42.2 dB | 0.992 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 30.3 dB | 0.992 |
@@ -2144,3 +2145,62 @@ changed or slowed down. The test cuts between three unrelated pictures and
 requires three scenes, each as long as its shot and holding exactly its own
 shapes; clips without a cut must stay one scene. `--no-shots` decompiles
 the clip as one scene.
+
+## v1.13 — Fades
+
+A fade blends the whole picture toward black or white, and through v1.12 it
+broke everything downstream of it. The sliding card, faded out over its
+last second, scored 24.4 dB instead of 44.6. The photo pan, faded in, lost
+its camera, because the camera aligns to frame 0 and frame 0 was black, and
+came back as 115 shapes.
+
+A fade is `frame = α · picture + (1 − α) · colour`, so v1.13 measures α,
+takes the fade out, decompiles the picture, and draws the fade back:
+
+1. **Read the fade, two ways.** The first is each frame's mean colour,
+   projected onto the line toward black or white. The second chains each
+   frame's median per-pixel ratio to the frame before. The mean reading is
+   fooled by a card sliding in (an 11% "fade"). The chain is exact over a
+   still background but drifts under a moving camera. Frames that are one
+   flat black or white are the fade at its deepest: they split the chain into
+   stretches that each fade toward their own picture. Both readings are
+   tried.
+2. **Take it out.** `picture = (frame − (1 − α) · colour) / α`. A frame too
+   dark to recover borrows its nearest neighbour's picture.
+3. **Decompile the picture** with everything: shots, so a fade through black
+   reveals the cut it was hiding, and the camera, plates and sprites.
+4. **Fit the fade to what was decompiled.** With the reconstruction `P`,
+   the source `F` and the colour `C`, each frame's best opacity has a
+   closed form: `o = Σ (F − P)·(C − P) / Σ |C − P|²`. The reading only has
+   to be good enough to decompile the picture; the opacity is then measured
+   against the actual reconstruction. Fitting took the pan from 41.1 dB to
+   42.6 dB, and the fade through black from 41.9 to 42.2.
+5. **Draw it on top.** Each scene gets a canvas-sized rect in the fade
+   colour, its `opacity()` keyframed and simplified like any other channel.
+   The result is kept only if it beats decompiling the clip as it is.
+
+| clip | v1.12 | v1.13 |
+|---|---|---|
+| sliding card, fading out | 24.36 dB | **45.37 dB** (the unfaded clip: 44.63) |
+| photo pan, fading in | 26.23 dB, 115 shapes | **42.62 dB**, a camera and a fade (the unfaded clip: 42.47) |
+| `fade_through_black.mp4` (new corpus clip) | 25.88 dB, 50 shapes | **42.22 dB**, two scenes, 5 shapes |
+| `fade_through.vac` (new fixture), hermetic | — | **49.38 dB**, two scenes, each faded |
+
+```vac
+scene shot_1 {
+  …
+  let fade = rect(0, 0, 480, 320)
+  fade.fill = #000000
+  animate fade {
+    0ms -> opacity(0)
+    1s -> opacity(0)
+    1466ms -> opacity(0.996)
+    1500ms -> opacity(1)
+  }
+}
+```
+
+The faded clips even come back slightly better than their unfaded originals
+did (45.37 against 44.63, and 42.62 against 42.47). A single shape fading on
+its own (`fade.vac`) is not mistaken for a fade of the picture. `--no-fades`
+turns the pass off.

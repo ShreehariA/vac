@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.12, default quality 50) and is
+table re-measured 2026-10-13 at v1.13, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -76,6 +76,23 @@ headline win: 45 → 19 animate blocks, 1159 → 186 keyframes, 54 KB → 25 KB.
 of that is true. It is also entirely a *compression* result. Measured on the
 other axis, the same clip reconstructs at an ink IoU of 0.07. Both facts were
 always true; only one of them was measurable.
+
+---
+
+## 3. Scale: HD footage is slow and memory-hungry
+
+**Status: open. Measured on a 3 s, 1280×720 camera pan (made like
+`pan_portrait.mp4`, at 720p).**
+
+The result is right: one camera plate at 44.3 dB. Getting it is slow. The
+decompile took 103 s with a second job running beside it, and peaked at
+**2.5 GB**. Every candidate of the measured search holds its own copy of the
+whole clip: two background rules, a still plate, a camera, a single-scene
+decompile beside the shots, and a faded one beside the plain. A minute of
+720p would not fit in memory. The likely fixes are to run the search at
+reduced resolution or over a sample of frames, keeping the final passes at
+full resolution, and to decompile long clips shot by shot without holding
+every frame at once.
 
 ---
 
@@ -317,6 +334,16 @@ always true; only one of them was measurable.
   104 → 8 shapes; the `shots.vac` fixture comes back as its three scenes at
   51.6 dB.
 
+- **v1.13 — fades.** A fade blends the whole picture toward black or
+  white, and it used to break every stage after it: a faded-in photo pan lost
+  its camera (frame 0 was black). The fade is read two ways (frame means,
+  and chained per-pixel ratios split at flat frames) and taken out. The
+  picture is decompiled with shots, camera and all, and the fade is drawn
+  back on top, its opacity fitted per frame to the reconstruction by least
+  squares. The new corpus clip `fade_through_black` (a card fading out, a
+  photo pan fading in) went 25.88 → **42.22 dB** as two faded scenes; the
+  faded card 24.36 → 45.37 dB, the faded pan 26.23 → 42.62 dB.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -327,6 +354,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `testsrc2.mp4` | 0.9951 | 0.9859 | 372.7 | 22.42 | 0.4% | 64 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
 | `kenburns_watercolor.mp4` | 0.9920 | 0.9899 | 60.9 | 30.29 | 0.6% | 2 |
+| `fade_through_black.mp4` | 0.9919 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
 | `real_bouncing_ball.gif` | 0.9905 | 0.9885 | 1.5 | 46.37 | 0.6% | 2 |
 | `mandelbrot.mp4` | 0.9896 | 0.9842 | 149.3 | 26.39 | 0.6% | 2 |
 | `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
