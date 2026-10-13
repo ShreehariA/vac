@@ -378,6 +378,9 @@ struct Chosen {
     background: Background,
     /// How the static scene was written.
     plate: Plate,
+    /// Whether the static layer (v0.8) was used — measured, not assumed,
+    /// since v1.20.
+    static_layer: bool,
     /// The chosen candidate's fidelity, when `Auto` had to measure it.
     fidelity: Option<Fidelity>,
     /// Shapes the audit (v1.7) measured and took out.
@@ -845,6 +848,7 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         segmentation: first.segmentation,
         background: first.background,
         plate: first.plate,
+        static_layer: first.static_layer,
         fidelity: Some(fid),
         audited_out: parts.iter().map(|c| c.audited_out).sum(),
         refined: parts.iter().map(|c| c.refined).sum(),
@@ -1242,6 +1246,7 @@ fn dissolve_variant(
         segmentation: Segmentation::Components,
         background: Background::Corners,
         plate: Plate::Raster,
+        static_layer: false,
         fidelity: None,
         audited_out: 0,
         refined: 0,
@@ -1416,6 +1421,7 @@ fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
         segmentation: picked.segmentation,
         background: picked.background,
         plate: picked.plate,
+        static_layer: picked.static_layer,
         ..*opts
     };
     let mut chosen = choose_full(frames, &replay)?;
@@ -1460,6 +1466,15 @@ fn downscale(frames: &[VideoFrame], factor: u32) -> Vec<VideoFrame> {
         .collect()
 }
 
+/// How much better a candidate without the static layer must measure, in
+/// the selection rule's currency, to replace the one with it (v1.20): twice
+/// as good, the raster plate's bar. Candidates are compared before the
+/// passes that improve the winner, and a near tie there says nothing about
+/// the result: `real_loader` took the layer's absence on a 0.058 margin and
+/// finished worse (ink IoU 0.864 → 0.806, 43% more bytes); the slow card in
+/// `cuts_three_shots` wins by 2.8.
+const STATIC_LAYER_MIN_GAIN: f64 = std::f64::consts::LN_2;
+
 fn choose_full(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let segs: &[Segmentation] = match opts.segmentation {
         Segmentation::Auto => &[Segmentation::Components, Segmentation::Regions, Segmentation::Edges],
@@ -1483,6 +1498,7 @@ fn choose_full(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen>
             segmentation: segs[0],
             background: bgs[0],
             plate: opts.plate,
+            static_layer: opts.static_layer,
             fidelity: None,
             audited_out: 0,
             refined: 0,
@@ -1561,6 +1577,7 @@ fn choose_full(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen>
                 segmentation,
                 background,
                 plate: Plate::Vector,
+                static_layer: opts.static_layer,
                 fidelity: Some(fid),
                 audited_out: 0,
                 refined: 0,
@@ -1569,7 +1586,35 @@ fn choose_full(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen>
             });
         }
     }
-    let best = best.expect("at least one candidate");
+    let mut best = best.expect("at least one candidate");
+    // v1.20: the static layer is measured, not assumed. A mover slow enough
+    // to cover the same pixels for most of a shot is, to the temporal
+    // median, scenery: its edges are stripped from every frame and come
+    // back as static bars while what is left of it fragments (the first
+    // 45 frames of `outlined_ui`: 24.5 dB with the layer, 34.1 without).
+    // When the winner has static shapes, its segmentation and background
+    // are decompiled once more without the layer, and that is kept when it
+    // measures clearly better ([`STATIC_LAYER_MIN_GAIN`]).
+    let has_static = |doc: &Document| {
+        doc.scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .any(|st| matches!(st, Statement::Let { name, .. } if name.starts_with("static_")))
+    };
+    if opts.static_layer && has_static(&best.document) {
+        let (segmentation, background) = (best.segmentation, best.background);
+        let prepared = vac_decompiler::prepare(frames.to_vec(), false, background)?;
+        let doc = vac_decompiler::finish(&prepared, segmentation, opts.quality, Plate::Vector);
+        let fid = measure(frames, &doc)?;
+        if improvement(&fid, best.fidelity.as_ref().expect("measured")) >= STATIC_LAYER_MIN_GAIN {
+            best = Chosen {
+                document: doc,
+                static_layer: false,
+                fidelity: Some(fid),
+                ..best
+            };
+        }
+    }
     // v1.6: the raster plate is an escape hatch, not a peer. It is tried on
     // the winning vector candidate's segmentation and background, and kept
     // only when it reconstructs *clearly* better — the source stays vector
@@ -1624,6 +1669,7 @@ fn choose_full(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen>
                         segmentation,
                         background,
                         plate,
+                        static_layer: opts.static_layer,
                         fidelity: Some(fid),
                         audited_out: 0,
                         refined: 0,

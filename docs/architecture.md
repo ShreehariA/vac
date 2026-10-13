@@ -1,6 +1,6 @@
 # How VAC decompiles a video
 
-This is the pipeline as of v1.19: what runs, in what order, and what decides
+This is the pipeline as of v1.20: what runs, in what order, and what decides
 each step. The README is a version-by-version log, and this is the map. One
 rule runs through all of it: **measure, don't classify.** Wherever there is a
 choice, every option is built, rendered back to pixels, and scored against
@@ -83,6 +83,10 @@ shot.
   Each one finds the static layer (the per-pixel temporal median), detects
   blobs, tracks them, and fits shapes: rect, ellipse or traced path by
   overlap, flat or gradient fill, stroke, rotation, colour animation.
+- **Static layer or none (v1.20).** When the winner has static shapes, its
+  segmentation and background are decompiled once more without the static
+  layer, and that is kept when it measures twice as good: a mover that
+  covers the same pixels for most of a shot is scenery to a median.
 - **Plates**, tried only when the best vector candidate is under 30 dB:
   - a **still plate**: the median frame as one JPEG, movers on top;
   - a **camera**: each frame's view of the scene (scale, roll, offset) by a

@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.19)
+## Where VAC is today (v1.20)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -55,8 +55,8 @@ flat fill can describe, like a shaded ball, keeps its keyframes and is drawn
 as its own pixels.
 
 **How it decides:** by measurement, not classification. Every ambiguous
-choice is tried several ways: segmentation, background rule, raster versus
-vector plate. Each candidate is re-rendered and scored against the source,
+choice is tried several ways: segmentation, background rule, static scenery
+or none, raster versus vector plate. Each candidate is re-rendered and scored against the source,
 and the one that reconstructs best wins. Then every shape in the winner is
 measured against its own absence, and a shape the reconstruction is no
 better with is taken out. Each remaining shape's size, position and stroke
@@ -73,12 +73,12 @@ keyframes are re-measured by registering its own pixels across frames.
 | `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.971 |
 | `fade_through_black.mp4` | a card fading out, then a photo pan fading in | 42.2 dB | 0.992 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
+| `cuts_three_shots.mp4` | three corpus clips cut together | 37.7 dB | 0.988 |
 | `roll_watercolor.mp4` | a camera rolling 26° over an AI-generated watercolour | 35.9 dB | 0.996 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 32.4 dB | 0.993 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
 | `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.7 dB | 0.996 |
-| `cuts_three_shots.mp4` | three corpus clips cut together | 29.2 dB | 0.956 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
@@ -2473,3 +2473,52 @@ VAC's own decompile (26.3 against 30.3 dB). The clip's frames went through
 4:2:0 chroma subsampling, and the photograph had not. A mosaic built from
 the frames inherits what the frames are; that is what makes it the right
 thing to fit.
+
+## v1.20 — A slow mover is not scenery
+
+`cuts_three_shots` is three corpus clips cut together. Each of them scores
+33.9–44.6 dB alone, but together they scored 29.2. The first shot,
+`outlined_ui` cut to its first 45 frames, came back at 24 dB.
+
+The static layer (v0.8) separates scenery from movers with a per-pixel
+temporal median. To a median, anything that covers a pixel for more than
+half the shot is scenery. The outlined card slides at 100 px/s. In 1.5 s
+the middle of its top and bottom edges is covered 85% of the time; in the
+full 3 s clip, 43%. So in the short shot those edges were stripped from
+every frame and written as two static bars. With its edges stripped, what
+was left of the card came apart into fragments.
+
+No per-pixel statistic can tell those pixels from a painted line: they hold
+the edge's colour in most of the frames. What tells them apart is what the
+reconstruction makes of them. When the winning candidate has static
+shapes, its segmentation and background are now decompiled once more
+without the layer. That version is kept when it measures twice as good,
+the bar a raster plate has to clear:
+
+| | with the layer | without |
+|---|---|---|
+| `outlined_ui`, first 45 frames, at the search | 22.15 dB, ink IoU 0.811 | **33.54 dB**, ink IoU 0.985 |
+| `real_loader`, at the search | 25.75 dB, ink IoU 0.732 | 26.14 dB, ink IoU 0.707 |
+
+The bar matters. Candidates are compared before the passes that improve
+the winner, and a near tie there says nothing about the result. Taken on a
+0.058 margin, the loader's layerless version finished worse: ink IoU 0.864
+→ 0.806, with 43% more bytes. The card wins by 2.8.
+
+| clip | v1.19 | v1.20 |
+|---|---|---|
+| `cuts_three_shots.mp4` | 29.17 dB, ink IoU 0.956 | **37.70 dB**, ink IoU **0.988** |
+
+Every other corpus clip is unchanged. A new frontier test slides an
+outlined card past a static square over 45 frames. With the layer assumed,
+it came back as three static bars and eight fragments of the card's sides.
+Measured against the layer's absence, it comes back as the card and the
+square, exactly.
+
+The v1.16 note on forced slices blamed the same thing: each 1-second
+slice's static layer reading the slow card as scenery. Re-measured now,
+that's wrong. With 1-second slices `slide_in_card` still loses 9.4 dB
+(35.24 against 44.63), and v1.20 doesn't change it. The slice with the card
+at rest is exact (59 dB). The loss is in the first slice, where the card
+enters from off-screen: its first keyframe puts it at x = −145.6, partly
+visible, where the source has it at −180, hidden (24.9 dB at frame 0).

@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.19, default quality 50) and is
+table re-measured 2026-10-13 at v1.20, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -92,9 +92,13 @@ finished after 25 minutes. What remains is a single shot longer than the
 budget allows (5.4 s of 720p). It is split into equal slices that are
 decompiled independently, so a movement crossing a slice boundary restarts
 there. In a deliberately tiny-budget test (1 s slices) the sliding card
-lost 9 dB to each slice's static layer reading the slow card as scenery.
-Overlapping the slices, or carrying the static layer and tracks across them,
-would close this.
+loses 9.4 dB (35.24 against 44.63). **Correction (v1.20):** this file used
+to blame each slice's static layer reading the slow card as scenery.
+Re-measured, the slice with the card at rest is exact (59 dB). The loss is
+in the first slice, where the card enters from off-screen and its first
+keyframe puts it at x = −145.6, partly visible, where the source has it at
+−180, hidden (24.9 dB at frame 0). Overlapping the slices, or carrying
+tracks across them, would close this.
 
 ---
 
@@ -412,6 +416,15 @@ picture taken out of them, would close it.
   `kenburns_watercolor` 30.29 → **32.39**, `slideshow_dissolve` 29.16 →
   **29.72**.
 
+- **v1.20 — a slow mover is not scenery.** To the static layer's
+  temporal median, anything covering a pixel for over half a shot is
+  scenery. A card sliding at 100 px/s had the middle of its edges stripped
+  as two static bars, and the rest of it fragmented. When the winner has
+  static shapes, it's now decompiled once more without the layer, and that
+  version is kept when it measures twice as good (the plate's bar; a
+  0.058 search-stage margin had cost `real_loader` ink IoU 0.864 → 0.806).
+  `cuts_three_shots` 29.17 → **37.70 dB**.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -427,11 +440,11 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
 | `real_bouncing_ball.gif` | 0.9905 | 0.9885 | 1.5 | 46.37 | 0.6% | 2 |
 | `mandelbrot.mp4` | 0.9898 | 0.9843 | 149.2 | 26.39 | 0.5% | 2 |
+| `cuts_three_shots.mp4` | 0.9880 | 0.9286 | 11.1 | 37.70 | 0.7% | 7 |
 | `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `pan_portrait.mp4` | 0.9708 | 0.9587 | 3.6 | 42.54 | 1.4% | 1 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
-| `cuts_three_shots.mp4` | 0.9555 | 0.8438 | 78.8 | 29.17 | 0.7% | 8 |
 | `real_newtons_cradle.gif` | 0.9204 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
 | `real_pendulum.gif` | 0.6430 | 0.5445 | 331.5 | 22.93 | 4.8% | 27 |

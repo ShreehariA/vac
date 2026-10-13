@@ -79,11 +79,11 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 17,204 | 3.3× smaller | 69.7 | 29.70 | 0.9595 | 9 | 12 |
-| 25 | 20,664 | 2.8× smaller | 69.2 | 29.73 | 0.9604 | 9 | 19 |
-| 50 | 28,473 | 2.0× smaller | 78.8 | 29.17 | 0.9555 | 8 | 36 |
-| 75 | 38,631 | 1.5× smaller | 75.7 | 29.34 | 0.9587 | 8 | 57 |
-| 100 | 62,950 | 0.9× smaller | 75.7 | 29.34 | 0.9594 | 8 | 63 |
+| 0 | 16,896 | 3.4× smaller | 12.0 | 37.34 | 0.9861 | 7 | 10 |
+| 25 | 20,356 | 2.8× smaller | 11.6 | 37.50 | 0.9870 | 7 | 17 |
+| 50 | 28,495 | 2.0× smaller | 11.1 | 37.70 | 0.9880 | 7 | 38 |
+| 75 | 39,258 | 1.5× smaller | 7.4 | 39.43 | 0.9922 | 7 | 73 |
+| 100 | 64,157 | 0.9× smaller | 6.8 | 39.83 | 0.9934 | 7 | 93 |
 
 ### `fade_through_black.mp4` — source file 78 KB
 

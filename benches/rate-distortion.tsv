@@ -7,11 +7,11 @@
 # residual / psnr_db / ink_iou are the DISTORTION of its reconstruction.
 # source_bytes is the input video file, for scale.
 input	quality	vac_bytes	source_bytes	residual	psnr_db	ink_iou	shapes	keyframes
-cuts_three_shots.mp4	0	17204	57250	69.67	29.70	0.9595	9	12
-cuts_three_shots.mp4	25	20664	57250	69.23	29.73	0.9604	9	19
-cuts_three_shots.mp4	50	28473	57250	78.79	29.17	0.9555	8	36
-cuts_three_shots.mp4	75	38631	57250	75.72	29.34	0.9587	8	57
-cuts_three_shots.mp4	100	62950	57250	75.70	29.34	0.9594	8	63
+cuts_three_shots.mp4	0	16896	57250	12.01	37.34	0.9861	7	10
+cuts_three_shots.mp4	25	20356	57250	11.58	37.50	0.9870	7	17
+cuts_three_shots.mp4	50	28495	57250	11.05	37.70	0.9880	7	38
+cuts_three_shots.mp4	75	39258	57250	7.42	39.43	0.9922	7	73
+cuts_three_shots.mp4	100	64157	57250	6.76	39.83	0.9934	7	93
 fade_through_black.mp4	0	17355	79876	5.40	40.80	0.9818	5	17
 fade_through_black.mp4	25	20801	79876	4.60	41.50	0.9905	5	27
 fade_through_black.mp4	50	29032	79876	3.90	42.22	0.9918	5	53

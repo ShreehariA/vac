@@ -460,6 +460,75 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.20 — a slow mover is not scenery.**
+///
+/// The static layer (v0.8) is a per-pixel temporal median, and to a median
+/// anything covering a pixel for more than half a shot is scenery. An
+/// outlined card sliding at 100 px/s covers the middle of its own top and
+/// bottom edges for 85% of a 1.5 s shot. Those edges were stripped from
+/// every frame and written as two static bars, and what was left of the
+/// card fragmented: the first shot of `cuts_three_shots`, which is
+/// `outlined_ui` cut to 45 frames, came back at 24 dB against 33.9 for the
+/// whole clip. The static layer is now measured against its absence: when
+/// the winning candidate has static shapes, its segmentation and background
+/// are decompiled once more without the layer, and the better is kept. Here
+/// the card must come back as one rect that slides, at better than 40 dB.
+/// With the layer assumed it came back as two static bars and eight
+/// fragments of its sides; measured against its absence, as the card and
+/// the square, exactly.
+#[test]
+fn a_slow_mover_is_not_scenery() {
+    let source = vac::parse(
+        "canvas 480x320 @30fps
+
+scene main {
+  duration 1500ms
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #1a182e
+
+  let square = rect(211, 131, 58, 58)
+  square.fill = none
+  square.stroke = #f1bd3f
+  square.stroke_width = 2
+
+  let card = rect(22, 32, 136, 76)
+  card.fill = none
+  card.stroke = #3fbffe
+  card.stroke_width = 4
+
+  animate card {
+    0ms -> position(22, 32)
+    1500ms -> position(172, 32)
+    easing: linear
+  }
+}
+",
+    )
+    .expect("parse");
+    let rendered = vac::render(&source).expect("render");
+    let frames = vac::rendered_to_video_frames(&rendered, source.canvas.fps);
+    let recovered = vac::decompile_frames(frames.clone(), &DecompileOptions::default()).expect("decompile");
+    let fid = vac::measure(&frames, &recovered).expect("measure");
+    let stmts: Vec<&Statement> = recovered.scenes.iter().flat_map(|s| &s.statements).collect();
+    let slides = stmts.iter().any(|st| match st {
+        Statement::Animate(a) => {
+            let xs: Vec<f32> = a
+                .keyframes
+                .iter()
+                .filter_map(|k| k.transforms.iter().find_map(|t| match t {
+                    Transform::Position(x, _) => Some(*x),
+                    _ => None,
+                }))
+                .collect();
+            xs.len() >= 2 && xs.last().unwrap() - xs.first().unwrap() > 100.0
+        }
+        _ => false,
+    });
+    assert!(slides, "the card comes back sliding: {}", vac::to_string(&recovered));
+    assert!(fid.psnr_db > 40.0, "slow card: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.19 — a mosaic fitted through the renderer.**
 ///
 /// A camera plate's mosaic was the per-pixel median of every frame warped
