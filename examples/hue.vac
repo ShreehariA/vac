@@ -1,0 +1,37 @@
+// VAC v1.24 fixture: a background that changes colour. The background
+// cycles red, yellow, green, cyan and back over three seconds while a white
+// card holds still and a ball crosses in front. Nothing about the shapes
+// changes: the decompiler must keyframe the background's own fill, not cut
+// the clip into shots or fade it through black.
+
+canvas 480x320 @30fps
+
+scene main {
+  duration 3s
+
+  let bg = rect(0, 0, 480, 320)
+  bg.fill = #c04040
+
+  animate bg {
+    0ms    -> fill(#c04040)
+    750ms  -> fill(#c0b040)
+    1500ms -> fill(#40c060)
+    2250ms -> fill(#40a0c0)
+    3s     -> fill(#c04040)
+    easing: linear
+  }
+
+  let card = rect(170, 110, 140, 100)
+  card.fill = #ffffff
+  card.stroke = none
+
+  let ball = ellipse(60, 260, 22, 22)
+  ball.fill = #202020
+  ball.stroke = none
+
+  animate ball {
+    0ms -> position(60, 260)
+    3s  -> position(420, 260)
+    easing: linear
+  }
+}

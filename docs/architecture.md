@@ -1,6 +1,6 @@
 # How VAC decompiles a video
 
-This is the pipeline as of v1.23: what runs, in what order, and what decides
+This is the pipeline as of v1.24: what runs, in what order, and what decides
 each step. The README is a version-by-version log, and this is the map. One
 rule runs through all of it: **measure, don't classify.** Wherever there is a
 choice, every option is built, rendered back to pixels, and scored against
@@ -90,7 +90,9 @@ shot.
   overlap, flat or gradient fill, stroke, rotation, colour animation. A
   track that changes size is written as a uniform `scale(s)`, or as a
   stretch `scale(sx, sy)` when its width and height part for a sustained
-  run (v1.21): a progress bar filling, a chart bar rising.
+  run (v1.21): a progress bar filling, a chart bar rising. The background
+  is keyframed in colour when every frame's measured background strays
+  from the clip's gradually (v1.24).
 - **Static layer or none (v1.20).** When the winner has static shapes, its
   segmentation and background are decompiled once more without the static
   layer, and that is kept when it measures twice as good: a mover that
@@ -111,7 +113,8 @@ shot.
 ### One shot: the passes on the winner
 
 - **Audit (v1.7).** Each shape is taken out in turn, and it stays only if
-  the clip is better with it.
+  the clip is better with it. The background's colour keyframes go
+  through the same test, priced in bytes (v1.24).
 - **Refine (v1.9).** Each shape's size, position offset and stroke width are
   nudged in 0.5, 0.2 and 0.1 px steps toward where the pixels agree.
 - **Motion (v1.11).** Each mover's own pixels are registered against every

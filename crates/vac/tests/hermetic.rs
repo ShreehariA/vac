@@ -134,6 +134,7 @@ const BASELINE: &[(&str, f64, f64)] = &[
     ("fade.vac", 1.0000, 0.01),
     ("grow.vac", 0.9769, 13.11),
     ("hd_camera.vac", 1.0000, 1.01),
+    ("hue.vac", 1.0000, 0.80),
     ("late_entry.vac", 1.0000, 0.00),
     ("occlusion.vac", 0.9999, 0.01),
     ("outlined.vac", 1.0000, 1.08),

@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.23, default quality 50) and is
+table re-measured 2026-10-13 at v1.24, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -140,6 +140,29 @@ push along one axis. A circle opening (`xfade` circleopen, 29.9 dB),
 a clock wipe or a diagonal wipe is none of them, and comes back with its
 transition frames poorly fitted (worst frame 18.6 dB). A `clip()` window of
 any shape, measured the same way, would cover them.
+
+---
+
+## 7. Text that scrolls
+
+**Status: open. Measured on an ffmpeg credits roll (not yet a corpus clip).**
+
+Eight lines of text scrolling up a flat background come back at **24.2 dB**,
+ink IoU 0.59, as 245 fragments. The text moves as one rigid sheet, which
+is a camera panning over a tall picture of it, but on a flat background
+the camera measures no motion where there is nothing but background.
+Every glyph is instead a small mover of its own.
+
+---
+
+## 8. A spinner
+
+**Status: open. Measured on an ffmpeg spinner (not yet a corpus clip).**
+
+A 270° arc turning a full circle a second comes back at **26.6 dB**, ink
+IoU 0.70: a raster plate and 34 shapes. It turns 12° a frame, and its
+outline is the same at every angle but one gap, so the tracker cannot tell
+which way it has turned.
 
 ---
 
@@ -478,6 +501,13 @@ any shape, measured the same way, would cover them.
   wipe-and-push slideshow went 283 → **132 KB** at the same 37.23 dB, the
   dissolve slideshow 175 → **93 KB** for 0.13 dB.
 
+- **v1.24 — a background that changes colour.** A shot's background was
+  one colour, though every frame's is measured. When a frame's strays more
+  than 12 levels from the clip's, changing gradually (no frame jumps more
+  than 24: that is a cut), the background is keyframed like any colour
+  channel, and the keyframes stay only when the clip measures better with
+  them than their bytes cost. A hue cycle went 14.66 → **45.88 dB**.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -485,6 +515,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
+| `hue_cycle.mp4` | 1.0000 | 1.0000 | 1.7 | 45.88 | 0.0% | 2 |
 | `slideshow_wipe_push.mp4` | 0.9976 | 0.9919 | 12.3 | 37.23 | 0.1% | 7 |
 | `roll_watercolor.mp4` | 0.9958 | 0.9933 | 16.9 | 35.85 | 0.3% | 1 |
 | `testsrc2.mp4` | 0.9954 | 0.9865 | 357.2 | 22.60 | 0.4% | 63 |
@@ -492,7 +523,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `slideshow_dissolve.mp4` | 0.9945 | 0.9686 | 71.5 | 29.59 | 0.2% | 4 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
 | `kenburns_watercolor.mp4` | 0.9932 | 0.9881 | 37.5 | 32.39 | 0.4% | 1 |
-| `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
+| `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.18 | 0.4% | 5 |
 | `real_bouncing_ball.gif` | 0.9905 | 0.9885 | 1.5 | 46.37 | 0.6% | 2 |
 | `mandelbrot.mp4` | 0.9898 | 0.9843 | 149.2 | 26.39 | 0.5% | 2 |
 | `cuts_three_shots.mp4` | 0.9880 | 0.9286 | 11.1 | 37.70 | 0.7% | 7 |

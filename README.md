@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.23)
+## Where VAC is today (v1.24)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -43,7 +43,7 @@ animate shape_1 {
 **What it recovers:** shots, each as its own scene; fades to and from
 black or white; dissolves, wipes and pushes between shots; rects, ellipses and traced paths, by measured fit;
 position, scale (uniform, or stretching along one axis), rotation, opacity
-and colour over time; linear and radial
+and colour over time, the background's colour included; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
 scenery becomes one embedded `image()` with the moving shapes still written
@@ -71,6 +71,7 @@ keyframes are re-measured by registering its own pixels across frames.
 |---|---|---|---|
 | `vac_control.mp4` | VAC's own output, two moving balls | 46.6 dB | 0.971 |
 | `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 46.4 dB | 0.991 |
+| `hue_cycle.mp4` | ffmpeg background cycling its hue behind a card | 45.9 dB | 1.000 |
 | `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
 | `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.971 |
 | `fade_through_black.mp4` | a card fading out, then a photo pan fading in | 42.2 dB | 0.992 |
@@ -2710,3 +2711,53 @@ The dissolve trades 0.13 dB for 81 KB, 0.002 dB per KB against a price of
 0.04. Clips with one picture grow by its `asset` line (81 bytes), and
 `real_double_pendulum` moved 0.03 dB: its sprites price themselves by the
 written file, which now writes pictures differently.
+
+## v1.24 — A background that changes colour
+
+After the transition matrix I made a second one: seven everyday
+motion-graphics clips none of the corpus covers. The text is rendered by
+ImageMagick and animated by ffmpeg, since this ffmpeg has no `drawtext`.
+
+| clip | v1.23 | |
+|---|---|---|
+| a title fading in | 45.28 dB | fine |
+| a zoom out of a photo (reverse Ken Burns) | 34.35 dB | fine: a camera |
+| a lower third sliding in over a photo | 32.15 dB | worst frame 19.2 dB |
+| a logo bouncing around the frame | 31.72 dB | fine |
+| a spinner, a 270° arc turning | 26.60 dB, ink IoU 0.70 | frontier item 8 |
+| a credits roll, text scrolling up | 24.24 dB, ink IoU 0.59 | frontier item 7 |
+| **a background cycling its hue behind a card** | **14.66 dB** | **this release** |
+
+The background was one colour for a whole shot, its median, though the
+detector measures every frame's. A background cycling its hue had nothing
+to describe it with, so the pipeline reached for what it had: it cut the
+clip into three shots, faded them through black and dissolved between
+them. Now, when a frame's background strays more than 12 levels from the
+clip's, the background is keyframed like any colour channel:
+
+```vac
+let bg = rect(0, 0, 480, 320)
+animate bg {
+  0ms    -> fill(#bf3f40)
+  766ms  -> fill(#448d00)
+  1500ms -> fill(#0d8c8c)
+  …
+}
+```
+
+Two rules keep it in its lane. It must change **gradually**: a jump of
+more than 24 levels from one frame to the next is a cut, and shots are
+scenes of their own. Without that rule `shots.vac` came back as one scene
+with a background switching colour at each cut. And it must **earn its
+place**: the clip is measured with the keyframes and without them, and
+they stay only when they're worth more than their bytes.
+
+| clip | v1.23 | v1.24 |
+|---|---|---|
+| `hue_cycle.mp4` (new corpus clip) | 14.66 dB, 9 shapes, 19 KB | **45.88 dB**, 2 shapes, **791 bytes** |
+| `hue.vac` (new fixture), hermetic | — | **49.10 dB**, one scene, its background keyframed |
+
+`fade_through_black` moved 0.04 dB. A fade's restored frames drift a few
+levels in background colour, and the keyframes do pay for themselves on
+the restored frames they're measured against. Every other corpus clip is
+unchanged.

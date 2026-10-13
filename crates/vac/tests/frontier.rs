@@ -460,6 +460,33 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.24 — a background that changes colour.**
+///
+/// A shot's background was one colour, its median, though every frame's is
+/// measured. A background cycling its hue came back as fades through black
+/// and dissolves at 14.7 dB. When a frame's background strays from the
+/// clip's by more than 12 levels, and it never jumps by more than 24 from
+/// one frame to the next (that is a cut, and shots are scenes of their own),
+/// the background is keyframed like any colour channel. `hue.vac` cycles its
+/// background through four colours behind a still card and a moving ball:
+/// it must come back as one scene with its background keyframed, at better
+/// than 45 dB.
+#[test]
+fn a_background_that_changes_colour_is_keyframed() {
+    let (_, recovered, fid) = hermetic("hue.vac");
+    assert_eq!(recovered.scenes.len(), 1, "one scene: {}", vac::to_string(&recovered));
+    let keys = recovered.scenes[0]
+        .statements
+        .iter()
+        .find_map(|st| match st {
+            Statement::Animate(a) if a.target == "bg" => Some(a.keyframes.len()),
+            _ => None,
+        })
+        .unwrap_or(0);
+    assert!(keys >= 4, "the background's colour is keyframed: {keys} keyframes");
+    assert!(fid.psnr_db > 45.0, "hue.vac: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.23 — a picture is written once.**
 ///
 /// Every scene embedded its own copy of every picture it drew, as a base64

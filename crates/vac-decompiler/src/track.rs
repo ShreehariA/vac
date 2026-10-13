@@ -348,6 +348,47 @@ pub fn build_document(
             property: Property::Fill,
             value: Value::Color(bg_color),
         });
+        // v1.24: the background's own colour over time. Every frame's is
+        // measured (its corners, its border); when one strays further
+        // than BG_COLOUR_DRIFT from the clip's median, the background is
+        // keyframed like any colour channel — a background cycling its hue
+        // came back as fades and dissolves at 14.7 dB.
+        let cols: Vec<Color> = detections.iter().map(|d| d.bg).collect();
+        let drift = |c: &Color| {
+            [(c.r, bg_color.r), (c.g, bg_color.g), (c.b, bg_color.b)]
+                .iter()
+                .map(|&(a, b)| (a as f32 - b as f32).abs())
+                .fold(0.0f32, f32::max)
+        };
+        // Gradually: a background that changes colour from one frame to
+        // the next by more than BG_COLOUR_STEP is a cut, and shots are
+        // scenes of their own.
+        let gradual = cols.windows(2).all(|w| {
+            [(w[0].r, w[1].r), (w[0].g, w[1].g), (w[0].b, w[1].b)]
+                .iter()
+                .all(|&(a, b)| (a as f32 - b as f32).abs() <= BG_COLOUR_STEP)
+        });
+        if cols.len() >= 3 && gradual && cols.iter().any(|c| drift(c) > BG_COLOUR_DRIFT) {
+            let times: Vec<f32> = detections.iter().map(|d| d.t_ms as f32).collect();
+            let mut keep = vec![0, cols.len() - 1];
+            for ch in 0..3 {
+                let v: Vec<f32> = cols.iter().map(|c| [c.r, c.g, c.b][ch] as f32).collect();
+                keep.extend(rdp_1d(&times, &v, tol.opacity_levels));
+            }
+            keep.sort_unstable();
+            keep.dedup();
+            statements.push(Statement::Animate(Animation {
+                target: "bg".into(),
+                keyframes: keep
+                    .into_iter()
+                    .map(|i| Keyframe {
+                        time_ms: detections[i].t_ms,
+                        transforms: vec![Transform::Fill(cols[i])],
+                    })
+                    .collect(),
+                easing: Easing::Linear,
+            }));
+        }
     }
 
     // v0.8: the persistent scene is emitted first, so it renders behind
@@ -514,6 +555,15 @@ pub fn build_document(
 /// Smallest max/min scale ratio across a track that is claimed as a real
 /// size change rather than anti-aliasing jitter.
 const SCALE_MIN_RATIO: f32 = 1.12;
+/// How far, in levels on any channel, a frame's measured background may
+/// stray from the clip's before the background is keyframed (v1.24): past
+/// a codec's noise and a GIF palette's wobble, short of anything a viewer
+/// would call the same colour.
+const BG_COLOUR_DRIFT: f32 = 12.0;
+/// The most a keyframed background may change between two frames, in
+/// levels on any channel (v1.24); more is a cut. A hue cycling a third of
+/// the wheel a second moves 8 levels a frame.
+const BG_COLOUR_STEP: f32 = 24.0;
 /// How far a sample's rx/ry may drift from the track's median aspect and
 /// still count as a measurement of its uniform scale.
 const SCALE_MAX_ASPECT_DRIFT: f32 = 0.15;

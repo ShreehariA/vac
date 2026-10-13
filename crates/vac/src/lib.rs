@@ -1883,11 +1883,16 @@ fn decompile_shot(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         Some(f) => f,
         None => measure(frames, &chosen.document)?,
     };
+    let (document, fidelity) = if opts.audit {
+        audit_background(frames, chosen.document, fidelity, opts.quality)?
+    } else {
+        (chosen.document, fidelity)
+    };
     let a = if opts.audit {
-        audit_measured(frames, chosen.document, fidelity)?
+        audit_measured(frames, document, fidelity)?
     } else {
         Audit {
-            document: chosen.document,
+            document,
             fidelity,
             removed: Vec::new(),
         }
@@ -1919,6 +1924,24 @@ fn decompile_shot(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         sprites,
         ..chosen
     })
+}
+
+/// The background's colour keyframes (v1.24) earn their place like any
+/// shape: the clip is measured without them, the background held at its
+/// declared fill, and they stay only when the clip is better with them by
+/// more than their bytes cost at the sprite price.
+fn audit_background(frames: &[VideoFrame], doc: Document, fid: Fidelity, quality: f32) -> Result<(Document, Fidelity)> {
+    let keyed = |st: &Statement| matches!(st, Statement::Animate(a) if a.target == "bg");
+    if !doc.scenes.iter().any(|s| s.statements.iter().any(keyed)) {
+        return Ok((doc, fid));
+    }
+    let mut without = doc.clone();
+    for s in &mut without.scenes {
+        s.statements.retain(|st| !keyed(st));
+    }
+    let fw = measure(frames, &without)?;
+    let bytes = vac_format::write(&doc).len().saturating_sub(vac_format::write(&without).len()) as f64;
+    Ok(if improvement(&fid, &fw) > byte_price(quality) * bytes { (doc, fid) } else { (without, fw) })
 }
 
 /// Frames with more pixels than this are searched at a reduced size (v1.14).

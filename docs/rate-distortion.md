@@ -89,11 +89,21 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 17,436 | 4.6× smaller | 5.4 | 40.80 | 0.9818 | 5 | 17 |
-| 25 | 20,882 | 3.8× smaller | 4.6 | 41.50 | 0.9905 | 5 | 27 |
-| 50 | 29,113 | 2.7× smaller | 3.9 | 42.22 | 0.9918 | 5 | 53 |
-| 75 | 39,439 | 2.0× smaller | 3.7 | 42.48 | 0.9942 | 5 | 84 |
-| 100 | 63,261 | 1.3× smaller | 3.4 | 42.81 | 0.9949 | 5 | 96 |
+| 0 | 17,436 | 4.6× smaller | 5.3 | 40.84 | 0.9818 | 5 | 17 |
+| 25 | 20,997 | 3.8× smaller | 4.9 | 41.26 | 0.9905 | 5 | 30 |
+| 50 | 29,312 | 2.7× smaller | 3.9 | 42.18 | 0.9918 | 5 | 59 |
+| 75 | 39,751 | 2.0× smaller | 3.7 | 42.49 | 0.9942 | 5 | 94 |
+| 100 | 63,603 | 1.3× smaller | 3.2 | 43.03 | 0.9949 | 5 | 107 |
+
+### `hue_cycle.mp4` — source file 21 KB
+
+| quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
+|---|---|---|---|---|---|---|---|
+| 0 | 540 | 39.1× smaller | 6.9 | 39.77 | 1.0000 | 2 | 11 |
+| 25 | 595 | 35.5× smaller | 5.2 | 40.95 | 1.0000 | 2 | 13 |
+| 50 | 791 | 26.7× smaller | 1.7 | 45.88 | 1.0000 | 2 | 20 |
+| 75 | 985 | 21.4× smaller | 0.7 | 49.50 | 1.0000 | 2 | 27 |
+| 100 | 1,370 | 15.4× smaller | 0.4 | 52.53 | 1.0000 | 2 | 41 |
 
 ### `kenburns_watercolor.mp4` — source file 396 KB
 
