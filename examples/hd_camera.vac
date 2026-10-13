@@ -1,0 +1,28 @@
+// VAC v1.14 fixture: camera.vac at 960x540 — just over the size above
+// which the measured search runs on a smaller copy of the clip. The scene
+// under the zoom and the ball crossing it must come back exactly as they
+// do at the smaller size: the decision is made small, the decompile full.
+
+canvas 960x540 @30fps
+
+scene main {
+  duration 1s
+
+  let scene = image(0, 0, 960, 540, "data:image/png;base64,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")
+
+  animate scene {
+    0ms -> position(0, 0), scale(1)
+    1s  -> position(-130, -75), scale(1.25)
+    easing: linear
+  }
+
+  let ball = ellipse(160, 420, 36, 36)
+  ball.fill = #f4f4f4
+  ball.stroke = none
+
+  animate ball {
+    0ms -> position(160, 420)
+    1s  -> position(780, 140)
+    easing: linear
+  }
+}

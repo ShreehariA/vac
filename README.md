@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.13)
+## Where VAC is today (v1.14)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -2204,3 +2204,40 @@ The faded clips even come back slightly better than their unfaded originals
 did (45.37 against 44.63, and 42.62 against 42.47). A single shape fading on
 its own (`fade.vac`) is not mistaken for a fade of the picture. `--no-fades`
 turns the pass off.
+
+## v1.14 — HD, searched small
+
+Every candidate of the measured search decompiles and measures the whole
+clip, and each holds its own copy of it. That's fine at the corpus's sizes
+(the largest is 459k pixels), but HD footage paid for it. Three seconds of a
+720p camera pan took 64 s and 2.4 GB.
+
+v1.14 decides small and decompiles full:
+
+- **Above 500k pixels the search runs on a smaller copy of the clip**,
+  shrunk by a whole factor (2 for 720p, 3 for 1080p), box-filtered, with the
+  same timing. Only its decision (segmentation, background rule, plate) is
+  replayed at full size, as a single candidate. The decision is still
+  measured, just on the smaller clip; audit, refinement, motion and sprites
+  then run at full size as before.
+- **Camera tracking stops at a working size of about 700 px.** A view
+  doesn't depend on resolution, and the pattern search reaches a fiftieth of
+  a level pixel.
+- **The mosaic samples the 8-bit frames directly** instead of holding float
+  copies of 45 of them (11 MB each at 720p).
+- **The fade pass is gated on the frame means.** The chained reading drifts
+  under a moving camera and had read the pan as a 15% fade, which cost a
+  whole second decompile before measurement threw it out.
+
+| 3 s 720p camera pan | v1.13 | v1.14 |
+|---|---|---|
+| time | 64 s | **33 s** |
+| peak memory | 2.44 GB | **1.66 GB** |
+| reconstruction | 44.28 dB | **44.74 dB** |
+
+The new `hd_camera.vac` fixture (the camera fixture at 960×540) comes back
+from the half-size decision with the camera and the ball exactly placed, at
+48.1 dB. Forcing the replayed decision to vectors fails its test, so the
+test really exercises the small search. Every corpus clip is below the
+threshold and byte-for-byte unchanged. Long HD clips are still open: they
+need decompiling shot by shot without holding every frame at once.

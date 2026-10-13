@@ -371,6 +371,12 @@ fn fade_track(frames: &[VideoFrame]) -> Vec<Fade> {
             best = Some((resid, Fade { colour, alpha }));
         }
     }
+    // The means gate the pass: a fade moves them, and a moving camera
+    // does not — while the chained reading below drifts under a camera
+    // (a slow pan read as a 15% fade, and cost a second decompile).
+    if best.as_ref().is_none_or(|(_, f)| f.alpha.iter().cloned().fold(1.0, f32::min) > FADE_MAX_ALPHA) {
+        return Vec::new();
+    }
     // Frames that are all one colour are the fade itself, at its deepest:
     // they name the fade colour outright, and they divide the clip into
     // stretches that each fade toward or away from their own picture — a
@@ -784,7 +790,79 @@ fn decompile_shot(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
     })
 }
 
+/// Frames with more pixels than this are searched at a reduced size (v1.14).
+/// Every corpus clip is below it (the largest, `real_pendulum`, is 459k).
+const SEARCH_MAX_PIXELS: u64 = 500_000;
+
+/// The measured search, made affordable for large frames (v1.14). Every
+/// candidate of the search decompiles and measures the whole clip, and at
+/// 720p each holds its own copy of it: 3 s of a camera pan took ~100 s and
+/// 2.5 GB. Above `SEARCH_MAX_PIXELS` the search runs on the clip shrunk by
+/// a whole factor (box-filtered, same timing), and only its decision — the
+/// segmentation, the background rule, the plate — is replayed at full
+/// size, as a single candidate. The decision is still measured, on the
+/// smaller clip; everything after it (audit, refinement, motion, sprites)
+/// runs at full size as before.
 fn choose(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
+    let (w, h) = (frames[0].width as u64, frames[0].height as u64);
+    let undecided = opts.segmentation == Segmentation::Auto
+        || opts.background == Background::Auto
+        || opts.plate == Plate::Auto;
+    if w * h <= SEARCH_MAX_PIXELS || !undecided || frames.iter().any(|f| f.width as u64 != w || f.height as u64 != h) {
+        return choose_full(frames, opts);
+    }
+    let factor = ((w * h) as f64 / SEARCH_MAX_PIXELS as f64).sqrt().ceil() as u32;
+    let small = downscale(frames, factor);
+    let picked = choose_full(&small, opts)?;
+    let replay = DecompileOptions {
+        segmentation: picked.segmentation,
+        background: picked.background,
+        plate: picked.plate,
+        ..*opts
+    };
+    let mut chosen = choose_full(frames, &replay)?;
+    chosen.fidelity = None;
+    Ok(chosen)
+}
+
+/// `frames` shrunk by a whole `factor` in each direction, each pixel the
+/// mean of the block it covers; timing unchanged.
+fn downscale(frames: &[VideoFrame], factor: u32) -> Vec<VideoFrame> {
+    let f = factor.max(1);
+    frames
+        .iter()
+        .map(|fr| {
+            let (w, h) = ((fr.width / f).max(1), (fr.height / f).max(1));
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    let mut acc = [0u32; 4];
+                    for dy in 0..f {
+                        for dx in 0..f {
+                            let (sx, sy) = ((x * f + dx).min(fr.width - 1), (y * f + dy).min(fr.height - 1));
+                            let p = ((sy * fr.width + sx) * 4) as usize;
+                            for c in 0..4 {
+                                acc[c] += fr.pixels[p + c] as u32;
+                            }
+                        }
+                    }
+                    let q = ((y * w + x) * 4) as usize;
+                    for c in 0..4 {
+                        pixels[q + c] = (acc[c] / (f * f)) as u8;
+                    }
+                }
+            }
+            VideoFrame {
+                width: w,
+                height: h,
+                pixels,
+                delay_ms: fr.delay_ms,
+            }
+        })
+        .collect()
+}
+
+fn choose_full(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chosen> {
     let segs: &[Segmentation] = match opts.segmentation {
         Segmentation::Auto => &[Segmentation::Components, Segmentation::Regions, Segmentation::Edges],
         Segmentation::Components => &[Segmentation::Components],

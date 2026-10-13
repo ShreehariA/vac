@@ -130,6 +130,27 @@ impl Level {
     }
 }
 
+/// Bilinear sample of an 8-bit frame at continuous point `p`, without
+/// converting the frame first — the mosaic reads dozens of frames at once,
+/// and a float copy of each costs 11 MB at 720p.
+fn sample_frame(f: &VideoFrame, p: (f32, f32)) -> Option<[f32; 3]> {
+    let (w, h) = (f.width as usize, f.height as usize);
+    let (x, y) = (p.0 - 0.5, p.1 - 0.5);
+    if x < -0.5 || y < -0.5 || x > w as f32 - 0.5 || y > h as f32 - 0.5 {
+        return None;
+    }
+    let (x, y) = (x.clamp(0.0, (w - 1) as f32), y.clamp(0.0, (h - 1) as f32));
+    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let mut out = [0f32; 3];
+    for (c, o) in out.iter_mut().enumerate() {
+        let at = |xx: usize, yy: usize| f.pixels[(yy * w + xx) * 4 + c] as f32;
+        *o = (at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy) + (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy;
+    }
+    Some(out)
+}
+
 /// A frame at successively halved sizes.
 fn pyramid(f: &VideoFrame, levels: usize) -> Vec<Level> {
     pyramid_from(Level::from_frame(f), levels)
@@ -241,24 +262,40 @@ pub fn track(frames: &[VideoFrame], reference: usize) -> Vec<View> {
 /// [`track`] on every `stride`-th frame only — the cheap first look that
 /// tells a still camera from a moving one. Untracked frames keep the
 /// identity view.
+/// The finest pyramid level the camera is searched at, as a width: a view
+/// does not depend on resolution, and the pattern search reaches a
+/// fiftieth of a level pixel, so on a 720p clip stopping at half size still
+/// places the camera to a twenty-fifth of a pixel (v1.14).
+const TRACK_MAX_WIDTH: u32 = 700;
+
+/// The first pyramid level at or below [`TRACK_MAX_WIDTH`].
+fn finest_level(width: u32) -> usize {
+    let mut k = 0;
+    while (width >> k) > TRACK_MAX_WIDTH && k < 3 {
+        k += 1;
+    }
+    k
+}
+
 pub fn track_every(frames: &[VideoFrame], reference: usize, stride: usize) -> Vec<View> {
-    const LEVELS: usize = 3;
+    let finest = finest_level(frames[0].width);
+    let levels = finest + 3;
     let stride = stride.max(1);
-    let rp = pyramid(&frames[reference], LEVELS);
+    let rp = pyramid(&frames[reference], levels);
     let mut views = vec![View::IDENTITY; frames.len()];
     let walk = |order: &mut dyn Iterator<Item = usize>, views: &mut Vec<View>| {
         let mut prev = View::IDENTITY;
         for t in order {
-            let fp = pyramid(&frames[t], LEVELS);
-            let mut v = at_level(prev, LEVELS - 1);
-            for k in (0..LEVELS).rev() {
-                if k != LEVELS - 1 {
+            let fp = pyramid(&frames[t], levels);
+            let mut v = at_level(prev, levels - 1);
+            for k in (finest..levels).rev() {
+                if k != levels - 1 {
                     v = at_level(from_level(v, k + 1), k);
                 }
                 let stride = if k == 0 { 2 } else { 1 };
                 v = search(&fp[k], &rp[k], v, 1.0, 0.01, stride);
             }
-            prev = from_level(v, 0);
+            prev = from_level(v, finest);
             views[t] = prev;
         }
     };
@@ -276,25 +313,26 @@ pub fn track_every(frames: &[VideoFrame], reference: usize, stride: usize) -> Ve
 /// the ball is gone from it; aligning to it, from the first pass's views,
 /// takes the bias out.
 pub fn refine_views(frames: &[VideoFrame], m: &Mosaic, first: &[View]) -> Vec<View> {
-    const LEVELS: usize = 2;
+    let finest = finest_level(frames[0].width);
+    let levels = finest + 2;
     let mut base = Level::from_frame(&m.image);
     base.origin = (m.x, m.y);
     base.density = m.density;
-    let mp = pyramid_from(base, LEVELS);
+    let mp = pyramid_from(base, levels);
     frames
         .iter()
         .zip(first)
         .map(|(f, &v0)| {
-            let fp = pyramid(f, LEVELS);
-            let mut v = at_level(v0, LEVELS - 1);
-            for k in (0..LEVELS).rev() {
-                if k != LEVELS - 1 {
+            let fp = pyramid(f, levels);
+            let mut v = at_level(v0, levels - 1);
+            for k in (finest..levels).rev() {
+                if k != levels - 1 {
                     v = at_level(from_level(v, k + 1), k);
                 }
                 let stride = if k == 0 { 2 } else { 1 };
                 v = search(&fp[k], &mp[k], v, 0.5, 0.004, stride);
             }
-            from_level(v, 0)
+            from_level(v, finest)
         })
         .collect()
 }
@@ -464,7 +502,6 @@ pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3], density: f32) 
     let (mw, mh) = (((x1 - x0) * density).round() as usize, ((y1 - y0) * density).round() as usize);
     let step = (frames.len() / MOSAIC_MAX_SAMPLES).max(1);
     let picked: Vec<usize> = (0..frames.len()).step_by(step).collect();
-    let levels: Vec<Level> = picked.iter().map(|&t| Level::from_frame(&frames[t])).collect();
     let mut pixels = vec![0u8; mw * mh * 4];
     let mut seen: Vec<(f32, [f32; 3])> = Vec::with_capacity(picked.len());
     let mut channel: Vec<f32> = Vec::with_capacity(picked.len());
@@ -472,8 +509,8 @@ pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3], density: f32) 
         for mx in 0..mw {
             let q = (x0 + (mx as f32 + 0.5) / density, y0 + (my as f32 + 0.5) / density);
             seen.clear();
-            for (n, &t) in picked.iter().enumerate() {
-                if let Some(rgb) = levels[n].sample(views[t].to_frame(q)) {
+            for &t in &picked {
+                if let Some(rgb) = sample_frame(&frames[t], views[t].to_frame(q)) {
                     seen.push((views[t].scale, rgb));
                 }
             }

@@ -460,6 +460,37 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **PARTLY FIXED in v1.14 — HD frames are searched small.**
+///
+/// Every candidate of the measured search decompiles and measures the whole
+/// clip, and at 720p each held its own copy: 3 s of a camera pan took ~64 s
+/// and 2.4 GB. Above 500k pixels the search now runs on the clip shrunk by
+/// a whole factor and only its decision is replayed at full size; camera
+/// tracking stops at a working size of ~700 px; the mosaic samples frames
+/// directly instead of float copies of them. The same pan: 33 s, 1.7 GB,
+/// and a better result (44.3 → 44.7 dB). Long HD clips are still open.
+///
+/// `hd_camera.vac` is the camera fixture at 960×540, over the threshold: the
+/// decision made on the half-size copy must still be the camera, and the
+/// full-size decompile must place it and the ball as exactly as the small
+/// fixture does.
+#[test]
+fn hd_frames_are_decided_small_and_decompiled_full() {
+    let (_, recovered, fid) = hermetic("hd_camera.vac");
+    assert_eq!(recovered.canvas.width, 960, "the output is full size");
+    let stmts: Vec<&Statement> = recovered.scenes.iter().flat_map(|s| &s.statements).collect();
+    assert!(
+        stmts.iter().any(|st| matches!(st, Statement::Animate(a) if a.target == "plate")),
+        "the decision replayed at full size is the camera"
+    );
+    let ball = stmts.iter().find_map(|st| match st {
+        Statement::Let { shape: vac::Shape::Ellipse { rx, .. }, .. } => Some(*rx),
+        _ => None,
+    });
+    assert!(ball.is_some_and(|r| (r - 36.0).abs() <= 0.5), "the ball, at full size: {ball:?}");
+    assert!(fid.psnr_db > 44.0, "hd_camera.vac PSNR {:.2}", fid.psnr_db);
+}
+
 /// **FIXED in v1.13 — fades.**
 ///
 /// A fade blends the whole picture toward black or white, and through v1.12

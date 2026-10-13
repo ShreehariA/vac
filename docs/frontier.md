@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.13, default quality 50) and is
+table re-measured 2026-10-13 at v1.14, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -79,20 +79,19 @@ always true; only one of them was measurable.
 
 ---
 
-## 3. Scale: HD footage is slow and memory-hungry
+## 3. Scale: long HD clips
 
-**Status: open. Measured on a 3 s, 1280×720 camera pan (made like
-`pan_portrait.mp4`, at 720p).**
+**Status: open, much reduced. Measured on a 3 s, 1280×720 camera pan (made
+like `pan_portrait.mp4`, at 720p).**
 
-The result is right: one camera plate at 44.3 dB. Getting it is slow. The
-decompile took 103 s with a second job running beside it, and peaked at
-**2.5 GB**. Every candidate of the measured search holds its own copy of the
-whole clip: two background rules, a still plate, a camera, a single-scene
-decompile beside the shots, and a faded one beside the plain. A minute of
-720p would not fit in memory. The likely fixes are to run the search at
-reduced resolution or over a sample of frames, keeping the final passes at
-full resolution, and to decompile long clips shot by shot without holding
-every frame at once.
+v1.14 runs the measured search on a smaller copy of any clip over 500k
+pixels and replays only its decision at full size. It also caps camera
+tracking at ~700 px and drops the mosaic's float copies of the frames. The
+3 s pan went from 64 s and 2.44 GB to **33 s and 1.66 GB**, and reconstructs
+better (44.3 → 44.7 dB). What remains is length: every frame of the clip
+is still decoded and held at once, and the full-size passes keep a few
+copies of it. A minute of 720p would still not fit. Decompiling shot by
+shot, holding only the shot's frames, is the next step.
 
 ---
 
@@ -343,6 +342,14 @@ every frame at once.
   squares. The new corpus clip `fade_through_black` (a card fading out, a
   photo pan fading in) went 25.88 → **42.22 dB** as two faded scenes; the
   faded card 24.36 → 45.37 dB, the faded pan 26.23 → 42.62 dB.
+
+- **v1.14 — HD frames are searched small.** (Half of open item 3.) Above
+  500k pixels the measured search runs on a copy shrunk by a whole factor
+  and only its decision is replayed at full size. Camera tracking stops at
+  ~700 px, the mosaic samples frames directly, and the fade pass is gated on
+  the frame means (a pan had been read as a fade, at the cost of a second
+  decompile). A 3 s 720p pan: 64 → **33 s**, 2.44 → **1.66 GB**, 44.3 →
+  44.7 dB. The corpus is byte-for-byte unchanged.
 
 ## Corpus, in full
 
