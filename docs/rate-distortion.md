@@ -80,10 +80,10 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
 | 0 | 17,204 | 3.3× smaller | 69.7 | 29.70 | 0.9595 | 9 | 12 |
-| 25 | 20,356 | 2.8× smaller | 69.2 | 29.73 | 0.9604 | 9 | 19 |
-| 50 | 27,873 | 2.1× smaller | 78.8 | 29.17 | 0.9555 | 8 | 36 |
-| 75 | 37,735 | 1.5× smaller | 75.7 | 29.34 | 0.9587 | 8 | 57 |
-| 100 | 61,218 | 0.9× smaller | 75.7 | 29.34 | 0.9595 | 8 | 63 |
+| 25 | 20,664 | 2.8× smaller | 69.2 | 29.73 | 0.9604 | 9 | 19 |
+| 50 | 28,473 | 2.0× smaller | 78.8 | 29.17 | 0.9555 | 8 | 36 |
+| 75 | 38,631 | 1.5× smaller | 75.7 | 29.34 | 0.9587 | 8 | 57 |
+| 100 | 62,950 | 0.9× smaller | 75.7 | 29.34 | 0.9594 | 8 | 63 |
 
 ### `fade_through_black.mp4` — source file 78 KB
 
@@ -100,10 +100,10 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
 | 0 | 35,197 | 11.5× smaller | 135.6 | 26.81 | 0.9888 | 1 | 14 |
-| 25 | 45,587 | 8.9× smaller | 78.8 | 29.17 | 0.9908 | 1 | 66 |
-| 50 | 62,873 | 6.4× smaller | 60.9 | 30.29 | 0.9921 | 2 | 93 |
-| 75 | 81,432 | 5.0× smaller | 54.5 | 30.76 | 0.9927 | 2 | 105 |
-| 100 | 121,083 | 3.3× smaller | 49.9 | 31.15 | 0.9934 | 2 | 106 |
+| 25 | 51,479 | 7.9× smaller | 56.8 | 30.59 | 0.9914 | 1 | 66 |
+| 50 | 70,484 | 5.8× smaller | 37.5 | 32.39 | 0.9932 | 1 | 83 |
+| 75 | 91,201 | 4.4× smaller | 31.2 | 33.19 | 0.9940 | 1 | 89 |
+| 100 | 135,641 | 3.0× smaller | 27.2 | 33.79 | 0.9946 | 1 | 89 |
 
 ### `mandelbrot.mp4` — source file 704 KB
 
@@ -140,10 +140,10 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
 | 0 | 17,844 | 4.4× smaller | 6.6 | 39.93 | 0.9600 | 1 | 2 |
-| 25 | 22,042 | 3.5× smaller | 5.4 | 40.83 | 0.9638 | 1 | 22 |
-| 50 | 31,623 | 2.5× smaller | 3.6 | 42.51 | 0.9699 | 1 | 60 |
-| 75 | 41,718 | 1.9× smaller | 2.9 | 43.57 | 0.9738 | 1 | 65 |
-| 100 | 67,654 | 1.2× smaller | 2.1 | 44.80 | 0.9778 | 1 | 72 |
+| 25 | 22,378 | 3.5× smaller | 5.3 | 40.87 | 0.9637 | 1 | 22 |
+| 50 | 32,187 | 2.4× smaller | 3.6 | 42.54 | 0.9708 | 1 | 60 |
+| 75 | 42,770 | 1.8× smaller | 2.8 | 43.62 | 0.9743 | 1 | 65 |
+| 100 | 69,794 | 1.1× smaller | 2.1 | 44.82 | 0.9783 | 1 | 72 |
 
 ### `real_bouncing_ball.gif` — source file 85 KB
 
@@ -200,10 +200,10 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
 | 0 | 45,013 | 7.7× smaller | 43.5 | 31.75 | 0.9940 | 1 | 2 |
-| 25 | 54,117 | 6.4× smaller | 37.4 | 32.41 | 0.9946 | 1 | 2 |
-| 50 | 73,057 | 4.8× smaller | 30.8 | 33.25 | 0.9951 | 1 | 2 |
-| 75 | 94,659 | 3.7× smaller | 27.6 | 33.72 | 0.9954 | 1 | 3 |
-| 100 | 141,824 | 2.5× smaller | 25.0 | 34.15 | 0.9957 | 1 | 4 |
+| 25 | 60,033 | 5.8× smaller | 23.4 | 34.43 | 0.9951 | 1 | 2 |
+| 50 | 81,833 | 4.3× smaller | 16.9 | 35.85 | 0.9958 | 1 | 2 |
+| 75 | 106,303 | 3.3× smaller | 13.5 | 36.83 | 0.9963 | 1 | 3 |
+| 100 | 160,608 | 2.2× smaller | 11.2 | 37.66 | 0.9966 | 1 | 4 |
 
 ### `slide_in_card.mp4` — source file 7 KB
 
@@ -220,10 +220,10 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
 | 0 | 96,915 | 4.6× smaller | 85.7 | 28.80 | 0.9924 | 4 | 8 |
-| 25 | 116,723 | 3.8× smaller | 81.3 | 29.03 | 0.9928 | 4 | 12 |
-| 50 | 163,390 | 2.7× smaller | 78.8 | 29.16 | 0.9938 | 6 | 87 |
-| 75 | 218,860 | 2.0× smaller | 76.2 | 29.31 | 0.9959 | 6 | 118 |
-| 100 | 340,485 | 1.3× smaller | 74.1 | 29.43 | 0.9961 | 6 | 130 |
+| 25 | 130,307 | 3.4× smaller | 72.9 | 29.50 | 0.9934 | 4 | 12 |
+| 50 | 174,569 | 2.6× smaller | 69.4 | 29.72 | 0.9962 | 4 | 71 |
+| 75 | 231,150 | 1.9× smaller | 65.2 | 29.99 | 0.9967 | 4 | 103 |
+| 100 | 359,970 | 1.2× smaller | 63.3 | 30.12 | 0.9972 | 4 | 113 |
 
 ### `testsrc2.mp4` — source file 305 KB
 
