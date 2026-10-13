@@ -460,6 +460,48 @@ fn colour_animation_is_recovered_along_the_source_curve() {
     assert!(fid.residual < 5.0, "color_shift.vac residual {:.2}", fid.residual);
 }
 
+/// **FIXED in v1.23 — a picture is written once.**
+///
+/// Every scene embedded its own copy of every picture it drew, as a base64
+/// blob in the middle of the code: the wipe-and-push slideshow wrote its
+/// three photos seven times, 283 KB. The writer now names each distinct
+/// picture and writes it once, after the scenes, as `asset picture_N =
+/// "data:…"`; and a transition between still shots draws the pictures its
+/// neighbours already write when that buys more than it costs, at the price
+/// a sprite pays. `sweep.vac` shows three pictures: they must come back as
+/// three assets, with no base64 in any scene, at better than 44 dB.
+#[test]
+fn each_picture_is_written_once() {
+    let check = |recovered: &Document, label: &str| {
+        let text = vac::to_string(recovered);
+        let assets = text.lines().filter(|l| l.starts_with("asset ")).count();
+        let code = &text[..text.find("\nasset ").expect("the assets follow the scenes")];
+        assert_eq!(assets, 3, "{label}: three pictures, three assets:\n{code}");
+        assert!(!code.contains("base64"), "{label}: the scenes name their pictures");
+    };
+    let (source, recovered, fid) = hermetic("sweep.vac");
+    check(&recovered, "rendered");
+    assert!(fid.psnr_db > 44.0, "sweep.vac: {:.2} dB", fid.psnr_db);
+    // Rendered frames are exact, so a still shot's plate and the frame
+    // beside a sweep encode to the same bytes. A codec's noise parts them,
+    // and only drawing the shot's own picture keeps it written once.
+    let rendered = vac::render(&source).expect("render");
+    let mut frames = vac::rendered_to_video_frames(&rendered, source.canvas.fps);
+    let mut seed = 0x2545_f491_u32;
+    for f in &mut frames {
+        for p in f.pixels.chunks_exact_mut(4) {
+            for c in &mut p[..3] {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *c = (*c as i32 + (seed >> 29) as i32 - 3).clamp(0, 255) as u8;
+            }
+        }
+    }
+    let noisy = vac::decompile_frames(frames.clone(), &DecompileOptions::default()).expect("decompile");
+    check(&noisy, "with codec noise");
+    let fid = vac::measure(&frames, &noisy).expect("measure");
+    assert!(fid.psnr_db > 36.0, "sweep.vac with noise: {:.2} dB", fid.psnr_db);
+}
+
 /// **FIXED in v1.22 — wipes and pushes.**
 ///
 /// Between two still pictures, every frame of a wipe or a push steps like

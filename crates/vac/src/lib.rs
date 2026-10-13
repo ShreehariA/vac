@@ -817,12 +817,7 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
             .windows(2)
             .map(|w| {
                 let (a, b) = (w[0], w[1]);
-                (!is_dissolve(a)).then(|| {
-                    scope.spawn(move || match sweep_at(a) {
-                        Some(sweep) => sweep_shot(frames, sweep, opts),
-                        None => decompile_shot(&frames[a..b], opts),
-                    })
-                })
+                (!is_dissolve(a) && sweep_at(a).is_none()).then(|| scope.spawn(move || decompile_shot(&frames[a..b], opts)))
             })
             .collect();
         (
@@ -838,7 +833,10 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         let (a, b) = (edges[k], edges[k + 1]);
         let before = k.checked_sub(1).and_then(|j| slots[j].as_ref()).map(|c| &c.document);
         let after = slots.get(k + 1).and_then(|s| s.as_ref()).map(|c| &c.document);
-        let made = dissolve_shot(frames, a, b, opts, before, after)?;
+        let made = match sweep_at(a) {
+            Some(sweep) => sweep_shot(frames, sweep, opts, before, after)?,
+            None => dissolve_shot(frames, a, b, opts, before, after)?,
+        };
         slots[k] = Some(made);
     }
     let parts: Vec<Chosen> = slots.into_iter().map(|s| s.expect("every slot filled")).collect();
@@ -1149,7 +1147,42 @@ fn sweep_candidates(frames: &[VideoFrame]) -> Vec<Sweep> {
 /// `clip()` window growing from its edge, a push the two side by side
 /// under `position()` keyframes. How far it has got is re-measured in every
 /// frame at full size, to the pixel, and simplified like any keyframes.
-fn sweep_shot(frames: &[VideoFrame], sweep: Sweep, opts: &DecompileOptions) -> Result<Chosen> {
+fn sweep_shot(
+    frames: &[VideoFrame],
+    sweep: Sweep,
+    opts: &DecompileOptions,
+    before: Option<&Document>,
+    after: Option<&Document>,
+) -> Result<Chosen> {
+    // v1.23: the shots either side, when they are still pictures, already
+    // write the pictures a sweep draws; drawing theirs adds nothing to the
+    // file. Both are built, and the one that buys more is kept.
+    let (w, h) = (frames[0].width, frames[0].height);
+    let shared = (
+        before.and_then(|d| d.scenes.last()).and_then(|s| still_plate(s, w, h)),
+        after.and_then(|d| d.scenes.first()).and_then(|s| still_plate(s, w, h)),
+    );
+    let own = sweep_variant(frames, sweep, opts, (None, None))?;
+    if shared.0.is_none() && shared.1.is_none() {
+        return Ok(own);
+    }
+    let theirs = sweep_variant(frames, sweep, opts, shared)?;
+    let span = &frames[sweep.a..=sweep.b];
+    let (fo, ft) = (measure(span, &own.document)?, measure(span, &theirs.document)?);
+    let neighbours: Vec<&Document> = [before, after].into_iter().flatten().collect();
+    let gain = improvement(&ft, &fo)
+        + byte_price(opts.quality) * (new_picture_bytes(&own.document, &neighbours) as f64 - new_picture_bytes(&theirs.document, &neighbours) as f64);
+    Ok(if gain > 0.0 { theirs } else { own })
+}
+
+/// [`sweep_shot`] with the pictures it draws given or, where `None`, its
+/// edge frames.
+fn sweep_variant(
+    frames: &[VideoFrame],
+    sweep: Sweep,
+    opts: &DecompileOptions,
+    pictures: (Option<Shape>, Option<Shape>),
+) -> Result<Chosen> {
     let (a, b) = (sweep.a, sweep.b);
     let (p, q) = (&frames[a - 1], &frames[(b + 1).min(frames.len() - 1)]);
     let (w, h) = (p.width as usize, p.height as usize);
@@ -1202,6 +1235,13 @@ fn sweep_shot(frames: &[VideoFrame], sweep: Sweep, opts: &DecompileOptions) -> R
             .ok_or_else(|| Error::Decompile(DecompileError::Other("could not encode a sweep's picture".into())))
     };
     let image = |x: f32, y: f32, src: String| Shape::Image { x, y, w: wf, h: hf, src };
+    let src_of = |given: &Option<Shape>, f: &VideoFrame| -> Result<String> {
+        match given {
+            Some(Shape::Image { src, .. }) => Ok(src.clone()),
+            _ => jpeg(f),
+        }
+    };
+    let (p_src, q_src) = (src_of(&pictures.0, p)?, src_of(&pictures.1, q)?);
     let keyed = |f: &dyn Fn(f32) -> Vec<Transform>| -> Vec<Keyframe> {
         (0..n).filter(|&u| keep[u]).map(|u| Keyframe { time_ms: time(u), transforms: f(got[u]) }).collect()
     };
@@ -1215,8 +1255,8 @@ fn sweep_shot(frames: &[VideoFrame], sweep: Sweep, opts: &DecompileOptions) -> R
     let mut statements = Vec::new();
     match sweep.kind {
         SweepKind::Wipe => {
-            statements.push(Statement::Let { name: "plate".into(), shape: image(0.0, 0.0, jpeg(p)?) });
-            statements.push(Statement::Let { name: "incoming".into(), shape: image(0.0, 0.0, jpeg(q)?) });
+            statements.push(Statement::Let { name: "plate".into(), shape: image(0.0, 0.0, p_src.clone()) });
+            statements.push(Statement::Let { name: "incoming".into(), shape: image(0.0, 0.0, q_src.clone()) });
             let window = move |g: f32| -> Vec<Transform> {
                 vec![match sweep.from {
                     Edge::Left => Transform::Clip(0.0, 0.0, g, hf),
@@ -1246,12 +1286,12 @@ fn sweep_shot(frames: &[VideoFrame], sweep: Sweep, opts: &DecompileOptions) -> R
                 }
             };
             let (x0, y0) = incoming(got[0]);
-            statements.push(Statement::Let { name: "plate".into(), shape: image(0.0, 0.0, jpeg(p)?) });
+            statements.push(Statement::Let { name: "plate".into(), shape: image(0.0, 0.0, p_src.clone()) });
             statements.push(animate("plate", keyed(&|g| {
                 let (x, y) = outgoing(g);
                 vec![Transform::Position(x, y)]
             })));
-            statements.push(Statement::Let { name: "incoming".into(), shape: image(x0, y0, jpeg(q)?) });
+            statements.push(Statement::Let { name: "incoming".into(), shape: image(x0, y0, q_src.clone()) });
             statements.push(animate("incoming", keyed(&|g| {
                 let (x, y) = incoming(g);
                 vec![Transform::Position(x, y)]
@@ -1485,6 +1525,13 @@ fn dissolve_side(
         })?;
         Some((plate, camera))
     });
+    // v1.23: a neighbour's still plate is shared as it stands — it is
+    // written once, and the dissolve draws it for nothing.
+    if carried.is_none() {
+        if let Some(plate) = neighbour.and_then(|d| d.scenes.last()).and_then(|sc| still_plate(sc, edge.width, edge.height)) {
+            return Ok((plate, None));
+        }
+    }
     if let Some((plate, camera)) = carried {
         let keyframes = [0u32, end_ms]
             .iter()
@@ -1544,7 +1591,58 @@ fn dissolve_shot(
     let frozen = dissolve_variant(frames, a, b, opts, None, None)?;
     let shot = &frames[a..b];
     let (fc, ff) = (measure(shot, &carried.document)?, measure(shot, &frozen.document)?);
-    Ok(if reconstructs_better(&ff, &fc) { frozen } else { carried })
+    // v1.23: a carried or shared picture is one the shot beside it already
+    // writes, so it adds nothing to the file; that is worth its bytes, at
+    // the price a sprite pays.
+    let neighbours: Vec<&Document> = [before, after].into_iter().flatten().collect();
+    let gain = improvement(&fc, &ff)
+        + byte_price(opts.quality) * (new_picture_bytes(&frozen.document, &neighbours) as f64 - new_picture_bytes(&carried.document, &neighbours) as f64);
+    Ok(if gain > 0.0 { carried } else { frozen })
+}
+
+/// The price per byte a picture, a sprite or a keyframe pays, in the
+/// selection rule's currency, at this quality: [`SPRITE_MIN_GAIN_PER_BYTE`]
+/// scaled by the dial.
+fn byte_price(quality: f32) -> f64 {
+    let m = 2f64.powf((50.0 - quality.clamp(0.0, 100.0) as f64) / 25.0);
+    SPRITE_MIN_GAIN_PER_BYTE * m * m
+}
+
+/// The bytes of the pictures `doc` draws that none of `neighbours` already
+/// draws (v1.23): what it adds to the file, since a picture is written
+/// once however many scenes draw it.
+fn new_picture_bytes(doc: &Document, neighbours: &[&Document]) -> usize {
+    let srcs = |d: &Document| -> Vec<String> {
+        d.scenes
+            .iter()
+            .flat_map(|s| &s.statements)
+            .filter_map(|st| match st {
+                Statement::Let { shape: Shape::Image { src, .. }, .. } => Some(src.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let known: std::collections::HashSet<String> = neighbours.iter().flat_map(|d| srcs(d)).collect();
+    let mut mine = srcs(doc);
+    mine.sort();
+    mine.dedup();
+    mine.iter().filter(|s| !known.contains(*s)).map(|s| s.len()).sum()
+}
+
+/// A scene's still plate: `let plate = image(…)` covering the whole canvas,
+/// with no camera moving it — what a shot of a still picture is written as.
+fn still_plate(scene: &Scene, w: u32, h: u32) -> Option<Shape> {
+    if scene.statements.iter().any(|st| matches!(st, Statement::Animate(a) if a.target == "plate")) {
+        return None;
+    }
+    scene.statements.iter().find_map(|st| match st {
+        Statement::Let { name, shape: shape @ Shape::Image { x, y, w: pw, h: ph, .. } }
+            if name == "plate" && *x <= 0.0 && *y <= 0.0 && x + pw >= w as f32 && y + ph >= h as f32 =>
+        {
+            Some(shape.clone())
+        }
+        _ => None,
+    })
 }
 
 fn dissolve_variant(

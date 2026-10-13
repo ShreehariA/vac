@@ -9,6 +9,7 @@
 //! document      = canvas_decl scene*
 //! canvas_decl   = "canvas" Dimension "@" Fps
 //! scene         = "scene" Ident "{" scene_stmt* "}"
+//! asset         = "asset" Ident "=" String   (v1.23: a picture, named once)
 //! scene_stmt    = duration_stmt | let_stmt | assign_stmt | animate_stmt
 //! duration_stmt = "duration" Time
 //! let_stmt      = "let" Ident "=" shape_expr
@@ -405,11 +406,18 @@ impl<'a> Lexer<'a> {
 struct Parser {
     tokens: Vec<Spanned>,
     cursor: usize,
+    /// Every `image(…, name)` that names an asset, where it was (v1.23).
+    asset_refs: Vec<(String, Span)>,
 }
+
+/// Marks an image's source as a reference to an asset until the whole
+/// document is read: assets are written after the scenes that use them.
+/// No string literal holds a NUL.
+const ASSET_REF: &str = "\u{0}asset:";
 
 impl Parser {
     fn new(tokens: Vec<Spanned>) -> Self {
-        Parser { tokens, cursor: 0 }
+        Parser { tokens, cursor: 0, asset_refs: Vec::new() }
     }
 
     fn peek(&self) -> &Spanned {
@@ -500,10 +508,51 @@ impl Parser {
     fn parse_document(&mut self) -> Result<Document, ParseError> {
         let canvas = self.parse_canvas_decl()?;
         let mut scenes = Vec::new();
+        let mut assets: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         while !matches!(self.peek().tok, Token::Eof) {
-            scenes.push(self.parse_scene()?);
+            if matches!(&self.peek().tok, Token::Ident(kw) if kw == "asset") {
+                let span = self.peek().span;
+                let (name, src) = self.parse_asset()?;
+                if assets.insert(name.clone(), src).is_some() {
+                    return Err(ParseError::syntax(span, format!("asset `{name}` is declared twice")));
+                }
+            } else {
+                scenes.push(self.parse_scene()?);
+            }
+        }
+        // v1.23: an image that names an asset takes its picture, wherever in
+        // the file the asset is declared.
+        for (name, span) in &self.asset_refs {
+            if !assets.contains_key(name) {
+                return Err(ParseError::syntax(*span, format!("image() names `{name}`, which no `asset` declares")));
+            }
+        }
+        for scene in &mut scenes {
+            for st in &mut scene.statements {
+                if let Statement::Let { shape: Shape::Image { src, .. }, .. } = st {
+                    if let Some(name) = src.strip_prefix(ASSET_REF) {
+                        *src = assets[name].clone();
+                    }
+                }
+            }
         }
         Ok(Document { canvas, scenes })
+    }
+
+    /// `asset name = "data:…"` (v1.23).
+    fn parse_asset(&mut self) -> Result<(String, String), ParseError> {
+        self.expect_keyword("asset")?;
+        let s = self.bump();
+        let name = match s.tok {
+            Token::Ident(n) => n,
+            other => return Err(ParseError::syntax(s.span, format!("expected an asset name, got {other:?}"))),
+        };
+        self.expect(&Token::Equals)?;
+        let s = self.bump();
+        match s.tok {
+            Token::Str(src) => Ok((name, src)),
+            other => Err(ParseError::syntax(s.span, format!("asset `{name}` takes a \"data:\" string, got {other:?}"))),
+        }
     }
 
     fn parse_canvas_decl(&mut self) -> Result<Canvas, ParseError> {
@@ -613,10 +662,15 @@ impl Parser {
             let s = self.bump();
             let src = match s.tok {
                 Token::Str(t) => t,
+                // v1.23: a picture named by an `asset`.
+                Token::Ident(name) => {
+                    self.asset_refs.push((name.clone(), s.span));
+                    format!("{ASSET_REF}{name}")
+                }
                 other => {
                     return Err(ParseError::syntax(
                         s.span,
-                        format!("image() takes (x, y, w, h, \"src\"), got {other:?} for src"),
+                        format!("image() takes (x, y, w, h, \"src\" or an asset name), got {other:?} for src"),
                     ))
                 }
             };

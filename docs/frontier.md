@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.22, default quality 50) and is
+table re-measured 2026-10-13 at v1.23, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -131,16 +131,15 @@ shape under another, which the tracker does not yet infer.
 
 ---
 
-## 6. A picture written once per scene
+## 6. Shape wipes
 
-**Status: open. Corpus row: `slideshow_wipe_push.mp4`.**
+**Status: open.**
 
-A scene is self-contained, so every scene that shows a picture embeds its
-own JPEG of it. The wipe-and-push slideshow shows three photos and writes
-seven: each still shot's plate, and both ends of each transition (283 KB).
-A picture that one scene could name from another would write each photo
-once. Circle and shape wipes (`xfade` circleopen: 29.9 dB) are not handled
-either: v1.22's sweeps are axis-aligned.
+v1.22's sweeps are axis-aligned: an edge moving across the frame, or a
+push along one axis. A circle opening (`xfade` circleopen, 29.9 dB),
+a clock wipe or a diagonal wipe is none of them, and comes back with its
+transition frames poorly fitted (worst frame 18.6 dB). A `clip()` window of
+any shape, measured the same way, would cover them.
 
 ---
 
@@ -472,6 +471,13 @@ either: v1.22's sweeps are axis-aligned.
   A one-second wipe went 18.90 → **36.97 dB**, a push 19.48 → **36.79**;
   the new corpus clip `slideshow_wipe_push` is at **37.23**.
 
+- **v1.23 — a picture is written once.** The writer names each distinct
+  picture and writes it once, after the scenes (`asset picture_N =
+  "data:…"`), and a transition between still shots draws the plates its
+  neighbours already write when that buys more than it costs. The
+  wipe-and-push slideshow went 283 → **132 KB** at the same 37.23 dB, the
+  dissolve slideshow 175 → **93 KB** for 0.13 dB.
+
 ## Corpus, in full
 
 From `benches/corpus-baseline.tsv`. Regenerate with
@@ -480,10 +486,10 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | input | ink IoU | worst | residual | psnr dB | spurious | shapes |
 |---|---|---|---|---|---|---|
 | `slideshow_wipe_push.mp4` | 0.9976 | 0.9919 | 12.3 | 37.23 | 0.1% | 7 |
-| `slideshow_dissolve.mp4` | 0.9962 | 0.9634 | 69.4 | 29.72 | 0.2% | 4 |
 | `roll_watercolor.mp4` | 0.9958 | 0.9933 | 16.9 | 35.85 | 0.3% | 1 |
 | `testsrc2.mp4` | 0.9954 | 0.9865 | 357.2 | 22.60 | 0.4% | 63 |
 | `progress_bars.mp4` | 0.9947 | 0.9376 | 6.7 | 39.90 | 0.3% | 6 |
+| `slideshow_dissolve.mp4` | 0.9945 | 0.9686 | 71.5 | 29.59 | 0.2% | 4 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
 | `kenburns_watercolor.mp4` | 0.9932 | 0.9881 | 37.5 | 32.39 | 0.4% | 1 |
 | `fade_through_black.mp4` | 0.9918 | 0.9286 | 3.9 | 42.22 | 0.4% | 5 |
@@ -497,7 +503,7 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 | `real_newtons_cradle.gif` | 0.9210 | 0.9051 | 64.5 | 30.03 | 5.6% | 46 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
 | `real_pendulum.gif` | 0.6430 | 0.5445 | 331.5 | 22.93 | 4.8% | 27 |
-| `real_double_pendulum.gif` | 0.6240 | 0.3880 | 404.3 | 22.06 | 6.3% | 421 |
+| `real_double_pendulum.gif` | 0.6233 | 0.3885 | 407.4 | 22.03 | 6.4% | 421 |
 
 Flat-shaded content of exactly the kind the detector was built for, meaning
 VAC's own output and ffmpeg `drawbox` rectangles, reconstructs at 33–47 dB. The

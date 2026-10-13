@@ -1,6 +1,6 @@
 # How VAC decompiles a video
 
-This is the pipeline as of v1.22: what runs, in what order, and what decides
+This is the pipeline as of v1.23: what runs, in what order, and what decides
 each step. The README is a version-by-version log, and this is the map. One
 rule runs through all of it: **measure, don't classify.** Wherever there is a
 choice, every option is built, rendered back to pixels, and scored against
@@ -120,6 +120,15 @@ shot.
 - **Sprites (v1.8).** A mover whose flat fill fails on its interior becomes a
   PNG of its own pixels that keeps its keyframes, if that's at least twice as
   good locally and pays for its bytes.
+
+## Writing it out (v1.23)
+
+The writer names each distinct picture (`picture_1`, `picture_2`, …) and
+writes it once, after the scenes, as `asset picture_N = "data:…"`; the
+scenes' `image()` shapes name it. The parser resolves names wherever the
+asset is declared. A transition between still shots draws the plates its
+neighbours already write when the bytes it saves pay for any fidelity lost,
+at the sprite price.
 
 ## The dial
 

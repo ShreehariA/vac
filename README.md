@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.22)
+## Where VAC is today (v1.23)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -47,7 +47,8 @@ and colour over time; linear and radial
 gradient fills; strokes with their width; objects entering, leaving,
 appearing and disappearing. Where vectors measurably fail, the static
 scenery becomes one embedded `image()` with the moving shapes still written
-as code on top. When the whole picture moves, that image is moved by a
+as code on top. Each picture is written once, as a named asset after the
+scenes, and the scenes name it. When the whole picture moves, that image is moved by a
 measured camera that zooms, pans and rolls, written as `position()`,
 `scale()` and `rotate()` keyframes; the image is fitted to the frames
 through the renderer's own reading of it, so what is drawn back is as sharp
@@ -81,7 +82,7 @@ keyframes are re-measured by registering its own pixels across frames.
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
 | `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 32.4 dB | 0.993 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.921 |
-| `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.7 dB | 0.996 |
+| `slideshow_dissolve.mp4` | two photos, a Ken Burns zoom dissolving into a pan | 29.6 dB | 0.995 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
 | `real_pendulum.gif` | Wikimedia diagram | 22.9 dB | 0.643 |
@@ -2657,3 +2658,55 @@ Every other corpus clip is unchanged. Two things are left. The pictures are
 frozen at the sweep's ends, as v1.17's dissolve pictures were, so motion
 during a sweep isn't followed. And each scene embeds its own copy of a
 picture, so the new clip's three photos are written seven times (283 KB).
+
+## v1.23 — A picture is written once
+
+Through v1.22 every scene embedded its own copy of every picture it drew,
+as a base64 blob in the middle of the code. The wipe-and-push slideshow
+shows three photos and wrote seven: each still shot's plate, and both ends
+of each transition, 283 KB. The open list on the results page put it
+plainly: rasters are blobs in the source.
+
+The writer now names each distinct picture and writes it once, after all
+the scenes, and the scenes refer to it by name:
+
+```vac
+scene shot_2 {                                  // the wipe
+  duration 967ms
+
+  let plate = image(0, 0, 480, 320, picture_1)
+  let incoming = image(0, 0, 480, 320, picture_2)
+
+  animate incoming {
+    0ms   -> clip(464, 0, 16, 320)
+    933ms -> clip(16, 0, 464, 320)
+  }
+}
+
+// The pictures the scenes draw, each written once.
+asset picture_1 = "data:image/jpeg;base64,/9j/4AAQ…"
+asset picture_2 = "data:image/jpeg;base64,/9j/4AAQ…"
+```
+
+The AST is unchanged. The writer factors identical pictures out, and the
+parser resolves the names, wherever in the file the asset is declared, so
+`parse(write(D)) == D` still holds and every older file reads as before.
+
+Identical bytes are only half of it. In a real video a still shot's plate,
+the median of its frames, and the frame beside a transition differ by the
+codec's noise. So a transition between still shots now also tries drawing
+the plates its neighbours already write, and keeps whichever buys more:
+the fidelity on its own frames, plus every byte of picture it doesn't add,
+at the price a sprite pays. A dissolve's carried camera plates get the same
+credit.
+
+| clip | v1.22 | v1.23 |
+|---|---|---|
+| `slideshow_wipe_push.mp4` | 37.23 dB, 283 KB | 37.23 dB, **132 KB** |
+| `slideshow_dissolve.mp4` | 29.72 dB, 175 KB | 29.59 dB, **93 KB** |
+| `sweep.vac` hermetic, and with ±3 levels of noise | 3 pictures written 3 and 7 times | 3 pictures written **once** each |
+
+The dissolve trades 0.13 dB for 81 KB, 0.002 dB per KB against a price of
+0.04. Clips with one picture grow by its `asset` line (81 bytes), and
+`real_double_pendulum` moved 0.03 dB: its sprites price themselves by the
+written file, which now writes pictures differently.

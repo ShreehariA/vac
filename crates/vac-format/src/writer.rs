@@ -12,21 +12,59 @@ use crate::ast::*;
 use std::fmt::Write;
 
 /// Serialize a [`Document`] to canonical `.vac` text.
+///
+/// v1.23: every picture an `image()` draws is written once, after the
+/// scenes, as `asset picture_N = "data:…"`, and the shapes name it — the
+/// scenes read as code, and a picture two scenes show is written once.
 pub fn write(doc: &Document) -> String {
+    let pictures = Pictures::of(doc);
     let mut out = String::new();
     write_canvas(&mut out, &doc.canvas);
     for scene in &doc.scenes {
         out.push('\n');
-        write_scene(&mut out, scene);
+        write_scene(&mut out, scene, &pictures);
+    }
+    if !pictures.order.is_empty() {
+        out.push('\n');
+        let _ = writeln!(out, "// The pictures the scenes draw, each written once.");
+        for (name, src) in &pictures.order {
+            let _ = writeln!(out, "asset {name} = \"{src}\"");
+        }
     }
     out
+}
+
+/// The distinct pictures a document's images draw, named `picture_1`,
+/// `picture_2`, … in the order they are first drawn.
+struct Pictures<'a> {
+    names: std::collections::HashMap<&'a str, String>,
+    order: Vec<(String, &'a str)>,
+}
+
+impl<'a> Pictures<'a> {
+    fn of(doc: &'a Document) -> Self {
+        let mut names = std::collections::HashMap::new();
+        let mut order = Vec::new();
+        for scene in &doc.scenes {
+            for st in &scene.statements {
+                if let Statement::Let { shape: Shape::Image { src, .. }, .. } = st {
+                    if !names.contains_key(src.as_str()) {
+                        let name = format!("picture_{}", order.len() + 1);
+                        names.insert(src.as_str(), name.clone());
+                        order.push((name, src.as_str()));
+                    }
+                }
+            }
+        }
+        Pictures { names, order }
+    }
 }
 
 fn write_canvas(out: &mut String, c: &Canvas) {
     let _ = writeln!(out, "canvas {}x{} @{}fps", c.width, c.height, c.fps);
 }
 
-fn write_scene(out: &mut String, s: &Scene) {
+fn write_scene(out: &mut String, s: &Scene, pictures: &Pictures) {
     let _ = writeln!(out, "scene {} {{", s.name);
     let _ = writeln!(out, "  duration {}", fmt_time(s.duration_ms));
 
@@ -38,7 +76,7 @@ fn write_scene(out: &mut String, s: &Scene) {
         if needs_blank_line(prev, stmt) {
             out.push('\n');
         }
-        write_statement(out, stmt, 1);
+        write_statement(out, stmt, 1, pictures);
         prev = Some(stmt);
     }
     let _ = writeln!(out, "}}");
@@ -55,11 +93,11 @@ fn needs_blank_line(prev: Option<&Statement>, next: &Statement) -> bool {
     }
 }
 
-fn write_statement(out: &mut String, stmt: &Statement, indent: usize) {
+fn write_statement(out: &mut String, stmt: &Statement, indent: usize, pictures: &Pictures) {
     let pad = "  ".repeat(indent);
     match stmt {
         Statement::Let { name, shape } => {
-            let _ = writeln!(out, "{pad}let {name} = {}", fmt_shape(shape));
+            let _ = writeln!(out, "{pad}let {name} = {}", fmt_shape(shape, pictures));
         }
         Statement::Assign {
             target,
@@ -94,7 +132,7 @@ fn write_animation(out: &mut String, a: &Animation, indent: usize) {
     let _ = writeln!(out, "{pad}}}");
 }
 
-fn fmt_shape(s: &Shape) -> String {
+fn fmt_shape(s: &Shape, pictures: &Pictures) -> String {
     match s {
         Shape::Rect { x, y, w, h } => {
             format!(
@@ -115,12 +153,12 @@ fn fmt_shape(s: &Shape) -> String {
             )
         }
         Shape::Image { x, y, w, h, src } => format!(
-            "image({}, {}, {}, {}, \"{}\")",
+            "image({}, {}, {}, {}, {})",
             fmt_num(*x),
             fmt_num(*y),
             fmt_num(*w),
             fmt_num(*h),
-            src
+            pictures.names.get(src.as_str()).cloned().unwrap_or_else(|| format!("\"{src}\""))
         ),
         Shape::Path(segs) => {
             let body = segs
@@ -358,7 +396,28 @@ mod tests {
         let src = "canvas 10x10 @10fps\nscene s {\n  duration 1s\n  let p = image(0, 0, 10, 10, \"data:image/png;base64,Zm9v\")\n}\n";
         let doc = crate::parse(src).unwrap();
         let out = write(&doc);
-        assert!(out.contains("image(0, 0, 10, 10, \"data:image/png;base64,Zm9v\")"), "{out}");
+        assert!(out.contains("image(0, 0, 10, 10, picture_1)"), "{out}");
+        assert!(out.contains("asset picture_1 = \"data:image/png;base64,Zm9v\""), "{out}");
         assert_eq!(crate::parse(&out).unwrap(), doc);
+    }
+
+    /// v1.23: a picture two scenes draw is written once, after the scenes,
+    /// and named from both; an asset may be declared before or after its
+    /// use; an unknown or twice-declared name is refused.
+    #[test]
+    fn a_picture_is_written_once_and_named() {
+        let src = "canvas 10x10 @10fps\nscene a {\n  duration 1s\n  let p = image(0, 0, 10, 10, \"data:image/png;base64,Zm9v\")\n}\nscene b {\n  duration 1s\n  let q = image(0, 0, 10, 10, \"data:image/png;base64,Zm9v\")\n  let r = image(2, 2, 4, 4, \"data:image/png;base64,YmFy\")\n}\n";
+        let doc = crate::parse(src).unwrap();
+        let out = write(&doc);
+        assert_eq!(out.matches("Zm9v").count(), 1, "{out}");
+        assert_eq!(out.matches("picture_1").count(), 3, "two uses and the asset: {out}");
+        assert!(out.contains("let r = image(2, 2, 4, 4, picture_2)"), "{out}");
+        assert!(out.find("asset picture_1").unwrap() > out.find("scene b").unwrap(), "assets after the scenes: {out}");
+        assert_eq!(crate::parse(&out).unwrap(), doc);
+        let before = "canvas 10x10 @10fps\nasset photo = \"data:image/png;base64,Zm9v\"\nscene a {\n  duration 1s\n  let p = image(0, 0, 10, 10, photo)\n}\n";
+        let parsed = crate::parse(before).unwrap();
+        assert!(matches!(&parsed.scenes[0].statements[0], Statement::Let { shape: Shape::Image { src, .. }, .. } if src == "data:image/png;base64,Zm9v"));
+        assert!(crate::parse(&before.replace("image(0, 0, 10, 10, photo)", "image(0, 0, 10, 10, missing)")).is_err());
+        assert!(crate::parse(&before.replace("scene a", "asset photo = \"data:x\"\nscene a")).is_err());
     }
 }

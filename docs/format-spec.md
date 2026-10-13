@@ -184,6 +184,12 @@ Before its first keyframe and after its last, a kind holds that keyframe's
 value. (Through v0.10 the runtime used only the two keyframes bracketing
 `now`, so a kind absent from both reverted to its base value.)
 
+**Assets (v1.23).** A picture may be declared once at the top level,
+`asset name = "data:…"`, before or after the scenes, and an `image()` may
+name it in place of its source string: `image(0, 0, 480, 320, name)`. The
+writer always does this, so each distinct picture is written once, after
+the scenes.
+
 Composition order when rendering a shape: rotate about its centre, then
 scale about its anchor, then move the anchor to `position`. Stretching a
 rotated shape (`scale(sx, sy)` with `sx ≠ sy`) therefore skews it.
