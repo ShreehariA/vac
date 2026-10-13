@@ -296,11 +296,15 @@ pub fn prepare_camera(
     let bg = detect::background_of(&frames[0], background);
     // Two passes: frame 0 carries its own movers into the first estimate,
     // the median mosaic does not.
-    let Some(first) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b]) else {
+    let Some(first) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b], 1.0) else {
         return Ok(None);
     };
     let views = camera::refine_views(&frames, &first, &views);
-    let Some(mosaic) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b]) else {
+    // One mosaic pixel per reference pixel. A denser mosaic keeps more of
+    // a zoom's late detail but was measured a poor trade at the default
+    // quality: the Ken Burns clip +0.8 dB for +54% bytes, the Mandelbrot
+    // zoom +0.2 dB for twice the bytes.
+    let Some(mosaic) = camera::mosaic(&frames, &views, [bg.r, bg.g, bg.b], 1.0) else {
         return Ok(None);
     };
     for (f, v) in frames.iter_mut().zip(&views) {

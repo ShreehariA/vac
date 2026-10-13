@@ -62,6 +62,9 @@ struct Level {
     h: usize,
     px: Vec<f32>,
     origin: (f32, f32),
+    /// Pixels per unit of the coordinates it is sampled in: 1 for a frame,
+    /// the mosaic's density for a mosaic.
+    density: f32,
 }
 
 impl Level {
@@ -76,6 +79,7 @@ impl Level {
             h,
             px,
             origin: (0.0, 0.0),
+            density: 1.0,
         }
     }
 
@@ -99,12 +103,16 @@ impl Level {
             h,
             px,
             origin: (self.origin.0 * 0.5, self.origin.1 * 0.5),
+            density: self.density,
         }
     }
 
     /// Bilinear sample at continuous point `p`; `None` outside the frame.
     fn sample(&self, p: (f32, f32)) -> Option<[f32; 3]> {
-        let (x, y) = (p.0 - self.origin.0 - 0.5, p.1 - self.origin.1 - 0.5);
+        let (x, y) = (
+            (p.0 - self.origin.0) * self.density - 0.5,
+            (p.1 - self.origin.1) * self.density - 0.5,
+        );
         if x < -0.5 || y < -0.5 || x > self.w as f32 - 0.5 || y > self.h as f32 - 0.5 {
             return None;
         }
@@ -271,6 +279,7 @@ pub fn refine_views(frames: &[VideoFrame], m: &Mosaic, first: &[View]) -> Vec<Vi
     const LEVELS: usize = 2;
     let mut base = Level::from_frame(&m.image);
     base.origin = (m.x, m.y);
+    base.density = m.density;
     let mp = pyramid_from(base, LEVELS);
     frames
         .iter()
@@ -408,8 +417,9 @@ pub struct Mosaic {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-    /// Its pixels, one per reference pixel.
+    /// Its pixels: `density` per reference pixel in each direction.
     pub image: VideoFrame,
+    pub density: f32,
 }
 
 /// Most frames the mosaic's median reads, evenly spaced over the clip.
@@ -418,9 +428,24 @@ const MOSAIC_MAX_SAMPLES: usize = 45;
 /// wanders further is not one scene.
 const MOSAIC_MAX_AREA: f32 = 4.0;
 
-/// Build the [`Mosaic`] the views see; `None` when it would be
-/// unreasonably large.
-pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3]) -> Option<Mosaic> {
+/// A mosaic point is read from the frames that see it most magnified:
+/// those whose scale is within this factor of the largest scale among the
+/// frames that see it at all. A median over every frame would let the
+/// wide, blurry early frames of a zoom outvote the few sharp late ones.
+const MOSAIC_SHARPEST_WITHIN: f32 = 0.9;
+/// The densest mosaic, in mosaic pixels per reference pixel.
+pub const MOSAIC_MAX_DENSITY: f32 = 2.0;
+
+/// The density a mosaic needs to keep the detail the views saw: the
+/// largest magnification of the reference any frame shows, capped.
+pub fn density_for(views: &[View]) -> f32 {
+    views.iter().map(|v| v.scale).fold(1.0f32, f32::max).min(MOSAIC_MAX_DENSITY)
+}
+
+/// Build the [`Mosaic`] the views see, `density` mosaic pixels per
+/// reference pixel; `None` when it would be unreasonably large.
+pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3], density: f32) -> Option<Mosaic> {
+    let density = density.clamp(1.0, MOSAIC_MAX_DENSITY);
     let (fw, fh) = (frames[0].width as f32, frames[0].height as f32);
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for v in views {
@@ -433,38 +458,37 @@ pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3]) -> Option<Mosa
         }
     }
     let (x0, y0, x1, y1) = (x0.floor(), y0.floor(), x1.ceil(), y1.ceil());
-    let (mw, mh) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    if mw == 0 || mh == 0 || (mw * mh) as f32 > MOSAIC_MAX_AREA * fw * fh {
+    if x1 <= x0 || y1 <= y0 || (x1 - x0) * (y1 - y0) > MOSAIC_MAX_AREA * fw * fh {
         return None;
     }
+    let (mw, mh) = (((x1 - x0) * density).round() as usize, ((y1 - y0) * density).round() as usize);
     let step = (frames.len() / MOSAIC_MAX_SAMPLES).max(1);
     let picked: Vec<usize> = (0..frames.len()).step_by(step).collect();
     let levels: Vec<Level> = picked.iter().map(|&t| Level::from_frame(&frames[t])).collect();
     let mut pixels = vec![0u8; mw * mh * 4];
-    let mut samples: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut seen: Vec<(f32, [f32; 3])> = Vec::with_capacity(picked.len());
+    let mut channel: Vec<f32> = Vec::with_capacity(picked.len());
     for my in 0..mh {
         for mx in 0..mw {
-            let q = (x0 + mx as f32 + 0.5, y0 + my as f32 + 0.5);
-            for s in samples.iter_mut() {
-                s.clear();
-            }
+            let q = (x0 + (mx as f32 + 0.5) / density, y0 + (my as f32 + 0.5) / density);
+            seen.clear();
             for (n, &t) in picked.iter().enumerate() {
                 if let Some(rgb) = levels[n].sample(views[t].to_frame(q)) {
-                    for c in 0..3 {
-                        samples[c].push(rgb[c]);
-                    }
+                    seen.push((views[t].scale, rgb));
                 }
             }
             let i = (my * mw + mx) * 4;
-            for c in 0..3 {
-                pixels[i + c] = if samples[c].is_empty() {
-                    bg[c]
-                } else {
-                    let s = &mut samples[c];
-                    let mid = s.len() / 2;
-                    s.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
-                    s[mid].round().clamp(0.0, 255.0) as u8
-                };
+            if seen.is_empty() {
+                pixels[i..i + 3].copy_from_slice(&bg);
+            } else {
+                let sharpest = seen.iter().map(|s| s.0).fold(0.0f32, f32::max) * MOSAIC_SHARPEST_WITHIN;
+                for c in 0..3 {
+                    channel.clear();
+                    channel.extend(seen.iter().filter(|s| s.0 >= sharpest).map(|s| s.1[c]));
+                    let mid = channel.len() / 2;
+                    channel.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+                    pixels[i + c] = channel[mid].round().clamp(0.0, 255.0) as u8;
+                }
             }
             pixels[i + 3] = 255;
         }
@@ -472,14 +496,15 @@ pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3]) -> Option<Mosa
     Some(Mosaic {
         x: x0,
         y: y0,
-        w: mw as f32,
-        h: mh as f32,
+        w: x1 - x0,
+        h: y1 - y0,
         image: VideoFrame {
             width: mw as u32,
             height: mh as u32,
             pixels,
             delay_ms: frames[0].delay_ms,
         },
+        density,
     })
 }
 
@@ -488,6 +513,7 @@ pub fn mosaic(frames: &[VideoFrame], views: &[View], bg: [u8; 3]) -> Option<Mosa
 pub fn warp(m: &Mosaic, view: View, w: u32, h: u32) -> Vec<u8> {
     let mut level = Level::from_frame(&m.image);
     level.origin = (m.x, m.y);
+    level.density = m.density;
     let mut out = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
         for x in 0..w {

@@ -10,9 +10,11 @@
 # picture survived. shapes / animate / keyframes / vac_bytes are STRUCTURE:
 # what it cost. Only the first group says whether VAC is getting better.
 input	hash	frames	ink_iou	worst_iou	residual	psnr_db	missing_ink	spurious_ink	shapes	animate	keyframes	vac_bytes
-mandelbrot.mp4	1951394d7cf69b49	90	0.9897	0.9843	149.91	26.37	0.0046	0.0054	1	1	16	32530
+kenburns_watercolor.mp4	d3e11c78c6647265	90	0.9920	0.9899	60.86	30.29	0.0022	0.0058	2	2	92	62834
+mandelbrot.mp4	1951394d7cf69b49	90	0.9896	0.9842	149.30	26.39	0.0044	0.0057	2	2	19	34353
 motion_graphics.mp4	a0fcfb9bcc8dfbfa	90	0.9773	0.9565	4.33	41.76	0.0084	0.0146	4	3	9	801
 outlined_ui.mp4	8e4bad1889ec6389	90	0.9847	0.9689	26.77	33.85	0.0058	0.0097	4	2	4	688
+pan_portrait.mp4	e9be1890fb036d71	90	0.9697	0.9580	3.68	42.47	0.0153	0.0152	1	1	60	31598
 real_bouncing_ball.gif	18aa105b5950e19b	132	0.9900	0.9858	2.38	44.36	0.0037	0.0064	2	1	35	12913
 real_double_pendulum.gif	3e51c5cf05fab9a5	220	0.5943	0.4017	464.21	21.46	0.3658	0.0835	419	323	2876	172803
 real_loader.gif	cc3a72959d76446e	12	0.8641	0.8398	95.80	28.32	0.0358	0.1163	16	8	33	3523

@@ -9,7 +9,7 @@ fn main() {
     let frames = vac::rendered_to_video_frames(&rendered, doc.canvas.fps);
     let mut views = camera::track(&frames, 0);
     if std::env::var_os("TWO_PASS").is_some() {
-        let m = camera::mosaic(&frames, &views, [0, 0, 0]).unwrap();
+        let m = camera::mosaic(&frames, &views, [0, 0, 0], 1.0).unwrap();
         views = camera::refine_views(&frames, &m, &views);
     }
     let mut worst = 0f32;

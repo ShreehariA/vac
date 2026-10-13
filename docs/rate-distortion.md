@@ -75,15 +75,25 @@ motion graphics the readable source is far smaller than the H.264 it came
 from. For a test card full of noise it is barely smaller at the default
 quality, and the dial shows a 7× cheaper point that costs half a decibel.
 
+### `kenburns_watercolor.mp4` — source file 396 KB
+
+| quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
+|---|---|---|---|---|---|---|---|
+| 0 | 35,205 | 11.5× smaller | 135.6 | 26.81 | 0.9888 | 1 | 14 |
+| 25 | 45,759 | 8.9× smaller | 77.7 | 29.23 | 0.9909 | 1 | 69 |
+| 50 | 62,834 | 6.5× smaller | 60.9 | 30.29 | 0.9920 | 2 | 92 |
+| 75 | 81,339 | 5.0× smaller | 54.6 | 30.76 | 0.9927 | 2 | 103 |
+| 100 | 120,982 | 3.4× smaller | 49.9 | 31.15 | 0.9934 | 2 | 104 |
+
 ### `mandelbrot.mp4` — source file 704 KB
 
 | quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
 |---|---|---|---|---|---|---|---|
-| 0 | 19,859 | 36.3× smaller | 175.9 | 25.68 | 0.9862 | 1 | 5 |
-| 25 | 23,835 | 30.2× smaller | 163.1 | 26.01 | 0.9890 | 1 | 8 |
-| 50 | 32,530 | 22.2× smaller | 149.9 | 26.37 | 0.9897 | 1 | 16 |
-| 75 | 42,725 | 16.9× smaller | 143.4 | 26.57 | 0.9915 | 1 | 21 |
-| 100 | 67,617 | 10.7× smaller | 138.7 | 26.71 | 0.9920 | 1 | 48 |
+| 0 | 20,388 | 35.4× smaller | 174.1 | 25.72 | 0.9860 | 1 | 5 |
+| 25 | 24,781 | 29.1× smaller | 161.1 | 26.06 | 0.9885 | 1 | 9 |
+| 50 | 34,353 | 21.0× smaller | 149.3 | 26.39 | 0.9896 | 2 | 19 |
+| 75 | 45,938 | 15.7× smaller | 143.2 | 26.57 | 0.9912 | 2 | 31 |
+| 100 | 72,972 | 9.9× smaller | 139.4 | 26.69 | 0.9915 | 2 | 63 |
 
 ### `motion_graphics.mp4` — source file 12 KB
 
@@ -104,6 +114,16 @@ quality, and the dial shows a 7× cheaper point that costs half a decibel.
 | 50 | 688 | 21.0× smaller | 26.8 | 33.85 | 0.9847 | 4 | 4 |
 | 75 | 1,379 | 10.5× smaller | 28.8 | 33.53 | 0.9842 | 4 | 23 |
 | 100 | 3,905 | 3.7× smaller | 12.0 | 37.33 | 0.9889 | 4 | 72 |
+
+### `pan_portrait.mp4` — source file 76 KB
+
+| quality | `.vac` bytes | vs source | residual | PSNR dB | ink IoU | shapes | keyframes |
+|---|---|---|---|---|---|---|---|
+| 0 | 17,835 | 4.4× smaller | 6.6 | 39.93 | 0.9601 | 1 | 2 |
+| 25 | 21,995 | 3.5× smaller | 5.4 | 40.80 | 0.9636 | 1 | 22 |
+| 50 | 31,598 | 2.5× smaller | 3.7 | 42.47 | 0.9697 | 1 | 60 |
+| 75 | 41,774 | 1.9× smaller | 2.9 | 43.52 | 0.9737 | 1 | 66 |
+| 100 | 67,778 | 1.1× smaller | 2.2 | 44.72 | 0.9774 | 1 | 74 |
 
 ### `real_bouncing_ball.gif` — source file 85 KB
 

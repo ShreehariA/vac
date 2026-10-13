@@ -7,11 +7,16 @@
 # residual / psnr_db / ink_iou are the DISTORTION of its reconstruction.
 # source_bytes is the input video file, for scale.
 input	quality	vac_bytes	source_bytes	residual	psnr_db	ink_iou	shapes	keyframes
-mandelbrot.mp4	0	19859	721002	175.92	25.68	0.9862	1	5
-mandelbrot.mp4	25	23835	721002	163.11	26.01	0.9890	1	8
-mandelbrot.mp4	50	32530	721002	149.91	26.37	0.9897	1	16
-mandelbrot.mp4	75	42725	721002	143.37	26.57	0.9915	1	21
-mandelbrot.mp4	100	67617	721002	138.72	26.71	0.9920	1	48
+kenburns_watercolor.mp4	0	35205	405467	135.62	26.81	0.9888	1	14
+kenburns_watercolor.mp4	25	45759	405467	77.69	29.23	0.9909	1	69
+kenburns_watercolor.mp4	50	62834	405467	60.86	30.29	0.9920	2	92
+kenburns_watercolor.mp4	75	81339	405467	54.56	30.76	0.9927	2	103
+kenburns_watercolor.mp4	100	120982	405467	49.87	31.15	0.9934	2	104
+mandelbrot.mp4	0	20388	721002	174.14	25.72	0.9860	1	5
+mandelbrot.mp4	25	24781	721002	161.06	26.06	0.9885	1	9
+mandelbrot.mp4	50	34353	721002	149.30	26.39	0.9896	2	19
+mandelbrot.mp4	75	45938	721002	143.15	26.57	0.9912	2	31
+mandelbrot.mp4	100	72972	721002	139.42	26.69	0.9915	2	63
 motion_graphics.mp4	0	801	12672	4.33	41.76	0.9773	4	9
 motion_graphics.mp4	25	801	12672	4.33	41.76	0.9773	4	9
 motion_graphics.mp4	50	801	12672	4.33	41.76	0.9773	4	9
@@ -22,6 +27,11 @@ outlined_ui.mp4	25	688	14473	26.77	33.85	0.9847	4	4
 outlined_ui.mp4	50	688	14473	26.77	33.85	0.9847	4	4
 outlined_ui.mp4	75	1379	14473	28.84	33.53	0.9842	4	23
 outlined_ui.mp4	100	3905	14473	12.02	37.33	0.9889	4	72
+pan_portrait.mp4	0	17835	77819	6.61	39.93	0.9601	1	2
+pan_portrait.mp4	25	21995	77819	5.41	40.80	0.9636	1	22
+pan_portrait.mp4	50	31598	77819	3.68	42.47	0.9697	1	60
+pan_portrait.mp4	75	41774	77819	2.89	43.52	0.9737	1	66
+pan_portrait.mp4	100	67778	77819	2.19	44.72	0.9774	1	74
 real_bouncing_ball.gif	0	11200	86671	13.68	36.77	0.9834	2	41
 real_bouncing_ball.gif	25	11707	86671	3.91	42.21	0.9887	2	28
 real_bouncing_ball.gif	50	12913	86671	2.38	44.36	0.9900	2	35

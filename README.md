@@ -65,8 +65,10 @@ and stroke width are nudged to wherever the pixels agree best.
 | `vac_control.mp4` | VAC's own output, two moving balls | 46.6 dB | 0.971 |
 | `slide_in_card.mp4` | ffmpeg card sliding in and out | 44.6 dB | 0.994 |
 | `real_bouncing_ball.gif` | Wikimedia, shaded sphere and ball | 44.4 dB | 0.990 |
+| `pan_portrait.mp4` | slow camera pan over an AI-generated portrait | 42.5 dB | 0.970 |
 | `motion_graphics.mp4` | ffmpeg rectangles ping-ponging | 41.8 dB | 0.977 |
 | `outlined_ui.mp4` | ffmpeg outlines and a bordered card | 33.9 dB | 0.985 |
+| `kenburns_watercolor.mp4` | Ken Burns zoom into an AI-generated watercolour | 30.3 dB | 0.992 |
 | `real_newtons_cradle.gif` | Wikimedia photograph | 30.0 dB | 0.920 |
 | `real_loader.gif` | Wikimedia 32 px spinner | 28.3 dB | 0.864 |
 | `mandelbrot.mp4` | ffmpeg fractal zoom | 26.4 dB | 0.990 |
@@ -2021,3 +2023,26 @@ sprite.
 
 Every other clip is unchanged. `--plate camera` forces a camera, and
 `--plate raster` a still plate.
+
+### v1.10.1 — On photographs
+
+Two new corpus clips put the camera on photographic content. They're made
+with ffmpeg's `zoompan` from two of the AI-generated stills in the PAC
+matrices; the commands are in `docs/v0.4-capability-matrix.md`.
+
+| clip | camera | still plate | vectors |
+|---|---|---|---|
+| `kenburns_watercolor.mp4` (zoom 1 → 1.4) | **30.29 dB**, 63 KB, 2 shapes | 16.76 dB, 712 KB | 13.45 dB, 845 KB, 710 shapes |
+| `pan_portrait.mp4` (slow pan) | **42.47 dB**, 32 KB, 1 shape | 20.39 dB | 25.60 dB, 147 KB |
+
+A Ken Burns slideshow comes back as one JPEG and a couple of keyframes, at
+less than a tenth of the bytes the vectors spent failing to describe it.
+
+The Ken Burns zoom also showed where the mosaic was losing detail. A median
+over every frame let the wide, blurry first frames outvote the sharp
+zoomed-in ones. Each mosaic point is now read only from the frames that
+see it most magnified (scale within 10% of the largest), which is
++0.3 dB for free. A *denser* mosaic would keep more of a zoom's late detail,
+but it measured a poor trade at the default quality: +0.8 dB for +54% bytes
+on the Ken Burns clip, +0.2 dB for twice the bytes on the Mandelbrot. So it
+stays at one mosaic pixel per frame pixel.

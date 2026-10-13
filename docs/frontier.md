@@ -291,7 +291,11 @@ always true; only one of them was measurable.
   reconstruct twice as well as the vectors. `mandelbrot` 12.0 → **26.4
   dB**; the new `camera.vac` (a zoomed scene with a ball crossing it) comes
   back as exactly two keyframes and the ball, at 48.3 dB (43.2 dB through
-  MP4, against 22.4 dB for a still plate).
+  MP4, against 22.4 dB for a still plate). v1.10.1 added two photographic
+  camera clips to the corpus, a Ken Burns zoom (**30.3 dB**, 63 KB, against
+  13.5 dB in 845 KB of vectors) and a slow pan (**42.5 dB**). It also reads
+  each mosaic point from the frames that see it most magnified, rather than
+  letting a zoom's blurry early frames outvote its sharp late ones.
 
 ## Corpus, in full
 
@@ -302,11 +306,13 @@ From `benches/corpus-baseline.tsv`. Regenerate with
 |---|---|---|---|---|---|---|
 | `testsrc2.mp4` | 0.9951 | 0.9859 | 374.0 | 22.40 | 0.4% | 64 |
 | `slide_in_card.mp4` | 0.9940 | 0.9286 | 2.2 | 44.63 | 0.2% | 2 |
+| `kenburns_watercolor.mp4` | 0.9920 | 0.9899 | 60.9 | 30.29 | 0.6% | 2 |
 | `real_bouncing_ball.gif` | 0.9900 | 0.9858 | 2.4 | 44.36 | 0.6% | 2 |
-| `mandelbrot.mp4` | 0.9897 | 0.9843 | 149.9 | 26.37 | 0.5% | 1 |
+| `mandelbrot.mp4` | 0.9896 | 0.9842 | 149.3 | 26.39 | 0.6% | 2 |
 | `outlined_ui.mp4` | 0.9847 | 0.9689 | 26.8 | 33.85 | 1.0% | 4 |
 | `motion_graphics.mp4` | 0.9773 | 0.9565 | 4.3 | 41.76 | 1.5% | 4 |
 | `vac_control.mp4` | 0.9707 | 0.9607 | 1.4 | 46.58 | 0.0% | 3 |
+| `pan_portrait.mp4` | 0.9697 | 0.9580 | 3.7 | 42.47 | 1.5% | 1 |
 | `real_newtons_cradle.gif` | 0.9203 | 0.9047 | 65.8 | 29.95 | 5.6% | 47 |
 | `real_loader.gif` | 0.8641 | 0.8398 | 95.8 | 28.32 | 11.6% | 16 |
 | `real_pendulum.gif` | 0.6398 | 0.5409 | 334.8 | 22.88 | 5.0% | 27 |

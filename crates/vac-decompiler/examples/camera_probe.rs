@@ -16,7 +16,7 @@ fn main() {
     let sample: Vec<usize> = (0..frames.len()).step_by((frames.len() / 12).max(1)).collect();
     println!("support {:.3}", camera::support(&frames, 0, &views, &sample));
     let t1 = std::time::Instant::now();
-    let m = camera::mosaic(&frames, &views, [0, 0, 0]).expect("mosaic");
+    let m = camera::mosaic(&frames, &views, [0, 0, 0], 1.0).expect("mosaic");
     println!("mosaic {}x{} at ({}, {}) in {:.2?}", m.w, m.h, m.x, m.y, t1.elapsed());
     let mut total = 0f64;
     for (t, f) in frames.iter().enumerate() {
