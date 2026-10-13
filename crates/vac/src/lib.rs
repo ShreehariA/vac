@@ -100,7 +100,154 @@ pub fn read_video<P: AsRef<Path>>(path: P) -> Result<Document> {
 
 /// [`read_video`] with explicit decompiler [`DecompileOptions`].
 pub fn read_video_with<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Document> {
+    if let Some(long) = decompile_long(path.as_ref(), opts, false, segment_budget())? {
+        return Ok(long.document);
+    }
     decompile_frames(load_video_frames(path)?, opts)
+}
+
+/// MP4s with more pixels than this, over all their frames, are decompiled
+/// a segment at a time (v1.16). 150M pixels is 600 MB of RGBA: 3 s of
+/// 1080p, 5.4 s of 720p, every corpus clip several times over.
+const SEGMENT_MAX_PIXELS: u64 = 150_000_000;
+
+/// The segment budget: [`SEGMENT_MAX_PIXELS`], or `VAC_SEGMENT_PIXELS`
+/// when set (to try the segmented path on a short clip).
+fn segment_budget() -> u64 {
+    std::env::var("VAC_SEGMENT_PIXELS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SEGMENT_MAX_PIXELS)
+}
+
+/// A long clip, decompiled.
+struct Long {
+    document: Document,
+    /// Pooled from every segment's frames, when asked for.
+    fidelity: Option<Fidelity>,
+    frames: usize,
+    first: Chosen,
+    audited_out: usize,
+    refined: usize,
+    moved: usize,
+    sprites: usize,
+}
+
+/// Decompile a long MP4 a segment at a time (v1.16), or `None` when the clip
+/// is short enough to hold whole. Through v1.15 every frame was decoded
+/// and held at once, and the search held copies of them: a minute of 720p
+/// would not fit. A first pass decodes the clip at thumbnail size and
+/// finds its cuts; shots too long for the budget are split into equal
+/// segments; then the full-size frames are streamed, and each segment is
+/// decompiled by the whole pipeline as soon as its last frame arrives and
+/// dropped. The segments' scenes are concatenated, each exactly as long as
+/// its frames. Movement across a forced segment boundary restarts there,
+/// which is the price of a bounded memory.
+fn decompile_long(path: &Path, opts: &DecompileOptions, measured: bool, budget: u64) -> Result<Option<Long>> {
+    let is_mp4 = matches!(video_format(path), Ok(VideoFormat::Mp4));
+    if !is_mp4 {
+        return Ok(None);
+    }
+    let info = vac_decompiler::frames_mp4::probe_mp4(path)?;
+    let per_frame = (info.width as u64 * info.height as u64).max(1);
+    match info.frames {
+        Some(n) if n * per_frame <= budget => return Ok(None),
+        _ => {}
+    }
+    // The first look, one frame at a time: the clip's frame count, each
+    // frame's step from the one before (where the cuts are), and the
+    // metric's ink reference — the whole clip's modal colour, which every
+    // segment is then measured against, as a clip held whole would be.
+    let mut steps: Vec<f64> = Vec::new();
+    let mut modal = vac_metrics::ModalBackground::default();
+    let mut prev: Option<VideoFrame> = None;
+    let mut n = 0usize;
+    for f in vac_decompiler::frames_mp4::stream_mp4(path, None)? {
+        let f = f?;
+        modal.add(&vac_metrics::FrameRef::new(f.width, f.height, &f.pixels));
+        if let Some(p) = &prev {
+            steps.push(frame_step(p, &f));
+        }
+        prev = Some(f);
+        n += 1;
+    }
+    drop(prev);
+    if n as u64 * per_frame <= budget {
+        return Ok(None);
+    }
+    let ink = modal.finish();
+    let max_frames = ((budget / per_frame) as usize).max(MIN_SHOT_FRAMES * 2);
+    let mut edges = vec![0usize];
+    edges.extend(if opts.shots { cuts_from_steps(&steps) } else { Vec::new() });
+    edges.push(n);
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    for w in edges.windows(2) {
+        let len = w[1] - w[0];
+        let parts = len.div_ceil(max_frames);
+        for p in 0..parts {
+            segments.push((w[0] + len * p / parts, w[0] + len * (p + 1) / parts));
+        }
+    }
+    let fps = ((info.fps_numer as f64 / info.fps_denom.max(1) as f64).round() as u32).max(1);
+    let mut scenes: Vec<Scene> = Vec::new();
+    let mut scores: Vec<vac_metrics::FrameScore> = Vec::new();
+    let (mut first, mut audited_out, mut refined, mut moved, mut sprites) = (None, 0, 0, 0, 0);
+    let mut stream = vac_decompiler::frames_mp4::stream_mp4(path, None)?;
+    for &(a, b) in &segments {
+        let mut shot: Vec<VideoFrame> = Vec::with_capacity(b - a);
+        for _ in a..b {
+            match stream.next() {
+                Some(f) => shot.push(f?),
+                None => break,
+            }
+        }
+        if shot.is_empty() {
+            break;
+        }
+        let chosen = decompile_chosen(&shot, opts)?;
+        let mut doc = chosen.document.clone();
+        if doc.scenes.len() == 1 {
+            // ceil(frames * 1000 / fps): exactly this segment's frames.
+            doc.scenes[0].duration_ms = ((shot.len() as u64 * 1000).div_ceil(fps as u64)) as u32;
+        }
+        if measured {
+            let fid = measure_against(&shot, &doc, ink, &CompareOptions::default())?;
+            scores.extend(fid.frames);
+        }
+        audited_out += chosen.audited_out;
+        refined += chosen.refined;
+        moved += chosen.moved;
+        sprites += chosen.sprites;
+        scenes.extend(doc.scenes);
+        if first.is_none() {
+            first = Some(chosen);
+        }
+    }
+    for (k, scene) in scenes.iter_mut().enumerate() {
+        scene.name = format!("shot_{}", k + 1);
+    }
+    let Some(first) = first else {
+        return Err(Error::Decompile(DecompileError::Other("no frames decoded from MP4".into())));
+    };
+    let document = Document {
+        canvas: Canvas {
+            width: info.width,
+            height: info.height,
+            fps,
+        },
+        scenes,
+    };
+    let frames = scores.len().max(n);
+    Ok(Some(Long {
+        document,
+        fidelity: if measured { Some(vac_metrics::aggregate(scores)?) } else { None },
+        frames,
+        first,
+        audited_out,
+        refined,
+        moved,
+        sprites,
+    }))
 }
 
 /// Render a [`Document`] to a video file on disk.
@@ -623,12 +770,17 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
         return decompile_shot(frames, opts);
     }
     // v1.12: decompile each shot on its own and the clip as one, side by
-    // side, and keep whichever reconstructs better.
+    // side, and keep whichever reconstructs better. The clip as one is a
+    // safety net against a cut that is not one, and on a long clip with
+    // many cuts it is by far the most expensive candidate there is — a
+    // 12 s, three-shot 720p clip had not finished it after 25 minutes — so
+    // past a few cuts or a few hundred frames the cuts are trusted.
     let mut edges = vec![0usize];
     edges.extend(&cuts);
     edges.push(frames.len());
-    let (whole, parts): (Result<Chosen>, Vec<Result<Chosen>>) = std::thread::scope(|scope| {
-        let whole = scope.spawn(|| decompile_shot(frames, opts));
+    let check_whole = cuts.len() <= WHOLE_CHECK_MAX_CUTS && frames.len() <= WHOLE_CHECK_MAX_FRAMES;
+    let (whole, parts): (Option<Result<Chosen>>, Vec<Result<Chosen>>) = std::thread::scope(|scope| {
+        let whole = check_whole.then(|| scope.spawn(|| decompile_shot(frames, opts)));
         let parts: Vec<_> = edges
             .windows(2)
             .map(|w| {
@@ -637,23 +789,25 @@ fn decompile_cuts(frames: &[VideoFrame], opts: &DecompileOptions) -> Result<Chos
             })
             .collect();
         (
-            whole.join().expect("whole-clip decompile panicked"),
+            whole.map(|h| h.join().expect("whole-clip decompile panicked")),
             parts.into_iter().map(|h| h.join().expect("shot decompile panicked")).collect(),
         )
     });
-    let whole = whole?;
     let parts: Vec<Chosen> = parts.into_iter().collect::<Result<_>>()?;
     let merged = merge_shots(frames, &edges, parts.iter().map(|c| &c.document));
     let fid = measure(frames, &merged)?;
-    let whole_fid = match &whole.fidelity {
-        Some(f) => f.clone(),
-        None => measure(frames, &whole.document)?,
-    };
-    if !reconstructs_better(&fid, &whole_fid) {
-        return Ok(Chosen {
-            fidelity: Some(whole_fid),
-            ..whole
-        });
+    if let Some(whole) = whole {
+        let whole = whole?;
+        let whole_fid = match &whole.fidelity {
+            Some(f) => f.clone(),
+            None => measure(frames, &whole.document)?,
+        };
+        if !reconstructs_better(&fid, &whole_fid) {
+            return Ok(Chosen {
+                fidelity: Some(whole_fid),
+                ..whole
+            });
+        }
     }
     let first = &parts[0];
     Ok(Chosen {
@@ -678,6 +832,10 @@ const CUT_FLOOR_MSE: f64 = 400.0;
 /// No shot shorter than this: a flash is two cuts a frame apart, not a
 /// shot.
 const MIN_SHOT_FRAMES: usize = 6;
+/// The clip-as-one-shot check runs for at most this many cut candidates...
+const WHOLE_CHECK_MAX_CUTS: usize = 3;
+/// ...in a clip of at most this many frames.
+const WHOLE_CHECK_MAX_FRAMES: usize = 300;
 
 /// Where the clip may cut to a new shot (v1.12): frames that differ from
 /// the frame before them far more than the clip's frames typically differ
@@ -691,19 +849,32 @@ fn cut_candidates(frames: &[VideoFrame]) -> Vec<usize> {
     if frames.iter().any(|f| f.width != w || f.height != h) {
         return Vec::new();
     }
-    let step = |a: &VideoFrame, b: &VideoFrame| -> f64 {
-        let (mut s, mut n) = (0f64, 0f64);
-        for i in (0..(w * h) as usize).step_by(3) {
-            for c in 0..3 {
-                let d = a.pixels[i * 4 + c] as f64 - b.pixels[i * 4 + c] as f64;
-                s += d * d;
-            }
-            n += 3.0;
+    let diffs: Vec<f64> = (1..frames.len()).map(|i| frame_step(&frames[i - 1], &frames[i])).collect();
+    cuts_from_steps(&diffs)
+}
+
+/// How far a frame moved from the one before it: per-channel mean squared
+/// difference over every third pixel.
+fn frame_step(a: &VideoFrame, b: &VideoFrame) -> f64 {
+    let (mut s, mut n) = (0f64, 0f64);
+    for i in (0..(a.width * a.height) as usize).step_by(3) {
+        for c in 0..3 {
+            let d = a.pixels[i * 4 + c] as f64 - b.pixels[i * 4 + c] as f64;
+            s += d * d;
         }
-        s / n.max(1.0)
-    };
-    let diffs: Vec<f64> = (1..frames.len()).map(|i| step(&frames[i - 1], &frames[i])).collect();
-    let mut sorted = diffs.clone();
+        n += 3.0;
+    }
+    s / n.max(1.0)
+}
+
+/// [`cut_candidates`] from the steps between consecutive frames
+/// (`diffs[k]` is frame `k + 1` against frame `k`).
+fn cuts_from_steps(diffs: &[f64]) -> Vec<usize> {
+    let len = diffs.len() + 1;
+    if len < 2 * MIN_SHOT_FRAMES || diffs.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted = diffs.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
     let typical = sorted[sorted.len() / 2];
     let bar = (CUT_RATIO * typical).max(CUT_FLOOR_MSE);
@@ -711,7 +882,7 @@ fn cut_candidates(frames: &[VideoFrame]) -> Vec<usize> {
     for (k, &d) in diffs.iter().enumerate() {
         let i = k + 1;
         let since = cuts.last().copied().unwrap_or(0);
-        if d >= bar && i - since >= MIN_SHOT_FRAMES && frames.len() - i >= MIN_SHOT_FRAMES {
+        if d >= bar && i - since >= MIN_SHOT_FRAMES && len - i >= MIN_SHOT_FRAMES {
             cuts.push(i);
         }
     }
@@ -2715,19 +2886,25 @@ pub fn measure_with(
     if original.is_empty() {
         return Err(MetricError::Empty.into());
     }
-    let count = vac_compiler::render::frame_count(doc);
-    let idx = aligned_indices(original, count, doc.canvas.fps);
     // The ink reference is measured from the source frames themselves,
     // by `vac-metrics`, and deliberately *not* by calling the
     // decompiler's own `estimate_background`. If the metric shared the
     // pipeline's background rule, tuning that rule would silently move
     // every committed baseline and "the decompiler improved" would be
     // indistinguishable from "the ruler moved".
+    let bg = ink_background(original);
+    measure_against(original, doc, bg, opts)
+}
+
+/// [`measure_with`] against a given ink reference — the whole clip's,
+/// when the clip is measured a segment at a time (v1.16).
+fn measure_against(original: &[VideoFrame], doc: &Document, bg: Rgb, opts: &CompareOptions) -> Result<Fidelity> {
+    let count = vac_compiler::render::frame_count(doc);
+    let idx = aligned_indices(original, count, doc.canvas.fps);
     let src: Vec<vac_metrics::FrameRef> = original
         .iter()
         .map(|f| vac_metrics::FrameRef::new(f.width, f.height, &f.pixels))
         .collect();
-    let bg = vac_metrics::modal_background(&src);
     // Which source frames each rendered frame stands for. Rendering
     // streams frame by frame and each rendered frame is scored against
     // its source frames and dropped — the reconstruction is never held
@@ -2836,6 +3013,27 @@ pub struct Verification {
 /// Decompile a video, re-render the result, and score it against the
 /// source. The full round trip, measured.
 pub fn verify<P: AsRef<Path>>(path: P, opts: &DecompileOptions) -> Result<Verification> {
+    verify_with_budget(path, opts, segment_budget())
+}
+
+/// [`verify`] with an explicit segment budget (v1.16): an MP4 with more
+/// pixels than `segment_pixels` over all its frames is decompiled and
+/// measured a segment at a time, holding one segment's frames at once.
+pub fn verify_with_budget<P: AsRef<Path>>(path: P, opts: &DecompileOptions, segment_pixels: u64) -> Result<Verification> {
+    if let Some(long) = decompile_long(path.as_ref(), opts, true, segment_pixels)? {
+        return Ok(summarise(
+            long.document,
+            long.fidelity.expect("measured"),
+            long.frames,
+            long.first.segmentation,
+            long.first.background,
+            long.first.plate,
+            long.audited_out,
+            long.refined,
+            long.moved,
+            long.sprites,
+        ));
+    }
     let frames = load_video_frames(path)?;
     let source_frames = frames.len();
     let chosen = decompile_chosen(&frames, opts)?;

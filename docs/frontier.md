@@ -1,7 +1,7 @@
 # The frontier — what VAC gets wrong, measured
 
 Every number here was produced by `vac verify` on 2026-08-22 at v0.9 (corpus
-table re-measured 2026-10-13 at v1.15, default quality 50) and is
+table re-measured 2026-10-13 at v1.16, default quality 50) and is
 locked by a test in `crates/vac/tests/frontier.rs` or
 `benches/corpus-baseline.tsv`. Rows leave this file when they are fixed, not
 when they become inconvenient.
@@ -79,19 +79,20 @@ always true; only one of them was measurable.
 
 ---
 
-## 3. Scale: long HD clips
+## 3. Scale: one long shot
 
-**Status: open, much reduced. Measured on a 3 s, 1280×720 camera pan (made
-like `pan_portrait.mp4`, at 720p).**
+**Status: open, narrowed to forced splits.**
 
-v1.14 runs the measured search on a smaller copy of any clip over 500k
-pixels and replays only its decision at full size. It also caps camera
-tracking at ~700 px and drops the mosaic's float copies of the frames. The
-3 s pan went from 64 s and 2.44 GB to **33 s and 1.66 GB**, and reconstructs
-better (44.3 → 44.7 dB). What remains is length: every frame of the clip
-is still decoded and held at once, and the full-size passes keep a few
-copies of it. A minute of 720p would still not fit. Decompiling shot by
-shot, holding only the shot's frames, is the next step.
+v1.14 searches HD frames small, and v1.16 streams any MP4 over 150M pixels
+a segment at a time, with segments at the clip's cuts and the clip held
+whole nowhere. 12 s of 720p takes 188 s in 1.75 GB; held whole, it had not
+finished after 25 minutes. What remains is a single shot longer than the
+budget allows (5.4 s of 720p). It is split into equal slices that are
+decompiled independently, so a movement crossing a slice boundary restarts
+there. In a deliberately tiny-budget test (1 s slices) the sliding card
+lost 9 dB to each slice's static layer reading the slow card as scenery.
+Overlapping the slices, or carrying the static layer and tracks across them,
+would close this.
 
 ---
 
@@ -359,6 +360,15 @@ shot, holding only the shot's frames, is the next step.
   re-measured without turns and stays `rotate()`-free. The new corpus clip
   `roll_watercolor` (a photo rolling 26°) went 18.49 → **33.25 dB**, 588
   shapes → one plate.
+
+- **v1.16 — long clips, a segment at a time.** An MP4 over 150M pixels is
+  scanned once (frame count, the steps between frames where the cuts are,
+  the clip's modal colour for the metric) and then streamed. Each segment, a
+  shot or a slice of a long one, is decompiled by the whole pipeline and
+  dropped. 12 s of three-shot 720p: **188 s and 1.75 GB**, where holding it
+  whole had not finished in 25 minutes. Loading no longer buffers the clip
+  twice. The test requires a shot-at-a-time decompile of `shots.vac` to match
+  it held whole exactly.
 
 ## Corpus, in full
 

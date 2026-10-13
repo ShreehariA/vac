@@ -6,7 +6,7 @@
 
 ---
 
-## Where VAC is today (v1.15)
+## Where VAC is today (v1.16)
 
 VAC decompiles a video into `.vac` source: shapes, fills, strokes and
 keyframed motion. It compiles that source back to video and measures, in
@@ -2274,3 +2274,48 @@ A view is now `scale · R(angle) · q + offset`:
 
 The other camera clips moved by hundredths of a dB, since every camera is
 now tracked with turns available before the angle is judged.
+
+## v1.16 — Long clips, a segment at a time
+
+Through v1.15 every frame of a clip was decoded and held at once, and the
+measured search held copies of them. A minute of 720p is about 6.6 GB of
+raw frames before VAC does anything.
+
+v1.16 streams any MP4 over a budget of 150M pixels in total (5.4 s of 720p,
+3 s of 1080p):
+
+1. **One pass to look.** Frames are read off ffmpeg's pipe one at a time
+   and dropped. The pass keeps only the frame count, each frame's step from
+   the one before (where the cuts are, by exactly the numbers the in-memory
+   cut detector uses), and the metric's ink reference, i.e. the whole clip's
+   modal colour, accumulated frame by frame.
+2. **Segments.** The cuts split the clip into shots, and any shot too long
+   for the budget is split into equal slices.
+3. **One pass to decompile.** The frames are streamed again. Each segment
+   is decompiled by the whole pipeline (fades, camera, audit, everything)
+   as soon as its last frame arrives, measured against the clip's ink
+   reference, and dropped.
+
+| 12 s of 720p: a Ken Burns zoom, a pan and a roll, cut together | |
+|---|---|
+| held whole, as v1.15 would | had not finished after **25 minutes** |
+| v1.16, a segment at a time | **188 s**, peak **1.75 GB**, 38.5 dB, one camera plate per shot |
+
+Two fixes came with it. `load_mp4` buffered the whole decoded clip and then
+copied every frame out of it, so loading alone needed twice the clip's
+memory; frames now come straight off the pipe. And the single-scene check
+that guards a split against false cuts was the slow part of the in-memory
+attempt, because it decompiles a multi-picture clip as one shot. It now
+runs only up to 3 cuts and 300 frames, which is all of the corpus; past
+that, the deliberately conservative cut test (ten times the clip's
+typical frame step) is trusted.
+
+The test compiles `shots.vac` to MP4 and decompiles it twice: held whole,
+and with a budget that streams it but fits each shot. The two must agree
+exactly (same scenes, same source bytes, same score). Measuring segments
+against their own ink reference instead of the clip's fails it. One cost
+remains: a forced split inside a long shot restarts any movement across the
+boundary. In a deliberately tiny budget test (1-second segments) the
+sliding card lost 9 dB, because each slice's static layer read the slow
+card as scenery. At the real budget, forced splits only start past 5.4 s
+of continuous 720p shot.

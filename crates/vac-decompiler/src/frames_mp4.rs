@@ -24,55 +24,157 @@ use crate::frames::VideoFrame;
 use crate::DecompileError;
 
 /// Decode every frame of an MP4 file into [`VideoFrame`]s.
+///
+/// Frames are read off ffmpeg's pipe one at a time (v1.16): through v1.15
+/// the whole decoded clip was buffered and then copied frame by frame,
+/// so loading alone needed twice the clip's memory.
 pub fn load_mp4(path: &Path) -> Result<Vec<VideoFrame>, DecompileError> {
-    let meta = ffprobe(path)?;
-    let raw = run_ffmpeg_rawvideo(path)?;
+    let frames: Vec<VideoFrame> = stream_mp4(path, None)?.collect::<Result<_, _>>()?;
+    if frames.is_empty() {
+        return Err(DecompileError::Other("no frames decoded from MP4".into()));
+    }
+    Ok(frames)
+}
 
-    let frame_size = (meta.width as usize) * (meta.height as usize) * 4;
-    if frame_size == 0 {
+/// What a clip is, before decoding it: size and frame rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mp4Info {
+    pub width: u32,
+    pub height: u32,
+    pub fps_numer: u64,
+    pub fps_denom: u64,
+    /// The container's frame count, when it records one.
+    pub frames: Option<u64>,
+}
+
+/// Probe a clip's size and frame rate.
+pub fn probe_mp4(path: &Path) -> Result<Mp4Info, DecompileError> {
+    let m = ffprobe(path)?;
+    Ok(Mp4Info {
+        width: m.width,
+        height: m.height,
+        fps_numer: m.fps_numer,
+        fps_denom: m.fps_denom,
+        frames: m.nb_frames,
+    })
+}
+
+/// The frames of an MP4, decoded one at a time as they are read (v1.16) —
+/// optionally shrunk by ffmpeg to `width` pixels wide (height following
+/// the aspect, kept even) for a cheap first look. Each frame's `delay_ms`
+/// comes from the rational frame rate, exactly as [`load_mp4`]'s always
+/// has.
+pub fn stream_mp4(path: &Path, width: Option<u32>) -> Result<Mp4Stream, DecompileError> {
+    let meta = ffprobe(path)?;
+    let (w, h) = match width {
+        Some(tw) if tw < meta.width => {
+            let th = ((meta.height as u64 * tw as u64 / meta.width.max(1) as u64) as u32 / 2 * 2).max(2);
+            (tw / 2 * 2, th)
+        }
+        _ => (meta.width, meta.height),
+    };
+    if w == 0 || h == 0 {
         return Err(DecompileError::Other(format!(
             "ffprobe reported zero-area video: {}x{}",
             meta.width, meta.height
         )));
     }
-    if raw.len() % frame_size != 0 {
-        return Err(DecompileError::Other(format!(
-            "ffmpeg returned {} bytes, not a multiple of frame size {}",
-            raw.len(),
-            frame_size
-        )));
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-loglevel", "error", "-i"]).arg(path);
+    if (w, h) != (meta.width, meta.height) {
+        cmd.args(["-vf", &format!("scale={w}:{h}:flags=area")]);
     }
-    let n_frames = raw.len() / frame_size;
-    if n_frames == 0 {
-        return Err(DecompileError::Other("no frames decoded from MP4".into()));
-    }
+    cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-vsync", "passthrough", "-"]);
+    let child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            DecompileError::Other(format!(
+                "failed to spawn `ffmpeg` ({e}). Install FFmpeg and ensure it's on PATH."
+            ))
+        })?;
+    Ok(Mp4Stream {
+        child,
+        width: w,
+        height: h,
+        fps_numer: meta.fps_numer.max(1),
+        fps_denom: meta.fps_denom.max(1),
+        index: 0,
+        done: false,
+    })
+}
 
-    // Compute per-frame `delay_ms` from the rational FPS so that
-    // accumulated `t_ms` lands on the exact wall-clock time of each
-    // frame, not on integer-rounded multiples of (1000 / fps).
-    //
-    // For 30fps the sequence becomes 33, 34, 33, 33, 34, 33, … —
-    // averaging exactly 33.33ms — instead of a flat 33ms that would
-    // drift the apex of a 3-second animation by 15ms.
-    let denom = meta.fps_denom.max(1);
-    let numer = meta.fps_numer.max(1);
-    let stamp =
-        |i: u64| -> u32 { ((i.saturating_mul(1000).saturating_mul(denom)) / numer) as u32 };
+/// See [`stream_mp4`].
+pub struct Mp4Stream {
+    child: std::process::Child,
+    width: u32,
+    height: u32,
+    fps_numer: u64,
+    fps_denom: u64,
+    index: u64,
+    done: bool,
+}
 
-    let mut frames = Vec::with_capacity(n_frames);
-    for i in 0..n_frames {
-        let start = i * frame_size;
-        let this_t = stamp(i as u64);
-        let next_t = stamp(i as u64 + 1);
-        let delay = next_t.saturating_sub(this_t).max(1);
-        frames.push(VideoFrame {
-            width: meta.width,
-            height: meta.height,
-            pixels: raw[start..start + frame_size].to_vec(),
+impl Iterator for Mp4Stream {
+    type Item = Result<VideoFrame, DecompileError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::io::Read;
+        if self.done {
+            return None;
+        }
+        let size = (self.width as usize) * (self.height as usize) * 4;
+        let mut pixels = vec![0u8; size];
+        let out = self.child.stdout.as_mut().expect("piped stdout");
+        let mut filled = 0usize;
+        while filled < size {
+            match out.read(&mut pixels[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(DecompileError::Io(e)));
+                }
+            }
+        }
+        if filled < size {
+            self.done = true;
+            let status = self.child.wait();
+            if filled > 0 {
+                return Some(Err(DecompileError::Other(format!(
+                    "ffmpeg ended mid-frame: {filled} of {size} bytes"
+                ))));
+            }
+            return match status {
+                Ok(s) if s.success() => None,
+                Ok(s) => Some(Err(DecompileError::Other(format!("ffmpeg decode failed (exit {s})")))),
+                Err(e) => Some(Err(DecompileError::Io(e))),
+            };
+        }
+        // `delay_ms` from the rational frame rate, so accumulated time
+        // lands on each frame's exact wall-clock time: 33, 34, 33, 33, 34
+        // … at 30 fps, not a flat 33 that drifts.
+        let stamp = |i: u64| -> u64 { i.saturating_mul(1000).saturating_mul(self.fps_denom) / self.fps_numer };
+        let delay = (stamp(self.index + 1) - stamp(self.index)).max(1) as u32;
+        self.index += 1;
+        Some(Ok(VideoFrame {
+            width: self.width,
+            height: self.height,
+            pixels,
             delay_ms: delay,
-        });
+        }))
     }
-    Ok(frames)
+}
+
+impl Drop for Mp4Stream {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 /// `true` if both `ffmpeg` and `ffprobe` are on PATH.  Used by tests to
@@ -100,6 +202,7 @@ struct Mp4Meta {
     height: u32,
     fps_numer: u64,
     fps_denom: u64,
+    nb_frames: Option<u64>,
 }
 
 fn ffprobe(path: &Path) -> Result<Mp4Meta, DecompileError> {
@@ -110,7 +213,7 @@ fn ffprobe(path: &Path) -> Result<Mp4Meta, DecompileError> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,r_frame_rate,avg_frame_rate",
+            "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames",
             "-of",
             "default=noprint_wrappers=1",
         ])
@@ -137,6 +240,7 @@ fn ffprobe(path: &Path) -> Result<Mp4Meta, DecompileError> {
     let mut height: Option<u32> = None;
     let mut r_rate: Option<(u64, u64)> = None;
     let mut avg_rate: Option<(u64, u64)> = None;
+    let mut nb_frames: Option<u64> = None;
     for line in text.lines() {
         if let Some((k, v)) = line.split_once('=') {
             match k.trim() {
@@ -144,6 +248,7 @@ fn ffprobe(path: &Path) -> Result<Mp4Meta, DecompileError> {
                 "height" => height = v.trim().parse().ok(),
                 "r_frame_rate" => r_rate = parse_rate(v.trim()),
                 "avg_frame_rate" => avg_rate = parse_rate(v.trim()),
+                "nb_frames" => nb_frames = v.trim().parse().ok(),
                 _ => {}
             }
         }
@@ -159,6 +264,7 @@ fn ffprobe(path: &Path) -> Result<Mp4Meta, DecompileError> {
         height,
         fps_numer,
         fps_denom,
+        nb_frames,
     })
 }
 
@@ -173,38 +279,4 @@ fn parse_rate(s: &str) -> Option<(u64, u64)> {
     } else {
         Some((s.parse().ok()?, 1))
     }
-}
-
-fn run_ffmpeg_rawvideo(path: &Path) -> Result<Vec<u8>, DecompileError> {
-    let out = Command::new("ffmpeg")
-        .args(["-loglevel", "error", "-i"])
-        .arg(path)
-        .args([
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            // Forbid implicit colour-space conversion that could happen
-            // with -vsync settings; we want exactly one rawvideo frame per
-            // input frame.
-            "-vsync",
-            "passthrough",
-            "-",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| {
-            DecompileError::Other(format!(
-                "failed to spawn `ffmpeg` ({e}). Install FFmpeg and ensure it's on PATH."
-            ))
-        })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(DecompileError::Other(format!(
-            "ffmpeg decode failed (exit {}): {stderr}",
-            out.status
-        )));
-    }
-    Ok(out.stdout)
 }

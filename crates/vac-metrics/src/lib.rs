@@ -380,37 +380,57 @@ pub fn compare_frame(
 /// Ties break toward the lower packed RGB value so the result is
 /// deterministic regardless of hash iteration order.
 pub fn modal_background(frames: &[FrameRef]) -> Rgb {
-    let mut hist: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
-    let mut transparent: u64 = 0;
+    let mut m = ModalBackground::default();
     for f in frames {
+        m.add(f);
+    }
+    m.finish()
+}
+
+/// [`modal_background`], one frame at a time (v1.16): a clip decompiled a
+/// segment at a time is measured against the same reference a clip held
+/// whole would be, without holding it whole.
+#[derive(Debug, Clone, Default)]
+pub struct ModalBackground {
+    hist: std::collections::HashMap<u32, u64>,
+    transparent: u64,
+}
+
+impl ModalBackground {
+    pub fn add(&mut self, f: &FrameRef) {
         let n = f.pixel_count().min(f.rgba.len() / 4);
         for i in 0..n {
             let px = &f.rgba[i * 4..i * 4 + 4];
             if px[3] < MIN_OPAQUE_ALPHA {
-                transparent += 1;
+                self.transparent += 1;
                 continue;
             }
             let key = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
-            *hist.entry(key).or_insert(0) += 1;
+            *self.hist.entry(key).or_insert(0) += 1;
         }
     }
-    let best = hist
-        .iter()
-        .fold(None::<(u32, u64)>, |acc, (&k, &v)| match acc {
-            Some((bk, bv)) if bv > v || (bv == v && bk <= k) => Some((bk, bv)),
-            _ => Some((k, v)),
-        });
-    // Transparency is a colour too, and votes like one (v0.13). When it
-    // wins, the canvas *is* transparent and the reference is the colour a
-    // viewer composites it onto, white. Before, transparent pixels were
-    // simply skipped, so on a mostly transparent clip the vote went to the
-    // dominant *foreground* colour — on `real_loader` the tick grey — and
-    // "ink" came to mean only the pixels that differed from the ticks.
-    match best {
-        Some((_, v)) if transparent >= v => Rgb::new(255, 255, 255),
-        Some((k, _)) => Rgb::new((k >> 16) as u8, (k >> 8) as u8, k as u8),
-        None if transparent > 0 => Rgb::new(255, 255, 255),
-        None => Rgb::new(0, 0, 0),
+
+    pub fn finish(&self) -> Rgb {
+        let best = self
+            .hist
+            .iter()
+            .fold(None::<(u32, u64)>, |acc, (&k, &v)| match acc {
+                Some((bk, bv)) if bv > v || (bv == v && bk <= k) => Some((bk, bv)),
+                _ => Some((k, v)),
+            });
+        // Transparency is a colour too, and votes like one (v0.13). When it
+        // wins, the canvas *is* transparent and the reference is the colour
+        // a viewer composites it onto, white. Before, transparent pixels
+        // were simply skipped, so on a mostly transparent clip the vote went
+        // to the dominant *foreground* colour — on `real_loader` the tick
+        // grey — and "ink" came to mean only the pixels that differed from
+        // the ticks.
+        match best {
+            Some((_, v)) if self.transparent >= v => Rgb::new(255, 255, 255),
+            Some((k, _)) => Rgb::new((k >> 16) as u8, (k >> 8) as u8, k as u8),
+            None if self.transparent > 0 => Rgb::new(255, 255, 255),
+            None => Rgb::new(0, 0, 0),
+        }
     }
 }
 
